@@ -1,0 +1,2 @@
+# keep LF everywhere so shell scripts and Go files are identical on Windows and Linux
+* text=auto eol=lf

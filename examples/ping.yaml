@@ -1,0 +1,23 @@
+# 单接口压测：先启动内置被测服务 `tidegate testserver`，再运行
+#   tidegate run examples/ping.yaml --out result.json --csv result.csv
+version: 1
+name: 单接口压测（/ping）
+variables:
+  host: http://127.0.0.1:18080
+steps:
+  - id: ping
+    name: 心跳
+    request:
+      method: GET
+      url: "{{host}}/ping"
+    assert:
+      - type: status
+        equals: 200
+load:
+  mode: vus            # 闭环：维持固定数量的虚拟用户
+  stages:
+    - duration: 2s     # 2 秒内从 0 爬升到 50 个虚拟用户
+      target: 50
+    - duration: 10s    # 保持 50 个虚拟用户 10 秒
+      target: 50
+  graceful_stop: 3s

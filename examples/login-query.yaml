@@ -1,0 +1,63 @@
+# 登录后查询的多步骤场景：登录拿到 token，带着 token 查询列表。
+# 先启动内置被测服务 `tidegate testserver`，再运行
+#   tidegate run examples/login-query.yaml
+version: 1
+name: 登录后查询
+variables:
+  host: http://127.0.0.1:18080
+data:
+  - name: users
+    file: users.csv          # 相对本文件的路径，首行是列名
+    mode: sequential         # 每次迭代按顺序取下一行
+steps:
+  - id: login
+    name: 登录
+    request:
+      method: POST
+      url: "{{host}}/login"
+      body:
+        type: json
+        content: '{"user":"{{users.name}}","pwd":"{{users.pwd}}"}'
+    extract:
+      - name: token          # 后续步骤用 {{token}} 引用
+        from: jsonpath
+        expr: $.data.token
+    assert:
+      - type: status
+        equals: 200
+      - type: jsonpath
+        expr: $.code
+        equals: 0
+    think:
+      type: uniform
+      min: 50ms
+      max: 150ms
+  - id: query
+    name: 查询列表
+    request:
+      method: GET
+      url: "{{host}}/items"
+      query:
+        page: 1
+        trace: "{{$uuid}}"
+      headers:
+        Authorization: "Bearer {{token}}"
+    assert:
+      - type: status
+        equals: 200
+      - type: jsonpath
+        expr: "$.data.items[0].name"
+        equals: apple
+      - type: duration
+        max: 500ms
+    think:
+      type: fixed
+      min: 100ms
+load:
+  mode: vus
+  stages:
+    - duration: 3s
+      target: 20
+    - duration: 10s
+      target: 20
+  graceful_stop: 3s

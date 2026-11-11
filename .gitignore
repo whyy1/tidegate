@@ -1,0 +1,31 @@
+# build output
+/bin/
+/dist/
+*.exe
+*.test
+*.out
+
+# benchmark tools and raw output
+/bench/.tools/
+/bench/out/
+
+# frontend
+node_modules/
+/web/dist/
+
+# runtime data
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# editor and OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# only product and usage documents are published; everything else stays local
+/docs/*
+!/docs/product-plan.md
+/bench/RESULTS.md
