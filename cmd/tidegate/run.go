@@ -15,8 +15,10 @@ import (
 	"time"
 
 	"tidegate/internal/engine"
+	"tidegate/internal/exporter"
 	"tidegate/internal/metrics"
 	"tidegate/internal/scenario"
+	"tidegate/internal/store"
 )
 
 // resultFile is the --out JSON document.
@@ -35,6 +37,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("run", stderr)
 	out := fs.String("out", "", "写出 JSON 结果")
 	csvPath := fs.String("csv", "", "写出每秒 CSV")
+	htmlPath := fs.String("html", "", "写出独立 HTML 报告")
 	quiet := fs.Bool("quiet", false, "不输出每秒摘要")
 	client := fs.String("client", string(engine.ClientFast), "HTTP 客户端：fast 或 std")
 	startProfiles := profileFlags(fs)
@@ -44,7 +47,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return flagError(err)
 	}
 	if len(pos) != 1 {
-		fmt.Fprintln(stderr, "用法：tidegate run <场景文件> [--out result.json] [--csv result.csv] [--quiet]")
+		fmt.Fprintln(stderr, "用法：tidegate run <场景文件> [--out result.json] [--csv result.csv] [--html report.html] [--quiet]")
 		return 2
 	}
 	path := pos[0]
@@ -85,6 +88,15 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		}
 		defer outF.Close()
 	}
+	var htmlF *os.File
+	if *htmlPath != "" {
+		htmlF, err = os.Create(*htmlPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "无法创建 HTML 报告文件：%v\n", err)
+			return 1
+		}
+		defer htmlF.Close()
+	}
 	stopProfiles, err := startProfiles()
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -124,11 +136,39 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	go func() { errc <- eng.Run(ctx) }()
 	var elapsed time.Duration
 	rows := 0
+	var htmlSnaps []store.SnapshotRecord
+	var htmlSamples []store.SampleRecord
 	for snap := range eng.Snapshots() {
 		elapsed += snap.Duration
 		view := snap.View()
 		if outF != nil {
 			result.Snapshots = append(result.Snapshots, view)
+		}
+		if htmlF != nil {
+			snapCopy := *view
+			snapCopy.Samples = nil
+			if b, err := json.Marshal(&snapCopy); err == nil {
+				htmlSnaps = append(htmlSnaps, store.SnapshotRecord{
+					Seq:  snap.Seq,
+					Time: snap.Time,
+					Data: b,
+				})
+			}
+			for _, sm := range view.Samples {
+				if len(htmlSamples) >= 200 {
+					break
+				}
+				if b, err := json.Marshal(sm); err == nil {
+					htmlSamples = append(htmlSamples, store.SampleRecord{
+						ID:   int64(len(htmlSamples) + 1),
+						Seq:  snap.Seq,
+						Kind: sm.Kind,
+						Step: sm.Step,
+						Time: sm.Time,
+						Data: b,
+					})
+				}
+			}
 		}
 		if csvW != nil {
 			csvW.write(snap, view, elapsed)
@@ -165,6 +205,23 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		fmt.Fprintf(w, "已写出结果：%s\n", *out)
+	}
+	if htmlF != nil {
+		sumJSON, _ := json.Marshal(summary.View())
+		runMeta := &store.Run{
+			ID:           "cli-" + result.StartedAt.UTC().Format("20060102-150405"),
+			ScenarioName: plan.Name,
+			Status:       store.RunFinished,
+			CreatedAt:    result.StartedAt,
+			StartedAt:    result.StartedAt,
+			FinishedAt:   time.Now(),
+			Summary:      sumJSON,
+		}
+		if err := exporter.ExportRunHTML(runMeta, htmlSnaps, nil, htmlSamples, htmlF); err != nil {
+			fmt.Fprintf(stderr, "写入 HTML 报告失败：%v\n", err)
+			return 1
+		}
+		fmt.Fprintf(w, "已写出 HTML 报告：%s\n", *htmlPath)
 	}
 	if *memProfile != "" {
 		f, err := os.Create(*memProfile)

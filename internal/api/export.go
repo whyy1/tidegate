@@ -1,12 +1,14 @@
 package api
 
 import (
+	"bytes"
 	"encoding/csv"
 	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
 
+	"tidegate/internal/exporter"
 	"tidegate/internal/metrics"
 	"tidegate/internal/store"
 )
@@ -16,6 +18,67 @@ var exportCSVHeader = []string{
 	"iterations", "dropped_iterations", "requests", "rps", "errors", "error_rate",
 	"p50_ms", "p90_ms", "p95_ms", "p99_ms", "max_ms", "mean_ms",
 	"bytes_sent", "bytes_received", "sent_bps", "received_bps",
+}
+
+func (s *Server) handleExportProject(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	pr, err := s.store.GetProject(pid)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "tidegate"
+	}
+
+	stem := sanitizeHeaderValue(pr.ID)
+	h := w.Header()
+	switch format {
+	case "tidegate":
+		h.Set("Content-Type", "application/zip")
+		h.Set("Content-Disposition", `attachment; filename="`+stem+`.tidegate"`)
+		h.Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		if err := exporter.ExportArchive(s.store, pid, w); err != nil {
+			s.log.Warn("导出项目归档中断", "project_id", pid, "err", err)
+		}
+	case "openapi-json":
+		data, err := exporter.ExportOpenAPI(s.store, pid, false)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		h.Set("Content-Type", "application/json; charset=utf-8")
+		h.Set("Content-Disposition", `attachment; filename="`+stem+`-openapi.json"`)
+		h.Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	case "openapi-yaml", "openapi":
+		data, err := exporter.ExportOpenAPI(s.store, pid, true)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		h.Set("Content-Type", "application/yaml; charset=utf-8")
+		h.Set("Content-Disposition", `attachment; filename="`+stem+`-openapi.yaml"`)
+		h.Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	case "postman":
+		data, err := exporter.ExportPostman(s.store, pid)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		h.Set("Content-Type", "application/json; charset=utf-8")
+		h.Set("Content-Disposition", `attachment; filename="`+stem+`-postman.json"`)
+		h.Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	default:
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "导出格式只支持 tidegate、openapi-json、openapi-yaml 或 postman"))
+	}
 }
 
 func (s *Server) handleRunExport(w http.ResponseWriter, r *http.Request) {
@@ -43,9 +106,58 @@ func (s *Server) handleRunExport(w http.ResponseWriter, r *http.Request) {
 		s.exportRunCSV(w, run, snaps)
 	case "json":
 		s.exportRunJSON(w, r, run, snaps)
+	case "html":
+		s.exportRunHTML(w, r, run, snaps)
+	case "har":
+		s.exportRunHAR(w, r, run)
 	default:
-		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "导出格式只支持 json 或 csv"))
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "导出格式只支持 json、csv、html 或 har"))
 	}
+}
+
+func (s *Server) exportRunHAR(w http.ResponseWriter, r *http.Request, run *store.Run) {
+	samples, err := s.results.Samples(r.Context(), run.ID, store.SampleQuery{Limit: 1000})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	data, err := exporter.ExportSamplesHAR(run, samples)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "application/json; charset=utf-8")
+	h.Set("Content-Disposition", `attachment; filename="tidegate-run-`+sanitizeHeaderValue(run.ID)+`-samples.har"`)
+	h.Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(data)
+}
+
+func (s *Server) exportRunHTML(w http.ResponseWriter, r *http.Request, run *store.Run, snaps []store.SnapshotRecord) {
+	alerts, err := s.results.Alerts(r.Context(), run.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	samples, err := s.results.Samples(r.Context(), run.ID, store.SampleQuery{Limit: 200})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var buf bytes.Buffer
+	if err := exporter.ExportRunHTML(run, snaps, alerts, samples, &buf); err != nil {
+		writeError(w, err)
+		return
+	}
+
+	h := w.Header()
+	h.Set("Content-Type", "text/html; charset=utf-8")
+	h.Set("Content-Disposition", `attachment; filename="tidegate-run-`+sanitizeHeaderValue(run.ID)+`.html"`)
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
 }
 
 func (s *Server) exportRunJSON(w http.ResponseWriter, r *http.Request, run *store.Run, snaps []store.SnapshotRecord) {

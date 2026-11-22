@@ -1,6 +1,8 @@
 package api
 
 import (
+	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strconv"
@@ -10,6 +12,7 @@ import (
 	"tidegate/internal/auth"
 	"tidegate/internal/controller"
 	"tidegate/internal/curl"
+	"tidegate/internal/importer"
 	"tidegate/internal/scenario"
 	"tidegate/internal/store"
 )
@@ -147,6 +150,60 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+type sessionDTO struct {
+	ID         string    `json:"id"`
+	CreatedAt  time.Time `json:"created_at"`
+	LastSeenAt time.Time `json:"last_seen_at"`
+	ExpiresAt  time.Time `json:"expires_at"`
+	RemoteAddr string    `json:"remote_addr"`
+	UserAgent  string    `json:"user_agent"`
+	Current    bool      `json:"current"`
+}
+
+func (s *Server) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	u, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, auth.ErrUnauthenticated)
+		return
+	}
+	curSess, _ := auth.SessionFromContext(r.Context())
+	items, err := s.auth.Sessions(r.Context(), u.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out := make([]sessionDTO, 0, len(items))
+	for _, it := range items {
+		out = append(out, sessionDTO{
+			ID:         it.ID,
+			CreatedAt:  it.CreatedAt,
+			LastSeenAt: it.LastSeenAt,
+			ExpiresAt:  it.ExpiresAt,
+			RemoteAddr: it.RemoteAddr,
+			UserAgent:  it.UserAgent,
+			Current:    curSess != nil && it.ID == curSess.ID,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"sessions": out})
+}
+
+func (s *Server) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
+	u, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, auth.ErrUnauthenticated)
+		return
+	}
+	targetID := r.PathValue("id")
+	if err := s.auth.RevokeSession(r.Context(), u.ID, targetID); err != nil {
+		writeError(w, err)
+		return
+	}
+	if curSess, _ := auth.SessionFromContext(r.Context()); curSess != nil && curSess.ID == targetID {
+		auth.ClearSessionCookie(w, s.guard.SecureCookies(r))
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // deleteVersion extracts an optional version from either ?version= or a JSON body.
 func deleteVersion(w http.ResponseWriter, r *http.Request) string {
 	if v := r.URL.Query().Get("version"); v != "" {
@@ -253,6 +310,180 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 		s.log.Warn("清理项目调试历史失败", "project_id", pid, "err", err)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+const maxImportUploadBytes = 64 << 20
+
+func readImportInput(w http.ResponseWriter, r *http.Request) (importer.PreviewInput, string, error) {
+	var in importer.PreviewInput
+	var nameOverride string
+	q := r.URL.Query()
+	ct := strings.ToLower(strings.TrimSpace(r.Header.Get("Content-Type")))
+
+	if strings.HasPrefix(ct, "multipart/form-data") {
+		mr, err := r.MultipartReader()
+		if err != nil {
+			return in, "", newHTTPError(http.StatusBadRequest, "invalid_input", "无效的 multipart 表单请求")
+		}
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return in, "", newHTTPError(http.StatusBadRequest, "invalid_input", "读取上传数据失败")
+			}
+			fn := part.FormName()
+			switch fn {
+			case "file", "content":
+				data, rerr := io.ReadAll(io.LimitReader(part, maxImportUploadBytes+1))
+				_ = part.Close()
+				if rerr != nil {
+					return in, "", newHTTPError(http.StatusBadRequest, "invalid_input", "读取导入文件内容失败")
+				}
+				if int64(len(data)) > maxImportUploadBytes {
+					return in, "", newHTTPError(http.StatusRequestEntityTooLarge, "body_too_large", "导入文件不能超过 64 MB")
+				}
+				in.Content = data
+				if fn == "file" && in.Filename == "" {
+					in.Filename = part.FileName()
+				}
+			case "format":
+				b, _ := io.ReadAll(io.LimitReader(part, 256))
+				in.Format = strings.TrimSpace(string(b))
+				_ = part.Close()
+			case "filename":
+				b, _ := io.ReadAll(io.LimitReader(part, 1024))
+				if s := strings.TrimSpace(string(b)); s != "" {
+					in.Filename = s
+				}
+				_ = part.Close()
+			case "strategy":
+				b, _ := io.ReadAll(io.LimitReader(part, 256))
+				in.Strategy = strings.TrimSpace(string(b))
+				_ = part.Close()
+			case "target_folder_id":
+				b, _ := io.ReadAll(io.LimitReader(part, 256))
+				in.TargetFolderID = strings.TrimSpace(string(b))
+				_ = part.Close()
+			case "name":
+				b, _ := io.ReadAll(io.LimitReader(part, 1024))
+				nameOverride = strings.TrimSpace(string(b))
+				_ = part.Close()
+			default:
+				_ = part.Close()
+			}
+		}
+	} else {
+		r.Body = http.MaxBytesReader(w, r.Body, maxImportUploadBytes)
+		var body struct {
+			Format         string `json:"format"`
+			Filename       string `json:"filename"`
+			Content        string `json:"content"`
+			Strategy       string `json:"strategy"`
+			TargetFolderID string `json:"target_folder_id"`
+			Name           string `json:"name"`
+		}
+		dec := json.NewDecoder(r.Body)
+		if err := dec.Decode(&body); err != nil {
+			var mbe *http.MaxBytesError
+			if errors.As(err, &mbe) {
+				return in, "", newHTTPError(http.StatusRequestEntityTooLarge, "body_too_large", "请求体过大")
+			}
+			if errors.Is(err, io.EOF) {
+				return in, "", newHTTPError(http.StatusBadRequest, "bad_json", "请求体不能为空，需要合法的 JSON")
+			}
+			return in, "", newHTTPError(http.StatusBadRequest, "bad_json", "请求体不是合法的 JSON")
+		}
+		in.Format = strings.TrimSpace(body.Format)
+		in.Filename = strings.TrimSpace(body.Filename)
+		in.Content = []byte(body.Content)
+		in.Strategy = strings.TrimSpace(body.Strategy)
+		in.TargetFolderID = strings.TrimSpace(body.TargetFolderID)
+		nameOverride = strings.TrimSpace(body.Name)
+	}
+
+	if in.Format == "" {
+		in.Format = strings.TrimSpace(q.Get("format"))
+	}
+	if in.Strategy == "" {
+		in.Strategy = strings.TrimSpace(q.Get("strategy"))
+	}
+	if in.TargetFolderID == "" {
+		in.TargetFolderID = strings.TrimSpace(q.Get("target_folder_id"))
+	}
+	if nameOverride == "" {
+		nameOverride = strings.TrimSpace(q.Get("name"))
+	}
+	if len(in.Content) == 0 {
+		return in, "", newHTTPError(http.StatusBadRequest, "invalid_input", "导入内容不能为空")
+	}
+	return in, nameOverride, nil
+}
+
+func writeImportError(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+	if _, ok := auth.AsError(err); ok {
+		writeError(w, err)
+		return
+	}
+	var he *httpError
+	var ve *store.ValidationError
+	var ce *store.ConflictError
+	var nf *store.NotFoundError
+	if errors.As(err, &he) || errors.As(err, &ve) || errors.As(err, &ce) || errors.As(err, &nf) ||
+		errors.Is(err, store.ErrInvalid) || errors.Is(err, store.ErrNotFound) || errors.Is(err, store.ErrConflict) {
+		writeError(w, err)
+		return
+	}
+	writeError(w, newHTTPError(http.StatusBadRequest, "invalid_import", err.Error()))
+}
+
+func (s *Server) handleImportPreview(w http.ResponseWriter, r *http.Request) {
+	in, _, err := readImportInput(w, r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	res, err := importer.Preview(s.store, r.PathValue("pid"), in)
+	if err != nil {
+		writeImportError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleImportApply(w http.ResponseWriter, r *http.Request) {
+	in, _, err := readImportInput(w, r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	res, err := importer.Apply(s.store, r.PathValue("pid"), in)
+	if err != nil {
+		writeImportError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleImportProjectArchive(w http.ResponseWriter, r *http.Request) {
+	in, nameOverride, err := readImportInput(w, r)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	pr, report, err := importer.ImportProjectArchive(s.store, in.Content, nameOverride)
+	if err != nil {
+		writeImportError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{
+		"project": pr,
+		"report":  report,
+	})
 }
 
 // ---------------------------------------------------------------------------

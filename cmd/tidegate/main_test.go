@@ -76,14 +76,14 @@ func TestRunPingWithOutputs(t *testing.T) {
 	srv := startServer(t)
 	file := writeExample(t, "ping.yaml", srv.URL())
 	dir := t.TempDir()
-	out, csvPath := filepath.Join(dir, "r.json"), filepath.Join(dir, "r.csv")
+	out, csvPath, htmlPath := filepath.Join(dir, "r.json"), filepath.Join(dir, "r.csv"), filepath.Join(dir, "r.html")
 	var stdout, stderr bytes.Buffer
-	code := runMain([]string{"run", file, "--out", out, "--csv", csvPath}, &stdout, &stderr)
+	code := runMain([]string{"run", file, "--out", out, "--csv", csvPath, "--html", htmlPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, &stdout, &stderr)
 	}
 	text := stdout.String()
-	for _, want := range []string{"场景：单接口压测（/ping）", "请求/秒", "P99", "上行", "========== 汇总 ==========", "按步骤", "ping 心跳", "200×", "已写出结果", "已写出 CSV"} {
+	for _, want := range []string{"场景：单接口压测（/ping）", "请求/秒", "P99", "上行", "========== 汇总 ==========", "按步骤", "ping 心跳", "200×", "已写出结果", "已写出 CSV", "已写出 HTML 报告"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("stdout lacks %q:\n%s", want, text)
 		}
@@ -158,6 +158,13 @@ func TestRunPingWithOutputs(t *testing.T) {
 	}
 	if csvSum != sum {
 		t.Fatalf("csv requests %d != %d", csvSum, sum)
+	}
+	htmlBytes, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(htmlBytes), "<!DOCTYPE html>") || !strings.Contains(string(htmlBytes), "单接口压测（/ping）") {
+		t.Fatalf("unexpected html report content")
 	}
 }
 

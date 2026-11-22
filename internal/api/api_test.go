@@ -24,6 +24,7 @@ import (
 
 	"tidegate/internal/auth"
 	"tidegate/internal/controller"
+	"tidegate/internal/importer"
 	"tidegate/internal/store"
 	"tidegate/internal/testserver"
 )
@@ -708,6 +709,293 @@ func TestAPIDebugDryRunWebSocketRunAndExport(t *testing.T) {
 		t.Fatalf("scenarios/debug = %d: %s", resp.StatusCode, b)
 	}
 	resp.Body.Close()
+}
+
+func TestSessionsImportExportAndHTMLReport(t *testing.T) {
+	tsrv, err := testserver.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsrv.Start()
+	defer tsrv.Close()
+
+	env := newAPITestEnv(t, false)
+	cl1 := newCookieClient(t)
+	cl2 := newCookieClient(t)
+
+	agentDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(agentDeadline) {
+		if ag, _ := env.ctrl.Agents(context.Background()); len(ag) >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// Setup first session on cl1.
+	resp := doJSONReq(t, cl1, "POST", env.baseURL+"/api/v1/setup", map[string]string{
+		"code": env.setupCod, "username": "admin", "password": "strong password 123",
+	}, true)
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("setup = %d", resp.StatusCode)
+	}
+
+	// Second login on cl2.
+	resp = doJSONReq(t, cl2, "POST", env.baseURL+"/api/v1/auth/login", map[string]string{
+		"username": "admin", "password": "strong password 123",
+	}, true)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("login cl2 = %d", resp.StatusCode)
+	}
+
+	// 1. Session list & targeted revocation from cl1.
+	resp = doJSONReq(t, cl1, "GET", env.baseURL+"/api/v1/auth/sessions", nil, false)
+	if resp.StatusCode != 200 {
+		t.Fatalf("list sessions = %d", resp.StatusCode)
+	}
+	var sessList struct {
+		Sessions []sessionDTO `json:"sessions"`
+	}
+	decodeBody(t, resp, &sessList)
+	if len(sessList.Sessions) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(sessList.Sessions))
+	}
+	var currentCount int
+	var otherID string
+	for _, s := range sessList.Sessions {
+		if s.Current {
+			currentCount++
+		} else {
+			otherID = s.ID
+		}
+	}
+	if currentCount != 1 || otherID == "" {
+		t.Fatalf("unexpected session markers: %+v", sessList.Sessions)
+	}
+
+	resp = doJSONReq(t, cl1, "DELETE", env.baseURL+"/api/v1/auth/sessions/"+otherID, nil, true)
+	resp.Body.Close()
+	if resp.StatusCode != 204 {
+		t.Fatalf("revoke other session = %d", resp.StatusCode)
+	}
+
+	// cl2 is now 401 while cl1 stays 200.
+	resp = doJSONReq(t, cl2, "GET", env.baseURL+"/api/v1/projects", nil, false)
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("expected revoked cl2 to get 401, got %d", resp.StatusCode)
+	}
+	resp = doJSONReq(t, cl1, "GET", env.baseURL+"/api/v1/projects", nil, false)
+	var projects []store.Project
+	decodeBody(t, resp, &projects)
+	if len(projects) == 0 {
+		t.Fatal("expected default project for cl1")
+	}
+	pid := projects[0].ID
+
+	// 2. Two-step OpenAPI import: JSON preview (non-mutating) -> multipart apply.
+	openAPISpec := `
+openapi: 3.0.3
+info:
+  title: Catalog
+servers:
+  - url: ` + tsrv.URL() + `
+tags:
+  - name: Items
+paths:
+  /ping:
+    get:
+      summary: Fetch Ping
+      tags: [Items]
+`
+	resp = doJSONReq(t, cl1, "POST", env.baseURL+"/api/v1/projects/"+pid+"/import/preview", map[string]any{
+		"filename": "catalog.yaml",
+		"content":  openAPISpec,
+	}, true)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("import preview = %d: %s", resp.StatusCode, b)
+	}
+	var previewRes importer.PreviewResult
+	decodeBody(t, resp, &previewRes)
+	if previewRes.Report.APIsFound != 1 || len(previewRes.Diffs) != 1 || previewRes.Diffs[0].Action != importer.ActionCreate {
+		t.Fatalf("unexpected import preview: %+v", previewRes)
+	}
+
+	// Ensure preview did not mutate project tree.
+	resp = doJSONReq(t, cl1, "GET", env.baseURL+"/api/v1/projects/"+pid+"/tree", nil, false)
+	var treeBefore store.Tree
+	decodeBody(t, resp, &treeBefore)
+	if len(treeBefore.Children) != 0 {
+		t.Fatalf("preview unexpectedly mutated tree: %+v", treeBefore.Children)
+	}
+
+	// Apply via multipart/form-data upload.
+	var mpBody bytes.Buffer
+	mw := multipart.NewWriter(&mpBody)
+	fw, err := mw.CreateFormFile("file", "catalog.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fw.Write([]byte(openAPISpec)); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	applyReq, _ := http.NewRequest("POST", env.baseURL+"/api/v1/projects/"+pid+"/import/apply", &mpBody)
+	applyReq.Header.Set("Content-Type", mw.FormDataContentType())
+	applyReq.Header.Set(auth.RequestHeader, "1")
+	resp, err = cl1.Do(applyReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("import apply = %d: %s", resp.StatusCode, b)
+	}
+	var applyRes importer.ApplyResult
+	decodeBody(t, resp, &applyRes)
+	if applyRes.Report.APIsCreated != 1 || applyRes.Report.FoldersCreated != 1 {
+		t.Fatalf("unexpected import apply report: %+v", applyRes.Report)
+	}
+
+	// 3. Export OpenAPI YAML & .tidegate archive, then re-import as ClonedProject.
+	resp = doJSONReq(t, cl1, "GET", env.baseURL+"/api/v1/projects/"+pid+"/export?format=openapi-yaml", nil, false)
+	yamlData, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(yamlData), "openapi: 3.0.3") || !strings.Contains(string(yamlData), "/ping:") {
+		t.Fatalf("export openapi-yaml = %d: %s", resp.StatusCode, yamlData)
+	}
+
+	resp = doJSONReq(t, cl1, "GET", env.baseURL+"/api/v1/projects/"+pid+"/export?format=postman", nil, false)
+	pmData, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(pmData), "collection/v2.1.0") {
+		t.Fatalf("export postman = %d: %s", resp.StatusCode, pmData)
+	}
+
+	resp = doJSONReq(t, cl1, "GET", env.baseURL+"/api/v1/projects/"+pid+"/export?format=tidegate", nil, false)
+	zipData, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || len(zipData) < 4 || zipData[0] != 'P' || zipData[1] != 'K' {
+		t.Fatalf("export tidegate = %d len=%d", resp.StatusCode, len(zipData))
+	}
+
+	var impZipBody bytes.Buffer
+	zmw := multipart.NewWriter(&impZipBody)
+	_ = zmw.WriteField("name", "ClonedProject")
+	zfw, err := zmw.CreateFormFile("file", "backup.tidegate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := zfw.Write(zipData); err != nil {
+		t.Fatal(err)
+	}
+	if err := zmw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	impReq, _ := http.NewRequest("POST", env.baseURL+"/api/v1/projects/import", &impZipBody)
+	impReq.Header.Set("Content-Type", zmw.FormDataContentType())
+	impReq.Header.Set(auth.RequestHeader, "1")
+	resp, err = cl1.Do(impReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("import project archive = %d: %s", resp.StatusCode, b)
+	}
+	var importedOut struct {
+		Project store.Project             `json:"project"`
+		Report  importer.ConversionReport `json:"report"`
+	}
+	decodeBody(t, resp, &importedOut)
+	if importedOut.Project.Name != "ClonedProject" || importedOut.Report.APIsCreated != 1 {
+		t.Fatalf("unexpected project archive import result: %+v", importedOut)
+	}
+
+	resp = doJSONReq(t, cl1, "GET", env.baseURL+"/api/v1/projects/"+importedOut.Project.ID+"/tree", nil, false)
+	var clonedTree store.Tree
+	decodeBody(t, resp, &clonedTree)
+	if len(clonedTree.Children) != 1 || clonedTree.Children[0].Name != "Items" {
+		t.Fatalf("expected cloned folder tree, got %+v", clonedTree.Children)
+	}
+
+	// 4. Start & finish a real short run against testserver, then export standalone HTML report.
+	resp = doJSONReq(t, cl1, "GET", env.baseURL+"/api/v1/projects/"+pid+"/environments", nil, false)
+	var envs []store.Environment
+	decodeBody(t, resp, &envs)
+	if len(envs) == 0 {
+		t.Fatal("expected imported environment")
+	}
+
+	apiID := ""
+	resp = doJSONReq(t, cl1, "GET", env.baseURL+"/api/v1/projects/"+pid+"/tree", nil, false)
+	var treeAfter store.Tree
+	decodeBody(t, resp, &treeAfter)
+	if len(treeAfter.Children) > 0 && len(treeAfter.Children[0].Children) > 0 {
+		apiID = treeAfter.Children[0].Children[0].ID
+	}
+	if apiID == "" {
+		t.Fatal("expected imported API in tree")
+	}
+
+	resp = doJSONReq(t, cl1, "POST", env.baseURL+"/api/v1/projects/"+pid+"/runs", map[string]any{
+		"api_id":         apiID,
+		"environment_id": envs[0].ID,
+		"load": map[string]any{
+			"mode":   "vus",
+			"stages": []map[string]any{{"duration": "400ms", "target": 1}},
+		},
+	}, true)
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("start run = %d: %s", resp.StatusCode, b)
+	}
+	var run store.Run
+	decodeBody(t, resp, &run)
+
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		rresp := doJSONReq(t, cl1, "GET", env.baseURL+"/api/v1/runs/"+run.ID, nil, false)
+		var cur store.Run
+		decodeBody(t, rresp, &cur)
+		if !cur.Status.Active() {
+			run = cur
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if run.Status != store.RunFinished {
+		t.Fatalf("run ended with status=%s error=%q", run.Status, run.Error)
+	}
+
+	resp = doJSONReq(t, cl1, "GET", env.baseURL+"/api/v1/runs/"+run.ID+"/export?format=html", nil, false)
+	htmlBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("export html = %d: %s", resp.StatusCode, htmlBytes)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/html") {
+		t.Fatalf("unexpected html Content-Type: %q", ct)
+	}
+	htmlStr := string(htmlBytes)
+	if !strings.Contains(htmlStr, "<!DOCTYPE html>") || !strings.Contains(htmlStr, `id="tidegate-report-data"`) {
+		t.Fatalf("HTML report missing expected structure")
+	}
+
+	resp = doJSONReq(t, cl1, "GET", env.baseURL+"/api/v1/runs/"+run.ID+"/export?format=har", nil, false)
+	harBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(harBytes), `"version": "1.2"`) {
+		t.Fatalf("export har = %d: %s", resp.StatusCode, harBytes)
+	}
 }
 
 func mustParseURL(t *testing.T, raw string) *url.URL {

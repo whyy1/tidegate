@@ -124,13 +124,19 @@ func (s *Server) buildHandler() http.Handler {
 	apiMux.Handle("POST /api/v1/auth/logout", authed(s.handleLogout))
 	apiMux.Handle("GET /api/v1/auth/me", authed(s.handleMe))
 	apiMux.Handle("POST /api/v1/auth/password", authed(s.handleChangePassword))
+	apiMux.Handle("GET /api/v1/auth/sessions", authed(s.handleListSessions))
+	apiMux.Handle("DELETE /api/v1/auth/sessions/{id}", authed(s.handleRevokeSession))
 
 	// Projects.
 	apiMux.Handle("GET /api/v1/projects", authed(s.handleListProjects))
 	apiMux.Handle("POST /api/v1/projects", authed(s.handleCreateProject))
+	apiMux.Handle("POST /api/v1/projects/import", authed(s.handleImportProjectArchive))
 	apiMux.Handle("GET /api/v1/projects/{pid}", authed(s.handleGetProject))
 	apiMux.Handle("PATCH /api/v1/projects/{pid}", authed(s.handlePatchProject))
 	apiMux.Handle("DELETE /api/v1/projects/{pid}", authed(s.handleDeleteProject))
+	apiMux.Handle("GET /api/v1/projects/{pid}/export", authed(s.handleExportProject))
+	apiMux.Handle("POST /api/v1/projects/{pid}/import/preview", authed(s.handleImportPreview))
+	apiMux.Handle("POST /api/v1/projects/{pid}/import/apply", authed(s.handleImportApply))
 
 	// API tree, folders, APIs.
 	apiMux.Handle("GET /api/v1/projects/{pid}/tree", authed(s.handleTree))
