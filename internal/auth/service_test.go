@@ -562,3 +562,26 @@ func TestUserLookup(t *testing.T) {
 	_, err = s.User(ctx, 12345)
 	wantErr(t, err, ErrUserNotFound)
 }
+
+func TestResetPassword(t *testing.T) {
+	ctx := context.Background()
+	s, _, setup := newSetupService(t, nil)
+	a := mustLogin(t, s)
+
+	wantErr(t, s.ResetPassword(ctx, "nonexistent", "a valid passphrase"), ErrUserNotFound)
+	wantErr(t, s.ResetPassword(ctx, testAdmin, "short"), ErrWeakPassword)
+
+	const nextPass = "reset passphrase 2026!"
+	if err := s.ResetPassword(ctx, testAdmin, nextPass); err != nil {
+		t.Fatal(err)
+	}
+	for _, tok := range []string{setup.Token, a.Token} {
+		_, _, err := s.Authenticate(ctx, tok)
+		wantErr(t, err, ErrUnauthenticated)
+	}
+	_, err := login(s, testAdmin, testPassword, testAddr)
+	wantErr(t, err, ErrInvalidCredentials)
+	if _, err := login(s, testAdmin, nextPass, testAddr); err != nil {
+		t.Fatalf("login with reset password: %v", err)
+	}
+}

@@ -2,14 +2,24 @@ package main
 
 import (
 	"bytes"
+	"context"
+	"crypto/tls"
 	"encoding/csv"
 	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/cookiejar"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"tidegate/internal/auth"
 	"tidegate/internal/scenario"
 	"tidegate/internal/testserver"
 )
@@ -198,8 +208,24 @@ func TestVersionAndUsage(t *testing.T) {
 	if runMain([]string{"version"}, &stdout, &stderr) != 0 || !strings.HasPrefix(stdout.String(), "tidegate ") {
 		t.Fatalf("version = %q", &stdout)
 	}
-	if runMain(nil, &stdout, &stderr) != 2 || !strings.Contains(stderr.String(), "tidegate run") {
-		t.Fatal("usage")
+	stdout.Reset()
+	if runMain([]string{"--version"}, &stdout, &stderr) != 0 || !strings.HasPrefix(stdout.String(), "tidegate ") {
+		t.Fatalf("--version = %q", &stdout)
+	}
+	stdout.Reset()
+	if runMain([]string{"help"}, &stdout, &stderr) != 0 || !strings.Contains(stdout.String(), "tidegate serve") || !strings.Contains(stdout.String(), "tidegate run") {
+		t.Fatalf("help stdout = %q", &stdout)
+	}
+	stdout.Reset()
+	if runMain([]string{"--help"}, &stdout, &stderr) != 0 || !strings.Contains(stdout.String(), "tidegate serve") {
+		t.Fatalf("--help stdout = %q", &stdout)
+	}
+	for _, sub := range []string{"serve", "agent", "reset-password"} {
+		stdout.Reset()
+		stderr.Reset()
+		if code := runMain([]string{sub, "--help"}, &stdout, &stderr); code != 0 {
+			t.Fatalf("%s --help exit %d\nstderr=%s", sub, code, &stderr)
+		}
 	}
 	if runMain([]string{"bogus"}, &stdout, &stderr) != 2 {
 		t.Fatal("unknown command")
@@ -235,5 +261,301 @@ func TestProfileFlagsAndStats(t *testing.T) {
 	st := srv.TakeStats()
 	if st.Accepted == 0 {
 		t.Fatalf("expected accepted connections on testserver, got %+v", st)
+	}
+}
+
+type syncBuf struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuf) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuf) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func newInsecureHTTPSClient(t *testing.T) *http.Client {
+	t.Helper()
+	jar, err := cookiejar.New(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &http.Client{
+		Jar:     jar,
+		Timeout: 5 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
+}
+
+func TestServeWithTLSAndPasswordFileAndResetPassword(t *testing.T) {
+	dataDir := t.TempDir()
+	pwPath := filepath.Join(t.TempDir(), "admin.pw")
+	const initPass = "initial admin passphrase 2026"
+	if err := os.WriteFile(pwPath, []byte(initPass+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(auth.AdminPasswordFileEnv, pwPath)
+
+	var stdout, stderr syncBuf
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	type readyInfo struct {
+		url string
+	}
+	readyCh := make(chan readyInfo, 1)
+	doneCh := make(chan int, 1)
+	go func() {
+		doneCh <- serveWithContext(ctx, serveConfig{
+			DataDir:       dataDir,
+			Listen:        "127.0.0.1:0",
+			ClusterListen: "127.0.0.1:0",
+			TLSSelfSigned: true,
+			NoLocalAgent:  true,
+			NoOpen:        true,
+		}, &stdout, &stderr, func(httpURL, _ string) {
+			readyCh <- readyInfo{url: httpURL}
+		})
+	}()
+
+	var baseURL string
+	select {
+	case info := <-readyCh:
+		baseURL = info.url
+	case code := <-doneCh:
+		t.Fatalf("serve exited early with %d\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for serveWithContext ready")
+	}
+
+	if !strings.HasPrefix(baseURL, "https://") {
+		t.Fatalf("expected https URL, got %q", baseURL)
+	}
+	cl := newInsecureHTTPSClient(t)
+
+	resp, err := cl.Get(baseURL + "/api/v1/setup/status")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var st struct {
+		SetupRequired bool `json:"setup_required"`
+		TLS           bool `json:"tls"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if st.SetupRequired || !st.TLS {
+		t.Fatalf("setup/status mismatch: %+v", st)
+	}
+
+	loginBody, _ := json.Marshal(map[string]string{
+		"username": auth.DefaultAdminUsername,
+		"password": initPass,
+	})
+	req, _ := http.NewRequest("POST", baseURL+"/api/v1/auth/login", bytes.NewReader(loginBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(auth.RequestHeader, "1")
+	resp, err = cl.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("login status = %d", resp.StatusCode)
+	}
+
+	resp, err = cl.Get(baseURL + "/api/v1/projects")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var projs []struct {
+		Name string `json:"name"`
+	}
+	_ = json.NewDecoder(resp.Body).Decode(&projs)
+	resp.Body.Close()
+	if len(projs) != 1 || projs[0].Name != "默认项目" {
+		t.Fatalf("expected default project, got %+v", projs)
+	}
+
+	cancel()
+	if code := <-doneCh; code != 0 {
+		t.Fatalf("serve exit code = %d\nstderr=%s", code, stderr.String())
+	}
+
+	// Verify reset-password CLI against the persisted database.
+	var rOut, rErr bytes.Buffer
+	const newPass = "reset admin passphrase 2026!"
+	rCode := runMainWithIO(
+		[]string{"reset-password", "--data", dataDir, "--user", auth.DefaultAdminUsername},
+		strings.NewReader(newPass+"\n"),
+		&rOut,
+		&rErr,
+	)
+	if rCode != 0 {
+		t.Fatalf("reset-password exit %d\nstderr=%s", rCode, rErr.String())
+	}
+	if !strings.Contains(rOut.String(), "已重置用户") {
+		t.Fatalf("unexpected reset-password stdout: %s", rOut.String())
+	}
+
+	// Confirm the new password actually works after server restart.
+	t.Setenv(auth.AdminPasswordFileEnv, "")
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	readyCh2 := make(chan readyInfo, 1)
+	doneCh2 := make(chan int, 1)
+	go func() {
+		doneCh2 <- serveWithContext(ctx2, serveConfig{
+			DataDir:       dataDir,
+			Listen:        "127.0.0.1:0",
+			ClusterListen: "127.0.0.1:0",
+			NoLocalAgent:  true,
+			NoOpen:        true,
+		}, &stdout, &stderr, func(httpURL, _ string) {
+			readyCh2 <- readyInfo{url: httpURL}
+		})
+	}()
+	baseURL2 := (<-readyCh2).url
+	cl2 := newInsecureHTTPSClient(t)
+
+	badBody, _ := json.Marshal(map[string]string{"username": auth.DefaultAdminUsername, "password": initPass})
+	badReq, _ := http.NewRequest("POST", baseURL2+"/api/v1/auth/login", bytes.NewReader(badBody))
+	badReq.Header.Set("Content-Type", "application/json")
+	badReq.Header.Set(auth.RequestHeader, "1")
+	resp, err = cl2.Do(badReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("old password should fail with 401, got %d", resp.StatusCode)
+	}
+
+	okBody, _ := json.Marshal(map[string]string{"username": auth.DefaultAdminUsername, "password": newPass})
+	okReq, _ := http.NewRequest("POST", baseURL2+"/api/v1/auth/login", bytes.NewReader(okBody))
+	okReq.Header.Set("Content-Type", "application/json")
+	okReq.Header.Set(auth.RequestHeader, "1")
+	resp, err = cl2.Do(okReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("new password login status = %d", resp.StatusCode)
+	}
+
+	cancel2()
+	if code := <-doneCh2; code != 0 {
+		t.Fatalf("second serve exit %d", code)
+	}
+}
+
+func TestServeWithRealAgentSubprocess(t *testing.T) {
+	binName := "tidegate"
+	if runtime.GOOS == "windows" {
+		binName = "tidegate.exe"
+	}
+	binPath := filepath.Join(t.TempDir(), binName)
+	buildCmd := exec.Command("go", "build", "-o", binPath, ".")
+	if out, err := buildCmd.CombinedOutput(); err != nil {
+		t.Fatalf("go build failed: %v\n%s", err, out)
+	}
+
+	t.Setenv(auth.AdminPasswordFileEnv, "")
+	dataDir := t.TempDir()
+	var stdout, stderr syncBuf
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	readyCh := make(chan string, 1)
+	doneCh := make(chan int, 1)
+	go func() {
+		doneCh <- serveWithContext(ctx, serveConfig{
+			DataDir:        dataDir,
+			Listen:         "127.0.0.1:0",
+			ClusterListen:  "127.0.0.1:0",
+			NoLocalAgent:   false,
+			NoOpen:         true,
+			ExecutablePath: binPath,
+		}, &stdout, &stderr, func(httpURL, _ string) {
+			readyCh <- httpURL
+		})
+	}()
+
+	var baseURL string
+	select {
+	case baseURL = <-readyCh:
+	case code := <-doneCh:
+		t.Fatalf("serve exited early with %d\nstdout:\n%s\nstderr:\n%s", code, stdout.String(), stderr.String())
+	case <-time.After(15 * time.Second):
+		t.Fatal("timed out waiting for serve")
+	}
+
+	var setupCode string
+	for _, line := range strings.Split(stdout.String(), "\n") {
+		line = strings.TrimRight(line, "\r")
+		if v, ok := strings.CutPrefix(line, "  初始化码："); ok {
+			setupCode = strings.TrimSpace(v)
+			break
+		}
+	}
+	if setupCode == "" {
+		t.Fatalf("did not find setup code in stdout:\n%s", stdout.String())
+	}
+
+	cl := newInsecureHTTPSClient(t)
+	setupBody, _ := json.Marshal(map[string]string{
+		"code":     setupCode,
+		"username": "admin",
+		"password": "subproc password 123",
+	})
+	setupReq, _ := http.NewRequest("POST", baseURL+"/api/v1/setup", bytes.NewReader(setupBody))
+	setupReq.Header.Set("Content-Type", "application/json")
+	setupReq.Header.Set(auth.RequestHeader, "1")
+	resp, err := cl.Do(setupReq)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusCreated {
+		t.Fatalf("setup status = %d", resp.StatusCode)
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	foundLocal := false
+	for time.Now().Before(deadline) {
+		resp, err := cl.Get(baseURL + "/api/v1/agents")
+		if err != nil {
+			t.Fatal(err)
+		}
+		var agents []struct {
+			Name string `json:"name"`
+		}
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		if err := json.Unmarshal(b, &agents); err == nil && len(agents) >= 1 && agents[0].Name == "local" {
+			foundLocal = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !foundLocal {
+		t.Fatalf("local agent subprocess did not register within timeout\nstderr:\n%s", stderr.String())
+	}
+
+	cancel()
+	if code := <-doneCh; code != 0 {
+		t.Fatalf("serve exit code = %d\nstderr=%s", code, stderr.String())
 	}
 }

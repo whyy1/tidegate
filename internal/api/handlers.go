@@ -1,0 +1,1011 @@
+package api
+
+import (
+	"io"
+	"net/http"
+	"strconv"
+	"strings"
+	"time"
+
+	"tidegate/internal/auth"
+	"tidegate/internal/controller"
+	"tidegate/internal/curl"
+	"tidegate/internal/scenario"
+	"tidegate/internal/store"
+)
+
+type userDTO struct {
+	ID                int64     `json:"id"`
+	Username          string    `json:"username"`
+	Role              auth.Role `json:"role"`
+	CreatedAt         time.Time `json:"created_at"`
+	PasswordChangedAt time.Time `json:"password_changed_at"`
+}
+
+func toUserDTO(u *auth.User) userDTO {
+	return userDTO{
+		ID:                u.ID,
+		Username:          u.Username,
+		Role:              u.Role,
+		CreatedAt:         u.CreatedAt,
+		PasswordChangedAt: u.PasswordChangedAt,
+	}
+}
+
+func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
+	pending, err := s.auth.SetupPending(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"setup_required": pending,
+		"version":        s.opts.Version,
+		"tls":            s.opts.TLS,
+	})
+}
+
+func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Code     string `json:"code"`
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	res, err := s.auth.Setup(r.Context(), auth.SetupRequest{
+		Code:       body.Code,
+		Username:   body.Username,
+		Password:   body.Password,
+		RemoteAddr: r.RemoteAddr,
+		UserAgent:  r.UserAgent(),
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if _, err := s.ctrl.EnsureDefaultProject(); err != nil {
+		s.log.Warn("初始化默认项目失败", "err", err)
+	}
+	auth.SetSessionCookie(w, res, s.guard.SecureCookies(r))
+	writeJSON(w, http.StatusCreated, map[string]any{"user": toUserDTO(res.User)})
+}
+
+func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	res, err := s.auth.Login(r.Context(), auth.LoginRequest{
+		Username:   body.Username,
+		Password:   body.Password,
+		RemoteAddr: r.RemoteAddr,
+		UserAgent:  r.UserAgent(),
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	auth.SetSessionCookie(w, res, s.guard.SecureCookies(r))
+	writeJSON(w, http.StatusOK, map[string]any{"user": toUserDTO(res.User)})
+}
+
+func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
+	tok := auth.SessionToken(r)
+	if err := s.auth.Logout(r.Context(), tok); err != nil {
+		writeError(w, err)
+		return
+	}
+	auth.ClearSessionCookie(w, s.guard.SecureCookies(r))
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	u, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, auth.ErrUnauthenticated)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": toUserDTO(u)})
+}
+
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	u, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, auth.ErrUnauthenticated)
+		return
+	}
+	sess, _ := auth.SessionFromContext(r.Context())
+	keepID := ""
+	if sess != nil {
+		keepID = sess.ID
+	}
+	var body struct {
+		CurrentPassword string `json:"current_password"`
+		NewPassword     string `json:"new_password"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.auth.ChangePassword(r.Context(), auth.ChangePasswordRequest{
+		UserID:          u.ID,
+		CurrentPassword: body.CurrentPassword,
+		NewPassword:     body.NewPassword,
+		KeepSessionID:   keepID,
+		RemoteAddr:      r.RemoteAddr,
+	}); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// deleteVersion extracts an optional version from either ?version= or a JSON body.
+func deleteVersion(w http.ResponseWriter, r *http.Request) string {
+	if v := r.URL.Query().Get("version"); v != "" {
+		return v
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		var body struct {
+			Version string `json:"version"`
+		}
+		if err := decodeJSON(w, r, &body); err == nil {
+			return body.Version
+		}
+	}
+	return ""
+}
+
+// ---------------------------------------------------------------------------
+// Projects
+
+func (s *Server) handleListProjects(w http.ResponseWriter, _ *http.Request) {
+	list, err := s.store.ListProjects()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	var in store.Project
+	if err := decodeJSON(w, r, &in); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.store.CreateProject(&in)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
+	pr, err := s.store.GetProject(r.PathValue("pid"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, pr)
+}
+
+func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	cur, err := s.store.GetProject(pid)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var body struct {
+		Name        optField[string]             `json:"name"`
+		Description optField[string]             `json:"description"`
+		Variables   optField[store.KeyValueList] `json:"variables"`
+		Version     string                       `json:"version"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	upd := store.Project{
+		ID:          pid,
+		Name:        cur.Name,
+		Description: cur.Description,
+		Variables:   cur.Variables,
+		Version:     body.Version,
+	}
+	if body.Name.Set {
+		upd.Name = body.Name.Value
+	}
+	if body.Description.Set {
+		upd.Description = body.Description.Value
+	}
+	if body.Variables.Set {
+		upd.Variables = body.Variables.Value
+	}
+	out, err := s.store.UpdateProject(&upd)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	ver := deleteVersion(w, r)
+	if err := s.store.DeleteProject(pid, ver); err != nil {
+		writeError(w, err)
+		return
+	}
+	if _, err := s.results.DeleteProjectRuns(r.Context(), pid); err != nil {
+		s.log.Warn("删除项目压测记录失败", "project_id", pid, "err", err)
+	}
+	if err := s.results.ClearDebugHistory(r.Context(), pid); err != nil {
+		s.log.Warn("清理项目调试历史失败", "project_id", pid, "err", err)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// Tree, Folders, APIs
+
+func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
+	t, err := s.store.Tree(r.PathValue("pid"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+
+func (s *Server) handleCreateFolder(w http.ResponseWriter, r *http.Request) {
+	var in store.Folder
+	if err := decodeJSON(w, r, &in); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.store.CreateFolder(r.PathValue("pid"), &in)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) handleGetFolder(w http.ResponseWriter, r *http.Request) {
+	out, err := s.store.GetFolder(r.PathValue("pid"), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handlePatchFolder(w http.ResponseWriter, r *http.Request) {
+	pid, id := r.PathValue("pid"), r.PathValue("id")
+	cur, err := s.store.GetFolder(pid, id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var body struct {
+		Name    optField[string]             `json:"name"`
+		Headers optField[store.KeyValueList] `json:"headers"`
+		Auth    optField[*store.Auth]        `json:"auth"`
+		Version string                       `json:"version"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	upd := store.Folder{
+		ID:      id,
+		Name:    cur.Name,
+		Headers: cur.Headers,
+		Auth:    cur.Auth,
+		Version: body.Version,
+	}
+	if body.Name.Set {
+		upd.Name = body.Name.Value
+	}
+	if body.Headers.Set {
+		upd.Headers = body.Headers.Value
+	}
+	if body.Auth.Set {
+		upd.Auth = body.Auth.Value
+	}
+	out, err := s.store.UpdateFolder(pid, &upd)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleDeleteFolder(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteFolder(r.PathValue("pid"), r.PathValue("id"), deleteVersion(w, r)); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleCreateAPI(w http.ResponseWriter, r *http.Request) {
+	var in store.API
+	if err := decodeJSON(w, r, &in); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.store.CreateAPI(r.PathValue("pid"), &in)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) handleGetAPI(w http.ResponseWriter, r *http.Request) {
+	out, err := s.store.GetAPI(r.PathValue("pid"), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleUpdateAPI(w http.ResponseWriter, r *http.Request) {
+	var in store.API
+	if err := decodeJSON(w, r, &in); err != nil {
+		writeError(w, err)
+		return
+	}
+	in.ID = r.PathValue("id")
+	out, err := s.store.UpdateAPI(r.PathValue("pid"), &in)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleDeleteAPI(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteAPI(r.PathValue("pid"), r.PathValue("id"), deleteVersion(w, r)); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleCopyAPI(w http.ResponseWriter, r *http.Request) {
+	out, err := s.store.CopyAPI(r.PathValue("pid"), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) handleMoveNode(w http.ResponseWriter, r *http.Request) {
+	var req store.MoveRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.store.Move(r.PathValue("pid"), req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleResolvePreviewAPI(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	var body struct {
+		APIID         string                     `json:"api_id"`
+		API           *store.API                 `json:"api"`
+		EnvironmentID string                     `json:"environment_id"`
+		Variables     map[string]scenario.Scalar `json:"variables"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	api := body.API
+	if api == nil {
+		if body.APIID == "" {
+			writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "请提供接口 ID 或接口定义"))
+			return
+		}
+		var err error
+		api, err = s.store.GetAPI(pid, body.APIID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+	} else if api.ID == "" && body.APIID != "" {
+		cp := *api
+		cp.ID = body.APIID
+		api = &cp
+	}
+
+	out, err := s.store.PreviewEffectiveAPI(pid, api, store.ResolveOptions{
+		EnvironmentID: body.EnvironmentID,
+		Variables:     body.Variables,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+// ---------------------------------------------------------------------------
+// Environments
+
+func (s *Server) handleListEnvironments(w http.ResponseWriter, r *http.Request) {
+	out, err := s.store.ListEnvironments(r.PathValue("pid"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleCreateEnvironment(w http.ResponseWriter, r *http.Request) {
+	var in store.Environment
+	if err := decodeJSON(w, r, &in); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.store.CreateEnvironment(r.PathValue("pid"), &in)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) handleGetEnvironment(w http.ResponseWriter, r *http.Request) {
+	out, err := s.store.GetEnvironment(r.PathValue("pid"), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleUpdateEnvironment(w http.ResponseWriter, r *http.Request) {
+	var in store.Environment
+	if err := decodeJSON(w, r, &in); err != nil {
+		writeError(w, err)
+		return
+	}
+	in.ID = r.PathValue("id")
+	out, err := s.store.UpdateEnvironment(r.PathValue("pid"), &in)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleDeleteEnvironment(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteEnvironment(r.PathValue("pid"), r.PathValue("id"), deleteVersion(w, r)); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// Data Files
+
+func (s *Server) handleListFiles(w http.ResponseWriter, r *http.Request) {
+	out, err := s.store.ListFiles(r.PathValue("pid"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	r.Body = http.MaxBytesReader(w, r.Body, store.MaxFileSize+(2<<20))
+
+	q := r.URL.Query()
+	name := q.Get("name")
+	version := q.Get("version")
+	ct := r.Header.Get("Content-Type")
+
+	if strings.HasPrefix(strings.ToLower(ct), "multipart/form-data") {
+		mr, err := r.MultipartReader()
+		if err != nil {
+			writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "无效的 multipart 表单请求"))
+			return
+		}
+		var saved *store.DataFile
+		for {
+			part, err := mr.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "读取上传数据失败"))
+				return
+			}
+			fn := part.FormName()
+			switch fn {
+			case "name":
+				b, _ := io.ReadAll(io.LimitReader(part, 1024))
+				if s := strings.TrimSpace(string(b)); s != "" {
+					name = s
+				}
+				_ = part.Close()
+			case "version":
+				b, _ := io.ReadAll(io.LimitReader(part, 256))
+				version = strings.TrimSpace(string(b))
+				_ = part.Close()
+			case "file":
+				if name == "" {
+					name = part.FileName()
+				}
+				saved, err = s.store.SaveFile(pid, name, part, version)
+				_ = part.Close()
+				if err != nil {
+					writeError(w, err)
+					return
+				}
+				writeJSON(w, http.StatusCreated, saved)
+				return
+			default:
+				_ = part.Close()
+			}
+		}
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "上传请求缺少 file 字段"))
+		return
+	}
+
+	if name == "" {
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "请通过查询参数 ?name= 指定文件名"))
+		return
+	}
+	df, err := s.store.SaveFile(pid, name, r.Body, version)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, df)
+}
+
+func (s *Server) handlePreviewFile(w http.ResponseWriter, r *http.Request) {
+	maxRows := 20
+	if raw := r.URL.Query().Get("rows"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			maxRows = n
+		}
+	}
+	pv, err := s.store.PreviewFile(r.PathValue("pid"), r.PathValue("name"), maxRows)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, pv)
+}
+
+func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteFile(r.PathValue("pid"), r.PathValue("name"), deleteVersion(w, r)); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// Debug, Dry-Run, cURL Tools
+
+func (s *Server) handleDebugAPI(w http.ResponseWriter, r *http.Request) {
+	var req controller.DebugAPIRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.ctrl.DebugAPI(r.Context(), r.PathValue("pid"), req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleDebugScenario(w http.ResponseWriter, r *http.Request) {
+	var req controller.DebugScenarioRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.ctrl.DebugScenario(r.Context(), r.PathValue("pid"), req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleListDebugHistory(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	if _, err := s.store.GetProject(pid); err != nil {
+		writeError(w, err)
+		return
+	}
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil {
+			limit = n
+		}
+	}
+	includeData := r.URL.Query().Get("include_data") == "true"
+	out, err := s.results.ListDebugHistory(r.Context(), pid, limit, includeData)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleGetDebugRecord(w http.ResponseWriter, r *http.Request) {
+	pid, id := r.PathValue("pid"), r.PathValue("id")
+	rec, err := s.results.GetDebugRecord(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if rec.ProjectID != pid {
+		writeError(w, newHTTPError(http.StatusNotFound, "not_found", "调试记录不存在"))
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
+}
+
+func (s *Server) handleClearDebugHistory(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	if _, err := s.store.GetProject(pid); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.results.ClearDebugHistory(r.Context(), pid); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleParseCurl(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Command string `json:"command"`
+		Curl    string `json:"curl"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	raw := body.Command
+	if raw == "" {
+		raw = body.Curl
+	}
+	api, err := curl.Parse(raw)
+	if err != nil {
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_curl", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"api": api})
+}
+
+func (s *Server) handleAPIToCurl(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	var body struct {
+		APIID         string                     `json:"api_id"`
+		API           *store.API                 `json:"api"`
+		EnvironmentID string                     `json:"environment_id"`
+		Variables     map[string]scenario.Scalar `json:"variables"`
+		Mode          string                     `json:"mode"`
+		Shell         string                     `json:"shell"`
+		RedactSecrets bool                       `json:"redact_secrets"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	api := body.API
+	if api == nil {
+		if body.APIID == "" {
+			writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "请提供接口 ID 或接口定义"))
+			return
+		}
+		var err error
+		api, err = s.store.GetAPI(pid, body.APIID)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+	} else if api.ID == "" && body.APIID != "" {
+		cp := *api
+		cp.ID = body.APIID
+		api = &cp
+	}
+
+	preview, err := s.store.PreviewEffectiveAPI(pid, api, store.ResolveOptions{
+		EnvironmentID: body.EnvironmentID,
+		Variables:     body.Variables,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := curl.FormatAPI(api, preview, body.Mode, body.Shell, body.RedactSecrets)
+	if err != nil {
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", err.Error()))
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"curl": out})
+}
+
+// ---------------------------------------------------------------------------
+// Scenarios
+
+func (s *Server) handleListScenarios(w http.ResponseWriter, r *http.Request) {
+	out, err := s.store.ListScenarios(r.PathValue("pid"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleCreateScenario(w http.ResponseWriter, r *http.Request) {
+	var in store.Scenario
+	if err := decodeJSON(w, r, &in); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.store.CreateScenario(r.PathValue("pid"), &in)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) handleGetScenario(w http.ResponseWriter, r *http.Request) {
+	out, err := s.store.GetScenario(r.PathValue("pid"), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleUpdateScenario(w http.ResponseWriter, r *http.Request) {
+	var in store.Scenario
+	if err := decodeJSON(w, r, &in); err != nil {
+		writeError(w, err)
+		return
+	}
+	in.ID = r.PathValue("id")
+	out, err := s.store.UpdateScenario(r.PathValue("pid"), &in)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleDeleteScenario(w http.ResponseWriter, r *http.Request) {
+	if err := s.store.DeleteScenario(r.PathValue("pid"), r.PathValue("id"), deleteVersion(w, r)); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// ---------------------------------------------------------------------------
+// Runs, Agents, System
+
+func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
+	var req controller.StartRunRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.ctrl.StartRun(r.Context(), r.PathValue("pid"), req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	if _, err := s.store.GetProject(pid); err != nil {
+		writeError(w, err)
+		return
+	}
+	q := store.RunQuery{Limit: 50}
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			q.Limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			q.Offset = n
+		}
+	}
+	out, err := s.results.ListRuns(r.Context(), pid, q)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	run, err := s.results.GetRun(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	alerts, err := s.results.Alerts(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		*store.Run
+		Alerts []store.Alert `json:"alerts"`
+	}{
+		Run:    run,
+		Alerts: alerts,
+	})
+}
+
+func (s *Server) handleRunSnapshots(w http.ResponseWriter, r *http.Request) {
+	var from int64
+	if v := r.URL.Query().Get("from"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			from = n
+		}
+	}
+	var limit int
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			limit = n
+		}
+	}
+	out, err := s.results.Snapshots(r.Context(), r.PathValue("id"), from, limit)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleRunSamples(w http.ResponseWriter, r *http.Request) {
+	q := store.SampleQuery{
+		Kind: r.URL.Query().Get("kind"),
+		Step: r.URL.Query().Get("step"),
+	}
+	if v := r.URL.Query().Get("after_id"); v != "" {
+		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+			q.AfterID = n
+		}
+	}
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			q.Limit = n
+		}
+	}
+	out, err := s.results.Samples(r.Context(), r.PathValue("id"), q)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleStopRun(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Mode string `json:"mode"`
+	}
+	if r.Body != nil && r.ContentLength != 0 {
+		if err := decodeJSON(w, r, &body); err != nil {
+			writeError(w, err)
+			return
+		}
+	}
+	abort := strings.EqualFold(strings.TrimSpace(body.Mode), "abort")
+	out, err := s.ctrl.StopRun(r.Context(), r.PathValue("id"), abort)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleSetRunTarget(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Target float64 `json:"target"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.ctrl.SetRunTarget(r.Context(), r.PathValue("id"), body.Target); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	run, err := s.results.GetRun(r.Context(), id)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if run.Status.Active() {
+		writeError(w, newHTTPError(http.StatusConflict, "run_active", "运行中的压测记录不能直接删除，请先停止"))
+		return
+	}
+	if err := s.results.DeleteRun(r.Context(), id); err != nil {
+		writeError(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
+	out, err := s.ctrl.Agents(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handlePatchAgent(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		BandwidthBps int64 `json:"bandwidth_bps"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.ctrl.UpdateAgentSettings(r.Context(), r.PathValue("id"), body.BandwidthBps)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleSystemInfo(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"version":      s.opts.Version,
+		"tls":          s.opts.TLS,
+		"cluster_addr": s.ctrl.ClusterAddr(),
+	})
+}

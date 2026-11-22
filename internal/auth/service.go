@@ -617,6 +617,50 @@ func (s *Service) ChangePassword(ctx context.Context, req ChangePasswordRequest)
 	return nil
 }
 
+// ResetPassword forcibly sets a user's password without checking the previous
+// password and revokes every active session of that user (for CLI recovery).
+func (s *Service) ResetPassword(ctx context.Context, username, newPassword string) error {
+	name, err := normalizeUsername(username)
+	if err != nil {
+		return err
+	}
+	if err := checkPasswordPolicy(newPassword, name, s.minPassLen); err != nil {
+		return err
+	}
+	h, err := s.hash(ctx, newPassword)
+	if err != nil {
+		return err
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("auth: reset password: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var userID int64
+	if err := tx.QueryRowContext(ctx, `SELECT id FROM auth_users WHERE username = ?`, name).Scan(&userID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrUserNotFound
+		}
+		return fmt.Errorf("auth: load user: %w", err)
+	}
+	ms := s.clock().UnixMilli()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE auth_users SET password_hash = ?, updated_at = ?, password_changed_at = ? WHERE id = ?`,
+		h, ms, ms, userID); err != nil {
+		return fmt.Errorf("auth: reset password: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE user_id = ?`, userID); err != nil {
+		return fmt.Errorf("auth: reset password: revoke sessions: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("auth: reset password: %w", err)
+	}
+	s.loginByUser.reset(usernameKey(name))
+	return nil
+}
+
 // ---------------------------------------------------------------------------
 // Users
 
