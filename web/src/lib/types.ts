@@ -857,6 +857,10 @@ export interface SecurityPolicy {
   member_max_vus?: number
   member_max_rps?: number
   scripts_disabled?: boolean
+  mcp_disabled?: boolean
+  mcp_disable_load_runs?: boolean
+  mcp_max_vus?: number
+  mcp_max_duration_sec?: number
 }
 
 export interface MetricsSinkConfig {

@@ -1,18 +1,21 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Check, Copy, Key, KeyRound, Laptop, LogOut, Plus, Trash2, X } from 'lucide-react'
+import { Bot, Check, Copy, Key, KeyRound, Laptop, LogOut, Plus, ShieldAlert, Trash2, X } from 'lucide-react'
 import { api, APIError } from '../lib/api'
 import type { APIToken, SessionItem, User, UserRole } from '../lib/types'
 
+export type AccountModalTab = 'sessions' | 'tokens' | 'mcp' | 'password'
+
 interface Props {
   open: boolean
+  initialTab?: AccountModalTab
   user: User
   onClose: () => void
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
   onLoggedOut: () => void
 }
 
-export function AccountModal({ open, user, onClose, onToast, onLoggedOut }: Props) {
-  const [tab, setTab] = useState<'sessions' | 'tokens' | 'password'>('sessions')
+export function AccountModal({ open, initialTab = 'sessions', user, onClose, onToast, onLoggedOut }: Props) {
+  const [tab, setTab] = useState<AccountModalTab>(initialTab)
   const [sessions, setSessions] = useState<SessionItem[]>([])
   const [loading, setLoading] = useState(false)
   const [tokens, setTokens] = useState<APIToken[]>([])
@@ -23,10 +26,19 @@ export function AccountModal({ open, user, onClose, onToast, onLoggedOut }: Prop
   const [creatingTok, setCreatingTok] = useState(false)
   const [newPlaintext, setNewPlaintext] = useState('')
   const [copiedTok, setCopiedTok] = useState(false)
+  const [mcpMode, setMcpMode] = useState<'http' | 'stdio'>('http')
+  const [copiedMcp, setCopiedMcp] = useState(false)
   const [curPwd, setCurPwd] = useState('')
   const [newPwd, setNewPwd] = useState('')
   const [confirmPwd, setConfirmPwd] = useState('')
   const [savingPwd, setSavingPwd] = useState(false)
+
+  useEffect(() => {
+    if (open) {
+      setTab(initialTab)
+      setCopiedMcp(false)
+    }
+  }, [open, initialTab])
 
   const loadSessions = async () => {
     setLoading(true)
@@ -54,7 +66,7 @@ export function AccountModal({ open, user, onClose, onToast, onLoggedOut }: Prop
   useEffect(() => {
     if (!open) return
     if (tab === 'sessions') void loadSessions()
-    if (tab === 'tokens') void loadTokens()
+    if (tab === 'tokens' || tab === 'mcp') void loadTokens()
   }, [open, tab])
 
   useEffect(() => {
@@ -65,6 +77,36 @@ export function AccountModal({ open, user, onClose, onToast, onLoggedOut }: Prop
 
   const allowedTokenRoles: UserRole[] =
     user.role === 'admin' ? ['viewer', 'member', 'admin'] : user.role === 'member' ? ['viewer', 'member'] : ['viewer']
+
+  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://127.0.0.1:8080'
+  const tokenPlaceholder = newPlaintext || '<请先在「API 访问令牌」页签创建 tg_ 令牌>'
+  const httpConfigSnippet = JSON.stringify(
+    {
+      mcpServers: {
+        tidegate: {
+          serverUrl: `${origin}/api/v1/mcp`,
+          headers: {
+            Authorization: `Bearer ${tokenPlaceholder}`,
+          },
+        },
+      },
+    },
+    null,
+    2
+  )
+  const stdioConfigSnippet = JSON.stringify(
+    {
+      mcpServers: {
+        tidegate: {
+          command: 'tidegate',
+          args: ['mcp', '--url', origin, '--token', tokenPlaceholder],
+        },
+      },
+    },
+    null,
+    2
+  )
+  const activeSnippet = mcpMode === 'http' ? httpConfigSnippet : stdioConfigSnippet
 
   const handleCreateToken = async (e: FormEvent) => {
     e.preventDefault()
@@ -83,7 +125,7 @@ export function AccountModal({ open, user, onClose, onToast, onLoggedOut }: Prop
       setCopiedTok(false)
       setTokName('')
       await loadTokens()
-      onToast('success', '已生成新的 API 访问令牌，请妥善保存明文')
+      onToast('success', '已生成新的 API 访问令牌，可直接用于 CLI 或 MCP 接入')
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '生成 API 令牌失败')
     } finally {
@@ -141,50 +183,56 @@ export function AccountModal({ open, user, onClose, onToast, onLoggedOut }: Prop
   }
 
   return (
-    <div className="fixed inset-0 z-40 bg-slate-900/40 flex items-center justify-center p-4">
-      <div className="w-full max-w-xl bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
+    <div className="fixed inset-0 z-40 bg-slate-950/50 backdrop-blur-[2px] flex items-center justify-center p-4">
+      <div className="w-full max-w-2xl bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden">
+        <div className="px-5 py-3.5 tg-telemetry-strip flex items-center justify-between">
           <div>
-            <h2 className="text-sm font-semibold text-slate-900">账号与会话安全</h2>
-            <p className="text-xs text-slate-500">当前用户：{user.username}（{user.role}）</p>
+            <h2 className="text-sm font-semibold text-white">账号安全、API 令牌与 MCP 接入</h2>
+            <p className="text-xs text-sky-200/80 font-mono">
+              {user.username} · 角色 {user.role}
+            </p>
           </div>
-          <button type="button" onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 rounded">
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="关闭弹窗"
+            className="p-1 text-slate-300 hover:text-white rounded hover:bg-white/10"
+          >
             <X className="w-4 h-4" />
           </button>
         </div>
 
-        <div className="px-5 pt-3 border-b border-slate-200 flex gap-4 text-xs font-medium">
-          <button
-            type="button"
-            onClick={() => setTab('sessions')}
-            className={`pb-2.5 border-b-2 transition-colors ${
-              tab === 'sessions' ? 'border-sky-500 text-sky-700' : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <Laptop className="w-3.5 h-3.5 inline mr-1" /> 活动会话
-          </button>
-          <button
-            type="button"
-            onClick={() => setTab('tokens')}
-            className={`pb-2.5 border-b-2 transition-colors ${
-              tab === 'tokens' ? 'border-sky-500 text-sky-700' : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <Key className="w-3.5 h-3.5 inline mr-1" /> API 访问令牌
-          </button>
-          <button
-            type="button"
-            onClick={() => setTab('password')}
-            className={`pb-2.5 border-b-2 transition-colors ${
-              tab === 'password' ? 'border-sky-500 text-sky-700' : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <KeyRound className="w-3.5 h-3.5 inline mr-1" /> 修改密码
-          </button>
+        <div role="tablist" aria-label="账号与安全页签" className="tg-tablist px-5 border-b border-slate-200 bg-slate-50 gap-5 text-xs font-medium">
+          {(
+            [
+              { id: 'sessions' as const, label: '活动会话', icon: Laptop },
+              { id: 'tokens' as const, label: 'API 访问令牌', icon: Key },
+              { id: 'mcp' as const, label: 'MCP 客户端接入', icon: Bot },
+              { id: 'password' as const, label: '修改密码', icon: KeyRound },
+            ] as const
+          ).map((t) => {
+            const Icon = t.icon
+            const selected = tab === t.id
+            return (
+              <button
+                key={t.id}
+                type="button"
+                role="tab"
+                aria-selected={selected}
+                onClick={() => setTab(t.id)}
+                className={`tg-tab inline-flex items-center gap-1.5 py-2.5 transition-colors ${
+                  selected ? 'text-sky-700' : 'text-slate-500 hover:text-slate-900'
+                }`}
+              >
+                <Icon className="w-3.5 h-3.5" />
+                <span>{t.label}</span>
+              </button>
+            )
+          })}
         </div>
 
-        <div className="p-5 max-h-[65vh] overflow-y-auto">
-          {tab === 'sessions' ? (
+        <div className="p-5 max-h-[65vh] overflow-y-auto tg-scroller">
+          {tab === 'sessions' && (
             <div className="space-y-3">
               {loading ? (
                 <p className="text-xs text-slate-500">正在加载会话...</p>
@@ -206,7 +254,7 @@ export function AccountModal({ open, user, onClose, onToast, onLoggedOut }: Prop
                         )}
                       </div>
                       <p className="text-slate-500 truncate mt-0.5">{s.user_agent || '未知终端'}</p>
-                      <p className="text-[11px] text-slate-400 mt-0.5">
+                      <p className="tg-tabular text-[11px] text-slate-400 mt-0.5">
                         最近活跃：{new Date(s.last_seen_at).toLocaleString()} · 过期时间：
                         {new Date(s.expires_at).toLocaleString()}
                       </p>
@@ -222,16 +270,18 @@ export function AccountModal({ open, user, onClose, onToast, onLoggedOut }: Prop
                 ))
               )}
             </div>
-          ) : tab === 'tokens' ? (
+          )}
+
+          {tab === 'tokens' && (
             <div className="space-y-4 text-xs">
               <form onSubmit={handleCreateToken} className="p-3 rounded-lg border border-slate-200 bg-slate-50/60 space-y-2.5">
-                <div className="font-medium text-slate-800">生成长期 CLI / CI Bearer 令牌（tg_ 前缀）</div>
+                <div className="font-medium text-slate-800">生成长期 CLI / CI / MCP Bearer 令牌（tg_ 前缀）</div>
                 <div className="grid grid-cols-12 gap-2 items-center">
                   <input
                     type="text"
                     value={tokName}
                     onChange={(e) => setTokName(e.target.value)}
-                    placeholder="令牌用途（如 GitLab CI 每日压测）"
+                    placeholder="令牌用途（如 Claude MCP / GitLab CI）"
                     className="col-span-5 px-2.5 py-1.5 border border-slate-300 rounded bg-white"
                   />
                   <select
@@ -313,7 +363,7 @@ export function AccountModal({ open, user, onClose, onToast, onLoggedOut }: Prop
                             {t.role}
                           </span>
                         </div>
-                        <div className="text-[11px] text-slate-400 mt-0.5">
+                        <div className="tg-tabular text-[11px] text-slate-400 mt-0.5">
                           创建：{new Date(t.created_at).toLocaleString()}
                           {t.expires_at ? ` · 过期：${new Date(t.expires_at).toLocaleDateString()}` : ' · 永不过期'}
                           {t.last_used_at ? ` · 最近使用：${new Date(t.last_used_at).toLocaleString()}` : ''}
@@ -331,7 +381,81 @@ export function AccountModal({ open, user, onClose, onToast, onLoggedOut }: Prop
                 </div>
               )}
             </div>
-          ) : (
+          )}
+
+          {tab === 'mcp' && (
+            <div className="space-y-3.5 text-xs">
+              <div className="p-3 rounded-lg border border-sky-200 bg-sky-50/70 space-y-1.5">
+                <div className="font-semibold text-sky-950 flex items-center gap-1.5">
+                  <ShieldAlert className="w-4 h-4 text-sky-700" />
+                  <span>最小权限安全接入建议</span>
+                </div>
+                <p className="text-slate-700 leading-relaxed">
+                  Tidegate MCP 暴露 15 个高内聚工具。若仅用于让 AI 查阅接口结构与分析历史压测报告，建议创建{' '}
+                  <code className="px-1 rounded bg-white border border-sky-200 font-mono">viewer</code> 权限令牌；若需编排接口、调试与受控压测，请使用带有效期的{' '}
+                  <code className="px-1 rounded bg-white border border-sky-200 font-mono">member</code> 令牌。所有 Vault 密文与凭据均自动脱敏。
+                </p>
+              </div>
+
+              <div className="flex items-center justify-between gap-2">
+                <div className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5">
+                  <button
+                    type="button"
+                    onClick={() => setMcpMode('http')}
+                    className={`px-3 py-1 rounded-md font-medium ${
+                      mcpMode === 'http' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                    }`}
+                  >
+                    Streamable HTTP（推荐直连）
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMcpMode('stdio')}
+                    className={`px-3 py-1 rounded-md font-medium ${
+                      mcpMode === 'stdio' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
+                    }`}
+                  >
+                    CLI Stdio 桥接（tidegate mcp）
+                  </button>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={async () => {
+                    try {
+                      await navigator.clipboard.writeText(activeSnippet)
+                      setCopiedMcp(true)
+                      onToast('success', '已复制 mcp_config.json 配置片段')
+                    } catch {
+                      onToast('info', '请手动复制下方 JSON 配置')
+                    }
+                  }}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-[#0B2A4A] hover:bg-[#123862] text-white font-medium"
+                >
+                  {copiedMcp ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} 复制配置 JSON
+                </button>
+              </div>
+
+              <pre className="p-3.5 rounded-lg bg-[#07192E] text-sky-100 font-mono text-[11px] overflow-x-auto tg-scroller-dark border border-slate-800">
+                {activeSnippet}
+              </pre>
+
+              {!newPlaintext && (
+                <div className="flex items-center justify-between text-[11px] text-slate-500">
+                  <span>提示：如尚未生成令牌，请先切换到「API 访问令牌」创建一枚新令牌，此处会自动填入。</span>
+                  <button
+                    type="button"
+                    onClick={() => setTab('tokens')}
+                    className="text-sky-700 hover:underline font-semibold shrink-0"
+                  >
+                    去创建令牌 →
+                  </button>
+                </div>
+              )}
+            </div>
+          )}
+
+          {tab === 'password' && (
             <form onSubmit={handleChangePwd} className="space-y-3 text-xs max-w-sm">
               <div>
                 <label className="block font-medium text-slate-700 mb-1">当前密码</label>

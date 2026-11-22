@@ -123,27 +123,28 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
   }
 
   return (
-    <div className="flex-1 overflow-y-auto bg-slate-50 p-5 space-y-5 text-xs">
-      <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-xs space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <div className="flex items-center gap-2 font-semibold text-sm text-slate-900">
-            <Terminal className="w-4 h-4 text-sky-600" /> mTLS 分布式节点注册与零信任接入
+    <div className="flex-1 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-5 space-y-5 text-xs">
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
+        <div className="tg-telemetry-strip px-4 py-3.5 flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2 font-semibold text-sm text-white">
+            <Terminal className="w-4 h-4 text-[#38BDF8]" /> mTLS 分布式节点注册与零信任接入
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {sysInfo && (
-              <span className="font-mono text-[11px] text-slate-500">
+              <span className="tg-tabular font-mono text-[11px] text-sky-200">
                 控制器 {sysInfo.version} · 集群端口 {sysInfo.cluster_addr}
               </span>
             )}
             <a
               href={api.exportAgentCAPEMUrl()}
               download="tidegate-cluster-ca.pem"
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-medium"
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/20 bg-white/10 hover:bg-white/20 text-white font-medium"
             >
-              <Download className="w-3.5 h-3.5 text-sky-600" /> 下载 CA 证书 (.pem)
+              <Download className="w-3.5 h-3.5 text-[#38BDF8]" /> 下载 CA 证书 (.pem)
             </a>
           </div>
         </div>
+        <div className="p-4 space-y-3">
         {sysInfo?.cluster_ca_fingerprint && (
           <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-lg bg-sky-50/70 border border-sky-200 text-sky-950 font-mono text-[11px]">
             <Shield className="w-3.5 h-3.5 text-sky-700 shrink-0" />
@@ -267,6 +268,7 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
             )}
           </div>
         )}
+        </div>
       </div>
 
       {agents.length === 0 ? (

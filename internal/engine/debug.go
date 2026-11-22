@@ -16,6 +16,9 @@ import (
 // interactive debugging and scenario dry-runs (4 MiB).
 const DefaultDebugMaxBodyBytes = 4 << 20
 
+// MaxDebugBodyBytes is the hard ceiling enforced on debug body capture (8 MiB).
+const MaxDebugBodyBytes int64 = 8 << 20
+
 // DebugOptions configures RunDebug.
 type DebugOptions struct {
 	Client       ClientKind
@@ -120,6 +123,8 @@ func RunDebug(ctx context.Context, plan *scenario.Plan, opts DebugOptions) (*Deb
 	maxBody := opts.MaxBodyBytes
 	if maxBody <= 0 {
 		maxBody = DefaultDebugMaxBodyBytes
+	} else if maxBody > MaxDebugBodyBytes {
+		maxBody = MaxDebugBodyBytes
 	}
 	engOpts := Options{
 		Client:          opts.Client,

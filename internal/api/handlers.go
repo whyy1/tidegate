@@ -13,7 +13,6 @@ import (
 	"tidegate/internal/controller"
 	"tidegate/internal/curl"
 	"tidegate/internal/importer"
-	"tidegate/internal/metrics"
 	"tidegate/internal/scenario"
 	"tidegate/internal/store"
 )
@@ -207,6 +206,7 @@ func (s *Server) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
 	if curSess, _ := auth.SessionFromContext(r.Context()); curSess != nil && curSess.ID == targetID {
 		auth.ClearSessionCookie(w, s.guard.SecureCookies(r))
 	}
+	s.audit(r, "session.revoke", "session", targetID, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -300,6 +300,7 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "project.update", "project", out.ID, map[string]any{"name": out.Name})
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -469,10 +470,18 @@ func (s *Server) handleImportApply(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	res, err := importer.Apply(s.store, r.PathValue("pid"), in)
+	pid := r.PathValue("pid")
+	res, err := importer.Apply(s.store, pid, in)
 	if err != nil {
 		writeImportError(w, err)
 		return
+	}
+	if res.Report != nil {
+		s.audit(r, "api.import", "project", pid, map[string]any{
+			"format":       res.Report.Format,
+			"apis_created": res.Report.APIsCreated,
+			"apis_updated": res.Report.APIsUpdated,
+		})
 	}
 	writeJSON(w, http.StatusOK, res)
 }
@@ -702,16 +711,18 @@ func (s *Server) handleListEnvironments(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleCreateEnvironment(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
 	var in store.Environment
 	if err := decodeJSON(w, r, &in); err != nil {
 		writeError(w, err)
 		return
 	}
-	out, err := s.store.CreateEnvironment(r.PathValue("pid"), &in)
+	out, err := s.store.CreateEnvironment(pid, &in)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "environment.create", "environment", out.ID, map[string]any{"project_id": pid, "name": out.Name})
 	writeJSON(w, http.StatusCreated, out)
 }
 
@@ -725,25 +736,29 @@ func (s *Server) handleGetEnvironment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateEnvironment(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
 	var in store.Environment
 	if err := decodeJSON(w, r, &in); err != nil {
 		writeError(w, err)
 		return
 	}
 	in.ID = r.PathValue("id")
-	out, err := s.store.UpdateEnvironment(r.PathValue("pid"), &in)
+	out, err := s.store.UpdateEnvironment(pid, &in)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "environment.update", "environment", out.ID, map[string]any{"project_id": pid, "name": out.Name})
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleDeleteEnvironment(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeleteEnvironment(r.PathValue("pid"), r.PathValue("id"), deleteVersion(w, r)); err != nil {
+	pid, id := r.PathValue("pid"), r.PathValue("id")
+	if err := s.store.DeleteEnvironment(pid, id, deleteVersion(w, r)); err != nil {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "environment.delete", "environment", id, map[string]any{"project_id": pid})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -806,6 +821,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 					writeError(w, err)
 					return
 				}
+				s.audit(r, "datafile.upload", "datafile", saved.Name, map[string]any{"project_id": pid, "size": saved.Size})
 				writeJSON(w, http.StatusCreated, saved)
 				return
 			default:
@@ -825,6 +841,7 @@ func (s *Server) handleUploadFile(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "datafile.upload", "datafile", df.Name, map[string]any{"project_id": pid, "size": df.Size})
 	writeJSON(w, http.StatusCreated, df)
 }
 
@@ -844,10 +861,12 @@ func (s *Server) handlePreviewFile(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeleteFile(r.PathValue("pid"), r.PathValue("name"), deleteVersion(w, r)); err != nil {
+	pid, name := r.PathValue("pid"), r.PathValue("name")
+	if err := s.store.DeleteFile(pid, name, deleteVersion(w, r)); err != nil {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "datafile.delete", "datafile", name, map[string]any{"project_id": pid})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -927,6 +946,7 @@ func (s *Server) handleClearDebugHistory(w http.ResponseWriter, r *http.Request)
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "debug_history.clear", "project", pid, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1017,16 +1037,18 @@ func (s *Server) handleListScenarios(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateScenario(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
 	var in store.Scenario
 	if err := decodeJSON(w, r, &in); err != nil {
 		writeError(w, err)
 		return
 	}
-	out, err := s.store.CreateScenario(r.PathValue("pid"), &in)
+	out, err := s.store.CreateScenario(pid, &in)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "scenario.create", "scenario", out.ID, map[string]any{"project_id": pid, "name": out.Name})
 	writeJSON(w, http.StatusCreated, out)
 }
 
@@ -1040,25 +1062,29 @@ func (s *Server) handleGetScenario(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateScenario(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
 	var in store.Scenario
 	if err := decodeJSON(w, r, &in); err != nil {
 		writeError(w, err)
 		return
 	}
 	in.ID = r.PathValue("id")
-	out, err := s.store.UpdateScenario(r.PathValue("pid"), &in)
+	out, err := s.store.UpdateScenario(pid, &in)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "scenario.update", "scenario", out.ID, map[string]any{"project_id": pid, "name": out.Name})
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleDeleteScenario(w http.ResponseWriter, r *http.Request) {
-	if err := s.store.DeleteScenario(r.PathValue("pid"), r.PathValue("id"), deleteVersion(w, r)); err != nil {
+	pid, id := r.PathValue("pid"), r.PathValue("id")
+	if err := s.store.DeleteScenario(pid, id, deleteVersion(w, r)); err != nil {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "scenario.delete", "scenario", id, map[string]any{"project_id": pid})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1126,22 +1152,6 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-func evaluateRunThresholds(run *store.Run) ([]scenario.ThresholdResult, *bool) {
-	if run == nil || len(run.Summary) == 0 || len(run.Scenario) == 0 {
-		return nil, nil
-	}
-	def, err := run.Definition()
-	if err != nil || len(def.Load.Thresholds) == 0 {
-		return nil, nil
-	}
-	var sv metrics.SnapshotView
-	if err := json.Unmarshal(run.Summary, &sv); err != nil {
-		return nil, nil
-	}
-	res, passed := scenario.EvaluateThresholds(def.Load.Thresholds, &sv)
-	return res, &passed
-}
-
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	run, err := s.results.GetRun(r.Context(), id)
@@ -1154,7 +1164,7 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	thresholds, thresholdsPassed := evaluateRunThresholds(run)
+	thresholds, thresholdsPassed := controller.EvaluateRunThresholds(run)
 	writeJSON(w, http.StatusOK, struct {
 		*store.Run
 		Alerts           []store.Alert              `json:"alerts"`

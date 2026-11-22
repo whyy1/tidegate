@@ -4,6 +4,7 @@ import {
   ArrowUp,
   ChevronDown,
   ChevronRight,
+  Columns2,
   Copy,
   Eye,
   FilePlus,
@@ -11,9 +12,12 @@ import {
   FolderOpen,
   FolderPlus,
   Import,
+  PanelLeftClose,
+  PanelLeftOpen,
   Pencil,
   Play,
   Plus,
+  Rows2,
   Save,
   Search,
   Sparkles,
@@ -56,6 +60,7 @@ interface Props {
   onWorkspaceMutated: () => Promise<void>
   onQuickLoadTest: (apiDraft: Partial<API>) => void
   incomingReplay?: { seq: number; api: Partial<API> } | null
+  openRequest?: { seq: number; apiId?: string; scratch?: boolean } | null
   isActive?: boolean
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
 }
@@ -141,6 +146,7 @@ export function WorkbenchView({
   onWorkspaceMutated,
   onQuickLoadTest,
   incomingReplay,
+  openRequest,
   isActive = true,
   onToast,
 }: Props) {
@@ -149,6 +155,24 @@ export function WorkbenchView({
   const [history, setHistory] = useState<DebugRecord[]>([])
   const [search, setSearch] = useState('')
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  const [treeCollapsed, setTreeCollapsed] = useState(false)
+  const [splitMode, setSplitMode] = useState<'horizontal' | 'vertical'>(() => {
+    try {
+      return window.localStorage.getItem('tg.workbench.splitMode') === 'vertical' ? 'vertical' : 'horizontal'
+    } catch {
+      return 'horizontal'
+    }
+  })
+  const [splitPct, setSplitPct] = useState<number>(() => {
+    try {
+      const n = Number(window.localStorage.getItem('tg.workbench.splitPct'))
+      return Number.isFinite(n) && n >= 28 && n <= 74 ? n : 52
+    } catch {
+      return 52
+    }
+  })
+  const splitBoxRef = useRef<HTMLDivElement | null>(null)
+  const [resizingSplit, setResizingSplit] = useState(false)
 
   const [tabs, setTabs] = useState<OpenTab[]>(() => [
     {
@@ -229,6 +253,57 @@ export function WorkbenchView({
     ])
     setActiveTabKey(key)
   }, [incomingReplay])
+
+  useEffect(() => {
+    if (!openRequest) return
+    if (openRequest.scratch) {
+      addScratchTab()
+      return
+    }
+    if (openRequest.apiId) {
+      void openSavedAPI(openRequest.apiId)
+    }
+  }, [openRequest])
+
+  const changeSplitMode = (mode: 'horizontal' | 'vertical') => {
+    setSplitMode(mode)
+    try {
+      window.localStorage.setItem('tg.workbench.splitMode', mode)
+    } catch {
+      // ignore
+    }
+  }
+
+  const updateSplitPct = (nextPct: number) => {
+    const clamped = Math.max(28, Math.min(74, Math.round(nextPct * 10) / 10))
+    setSplitPct(clamped)
+    try {
+      window.localStorage.setItem('tg.workbench.splitPct', String(clamped))
+    } catch {
+      // ignore
+    }
+  }
+
+  useEffect(() => {
+    if (!resizingSplit) return
+    const onMove = (e: PointerEvent) => {
+      const box = splitBoxRef.current
+      if (!box) return
+      const r = box.getBoundingClientRect()
+      if (splitMode === 'horizontal' && r.width > 0) {
+        updateSplitPct(((e.clientX - r.left) / r.width) * 100)
+      } else if (splitMode === 'vertical' && r.height > 0) {
+        updateSplitPct(((e.clientY - r.top) / r.height) * 100)
+      }
+    }
+    const onUp = () => setResizingSplit(false)
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+    return () => {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+  }, [resizingSplit, splitMode])
 
   const patchActiveTab = (updater: (tab: OpenTab) => OpenTab) => {
     setTabs((prev) => prev.map((t) => (t.tabKey === activeTab.tabKey ? updater(t) : t)))
@@ -740,113 +815,154 @@ export function WorkbenchView({
   }
 
   return (
-    <div className="flex flex-1 min-h-0 bg-slate-100">
+    <div className="flex flex-1 min-h-0 bg-[var(--tg-canvas)]">
       {/* Left API Tree */}
-      <aside className="w-68 bg-slate-50 border-r border-slate-200 flex flex-col shrink-0">
-        <div className="p-2.5 border-b border-slate-200 space-y-2">
-          <div className="relative">
-            <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
-            <input
-              type="text"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="搜索接口名称、路径或方法..."
-              className="w-full pl-8 pr-2.5 py-1.5 text-xs bg-white border border-slate-300 rounded-md focus:border-sky-500 focus:outline-none"
-            />
-          </div>
-          <div className="grid grid-cols-2 gap-1.5 text-xs">
-            <button
-              type="button"
-              onClick={() => addScratchTab()}
-              className="inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-md bg-sky-600 hover:bg-sky-700 text-white font-medium"
-            >
-              <FilePlus className="w-3.5 h-3.5" /> 新建 / 调试
-            </button>
-            <button
-              type="button"
-              disabled={!canWrite}
-              onClick={() => setImportOpen(true)}
-              className="inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-medium disabled:opacity-45"
-            >
-              <Import className="w-3.5 h-3.5 text-sky-600" /> 导入接口
-            </button>
-          </div>
-          <div className="flex items-center justify-between text-[11px] px-0.5">
-            <span className="text-slate-500 font-medium">接口目录树</span>
-            {canWrite && (
+      {!treeCollapsed && (
+        <aside className="w-64 bg-white border-r border-slate-200 flex flex-col shrink-0">
+          <div className="p-2.5 border-b border-slate-200 space-y-2">
+            <div className="relative">
+              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+              <input
+                type="text"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
+                placeholder="过滤接口名称或路径..."
+                className="w-full pl-8 pr-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md focus:bg-white focus:border-sky-500 focus:outline-none"
+              />
+            </div>
+            <div className="grid grid-cols-2 gap-1.5 text-xs">
               <button
                 type="button"
-                onClick={() => setFolderModal({ open: true, folder: null, parentId: '' })}
-                className="inline-flex items-center gap-1 text-sky-700 hover:underline font-medium"
+                onClick={() => addScratchTab()}
+                className="inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-md bg-[#0B2A4A] hover:bg-[#123862] text-white font-medium"
               >
-                <FolderPlus className="w-3 h-3" /> 新建目录
+                <FilePlus className="w-3.5 h-3.5" /> 新建请求
               </button>
-            )}
-          </div>
-        </div>
-
-        <div
-          className="flex-1 overflow-y-auto p-1.5 space-y-0.5"
-          onDragOver={(e) => e.preventDefault()}
-          onDrop={(e) => {
-            if (e.target === e.currentTarget && dragNodeId) {
-              void handleDropIntoFolder('')
-            }
-          }}
-        >
-          {tree.children.length === 0 ? (
-            <div className="text-center py-8 px-3 text-xs text-slate-400 space-y-2">
-              <p>暂无已保存接口。</p>
-              <p>可直接在右侧粘贴完整 URL 或 cURL 发起调试，或点击「导入接口」。</p>
-            </div>
-          ) : (
-            renderTreeNodes(filterTree(tree.children))
-          )}
-        </div>
-      </aside>
-
-      {/* Main Editor + Response Area */}
-      <main className="flex-1 min-w-0 flex flex-col bg-white">
-        {/* Multi-Tabs Bar */}
-        <div className="flex items-center gap-1 px-2 pt-1.5 bg-slate-100 border-b border-slate-200 overflow-x-auto shrink-0">
-          {tabs.map((tab) => {
-            const isActive = tab.tabKey === activeTab.tabKey
-            return (
-              <div
-                key={tab.tabKey}
-                onClick={() => setActiveTabKey(tab.tabKey)}
-                className={`group flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg border text-xs cursor-pointer max-w-[200px] shrink-0 ${
-                  isActive
-                    ? 'bg-white border-slate-200 border-b-white -mb-px text-slate-900 font-semibold'
-                    : 'bg-slate-200/60 border-transparent text-slate-600 hover:bg-slate-200'
-                }`}
+              <button
+                type="button"
+                disabled={!canWrite}
+                onClick={() => setImportOpen(true)}
+                className="inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-md border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-medium disabled:opacity-45"
               >
-                <span className="font-mono text-[10px] font-bold text-sky-700">
-                  {tab.api.request?.method || 'GET'}
-                </span>
-                <span className="truncate">{tab.api.name || '未命名'}</span>
-                {tab.dirty && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" title="未保存更改" />}
+                <Import className="w-3.5 h-3.5 text-sky-600" /> 导入集合
+              </button>
+            </div>
+            <div className="flex items-center justify-between text-[11px] px-0.5">
+              <span className="text-slate-500 font-medium">接口目录树</span>
+              {canWrite && (
                 <button
                   type="button"
-                  onClick={(e) => {
-                    e.stopPropagation()
-                    closeTab(tab.tabKey)
-                  }}
-                  className="text-slate-400 hover:text-slate-700 p-0.5 rounded"
+                  onClick={() => setFolderModal({ open: true, folder: null, parentId: '' })}
+                  className="inline-flex items-center gap-1 text-sky-700 hover:underline font-medium"
                 >
-                  <X className="w-3 h-3" />
+                  <FolderPlus className="w-3 h-3" /> 新建目录
                 </button>
-              </div>
-            )
-          })}
-          <button
-            type="button"
-            title="新建临时调试标签页"
-            onClick={() => addScratchTab()}
-            className="p-1.5 text-slate-500 hover:text-sky-700 rounded mb-1"
+              )}
+            </div>
+          </div>
+
+          <div
+            className="flex-1 overflow-y-auto tg-scroller p-1.5 space-y-0.5"
+            onDragOver={(e) => e.preventDefault()}
+            onDrop={(e) => {
+              if (e.target === e.currentTarget && dragNodeId) {
+                void handleDropIntoFolder('')
+              }
+            }}
           >
-            <Plus className="w-3.5 h-3.5" />
-          </button>
+            {tree.children.length === 0 ? (
+              <div className="text-center py-8 px-3 text-xs text-slate-400 space-y-2">
+                <p>暂无已保存接口。</p>
+                <p>可在地址栏直接粘贴 URL 或 cURL 调试，或点击「导入集合」。</p>
+              </div>
+            ) : (
+              renderTreeNodes(filterTree(tree.children))
+            )}
+          </div>
+        </aside>
+      )}
+
+      {/* Main Editor + Split Response Area */}
+      <main className="flex-1 min-w-0 flex flex-col bg-white">
+        {/* Multi-Tabs Bar + View Controls */}
+        <div className="flex items-center justify-between gap-2 px-2 pt-1.5 bg-slate-100 border-b border-slate-200 shrink-0">
+          <div className="flex items-center gap-1 overflow-x-auto min-w-0 flex-1">
+            <button
+              type="button"
+              onClick={() => setTreeCollapsed((v) => !v)}
+              title={treeCollapsed ? '展开接口目录树' : '收起接口目录树'}
+              aria-label={treeCollapsed ? '展开接口目录树' : '收起接口目录树'}
+              className="p-1.5 mb-1 text-slate-500 hover:text-slate-900 hover:bg-slate-200/70 rounded shrink-0"
+            >
+              {treeCollapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
+            </button>
+
+            {tabs.map((tab) => {
+              const isActiveTab = tab.tabKey === activeTab.tabKey
+              return (
+                <div
+                  key={tab.tabKey}
+                  onClick={() => setActiveTabKey(tab.tabKey)}
+                  className={`group flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg border text-xs cursor-pointer max-w-[200px] shrink-0 ${
+                    isActiveTab
+                      ? 'bg-white border-slate-200 border-b-white -mb-px text-slate-900 font-semibold'
+                      : 'bg-slate-200/60 border-transparent text-slate-600 hover:bg-slate-200'
+                  }`}
+                >
+                  <span className="font-mono text-[10px] font-bold text-sky-700">
+                    {tab.api.request?.method || (tab.api.request?.protocol || 'GET').toUpperCase()}
+                  </span>
+                  <span className="truncate">{tab.api.name || '未命名'}</span>
+                  {tab.dirty && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" title="未保存更改" />}
+                  <button
+                    type="button"
+                    aria-label="关闭标签页"
+                    onClick={(e) => {
+                      e.stopPropagation()
+                      closeTab(tab.tabKey)
+                    }}
+                    className="text-slate-400 hover:text-slate-700 p-0.5 rounded"
+                  >
+                    <X className="w-3 h-3" />
+                  </button>
+                </div>
+              )
+            })}
+            <button
+              type="button"
+              title="新建临时调试标签页"
+              onClick={() => addScratchTab()}
+              className="p-1.5 text-slate-500 hover:text-sky-700 rounded mb-1 shrink-0"
+            >
+              <Plus className="w-3.5 h-3.5" />
+            </button>
+          </div>
+
+          {/* Layout Split Mode Toggle */}
+          <div className="inline-flex items-center gap-0.5 bg-white border border-slate-200 rounded-md p-0.5 mb-1 shrink-0 text-[11px]">
+            <button
+              type="button"
+              onClick={() => changeSplitMode('horizontal')}
+              title="左右并排分屏"
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded ${
+                splitMode === 'horizontal' ? 'bg-[#0B2A4A] text-white font-semibold' : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              <Columns2 className="w-3 h-3" />
+              <span className="hidden md:inline">左右</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => changeSplitMode('vertical')}
+              title="上下分屏"
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded ${
+                splitMode === 'vertical' ? 'bg-[#0B2A4A] text-white font-semibold' : 'text-slate-600 hover:bg-slate-100'
+              }`}
+            >
+              <Rows2 className="w-3 h-3" />
+              <span className="hidden md:inline">上下</span>
+            </button>
+          </div>
         </div>
 
         {/* URL & Actions Bar */}
@@ -998,66 +1114,94 @@ export function WorkbenchView({
           </div>
         </div>
 
-        {/* Split Request Config & Response Panel */}
-        <div className="flex-1 min-h-0 overflow-y-auto flex flex-col">
-          {/* Request Config Sub-tabs */}
-          <div className="px-4 pt-2 border-b border-slate-200 flex flex-wrap items-center justify-between gap-2 bg-slate-50/50">
-            <div className="flex items-center gap-1 text-xs font-medium">
-              {(
-                [
-                  {
-                    id: 'params' as const,
-                    label: `Params (${(req.path_params?.length || 0) + (req.query?.length || 0)})`,
-                  },
-                  { id: 'headers' as const, label: protocol === 'grpc' ? `Metadata (${req.headers?.length || 0})` : `Headers (${req.headers?.length || 0})` },
-                  {
-                    id: 'body' as const,
-                    label:
-                      protocol === 'ws'
-                        ? `WS 帧与连接 (${req.ws?.messages?.length || 0})`
-                        : protocol === 'grpc'
-                          ? 'gRPC 调用配置'
-                          : protocol === 'sse'
-                            ? 'SSE 流与请求体'
-                            : `Body (${body.type || 'none'})`,
-                  },
-                  { id: 'auth' as const, label: `Auth (${activeTab.api.auth?.type || 'inherit'})` },
-                  { id: 'extract' as const, label: `提取器 (${extracts.length})` },
-                  { id: 'assert' as const, label: `断言 (${asserts.length})` },
-                  { id: 'docs' as const, label: `文档示例 (${examples.length + responseFields.length})` },
-                ] as const
-              ).map((st) => (
+        {/* Resizable Split Request Config & Response Inspector */}
+        <div
+          ref={splitBoxRef}
+          className={`flex-1 min-h-0 flex ${splitMode === 'horizontal' ? 'flex-row' : 'flex-col'} ${
+            resizingSplit ? 'select-none' : ''
+          }`}
+        >
+          {/* Left / Top: Request Composer Pane */}
+          <div
+            style={
+              splitMode === 'horizontal'
+                ? { width: `${splitPct}%` }
+                : { height: `${splitPct}%` }
+            }
+            className="tg-split-pane flex flex-col min-h-0 min-w-0 shrink-0 overflow-hidden"
+          >
+            {/* Request Config Sub-tabs */}
+            <div className="px-4 border-b border-slate-200 flex items-center justify-between gap-2 bg-slate-50/70 shrink-0">
+              <div role="tablist" aria-label="请求配置页签" className="tg-tablist gap-1 text-xs font-medium min-w-0">
+                {(
+                  [
+                    {
+                      id: 'params' as const,
+                      label: `Params`,
+                      count: (req.path_params?.length || 0) + (req.query?.length || 0),
+                    },
+                    {
+                      id: 'headers' as const,
+                      label: protocol === 'grpc' ? 'Metadata' : 'Headers',
+                      count: req.headers?.length || 0,
+                    },
+                    {
+                      id: 'body' as const,
+                      label:
+                        protocol === 'ws'
+                          ? 'WS 帧'
+                          : protocol === 'grpc'
+                            ? 'gRPC'
+                            : protocol === 'sse'
+                              ? 'SSE'
+                              : `Body${body.type && body.type !== 'none' ? ` · ${body.type}` : ''}`,
+                      count: protocol === 'ws' ? req.ws?.messages?.length || 0 : 0,
+                    },
+                    { id: 'auth' as const, label: `认证 · ${activeTab.api.auth?.type || 'inherit'}`, count: 0 },
+                    { id: 'extract' as const, label: '提取', count: extracts.length },
+                    { id: 'assert' as const, label: '断言', count: asserts.length },
+                    { id: 'docs' as const, label: '文档', count: examples.length + responseFields.length },
+                  ] as const
+                ).map((st) => {
+                  const selected = reqSubTab === st.id
+                  return (
+                    <button
+                      key={st.id}
+                      type="button"
+                      role="tab"
+                      aria-selected={selected}
+                      onClick={() => setReqSubTab(st.id)}
+                      className={`tg-tab inline-flex items-center gap-1.5 px-2.5 py-2 transition-colors ${
+                        selected ? 'text-sky-700' : 'text-slate-600 hover:text-slate-900'
+                      }`}
+                    >
+                      <span>{st.label}</span>
+                      {st.count > 0 && (
+                        <span className="tg-tabular px-1.5 py-0.2 rounded-full bg-sky-100 text-sky-800 text-[10px] font-mono">
+                          {st.count}
+                        </span>
+                      )}
+                    </button>
+                  )
+                })}
+              </div>
+
+              {reqSubTab === 'headers' && (
                 <button
-                  key={st.id}
                   type="button"
-                  onClick={() => setReqSubTab(st.id)}
-                  className={`px-3 py-2 border-b-2 transition-colors ${
-                    reqSubTab === st.id
-                      ? 'border-sky-500 text-sky-700 font-semibold'
-                      : 'border-transparent text-slate-600 hover:text-slate-900'
+                  onClick={() => void handleToggleEffectivePreview()}
+                  className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-medium ${
+                    activeTab.showEffective
+                      ? 'bg-sky-100 border-sky-300 text-sky-800'
+                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
                   }`}
                 >
-                  {st.label}
+                  <Eye className="w-3 h-3" /> {activeTab.showEffective ? '隐藏预览' : '生效预览'}
                 </button>
-              ))}
+              )}
             </div>
 
-            {reqSubTab === 'headers' && (
-              <button
-                type="button"
-                onClick={() => void handleToggleEffectivePreview()}
-                className={`mb-1 inline-flex items-center gap-1 px-2.5 py-1 rounded border text-xs font-medium ${
-                  activeTab.showEffective
-                    ? 'bg-sky-100 border-sky-300 text-sky-800'
-                    : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
-                }`}
-              >
-                <Eye className="w-3.5 h-3.5" /> {activeTab.showEffective ? '隐藏生效预览' : '查看继承与变量生效预览'}
-              </button>
-            )}
-          </div>
-
-          <div className="p-4 text-xs space-y-4">
+            <div className="flex-1 min-h-0 overflow-y-auto tg-scroller p-4 text-xs space-y-4">
             {reqSubTab === 'params' && (
               <div className="space-y-4">
                 {(req.path_params?.length || 0) > 0 && (
@@ -2033,39 +2177,70 @@ export function WorkbenchView({
                 </div>
               </div>
             )}
+            </div>
           </div>
 
-          <ResponsePanel
-            projectId={projectId}
-            debugResp={activeTab.debugResp}
-            historyList={history}
-            loadingDebug={sending}
-            autoSyncTempVars={autoSyncTempVars}
-            onToggleAutoSync={setAutoSyncTempVars}
-            onPickExtractJSONPath={addExtractFromJSON}
-            onPickAssertJSONPath={addAssertFromJSON}
-            onPushTempVars={(vars) => {
-              onTempVarsChange({ ...tempVars, ...vars })
-              onToast('success', '已写入顶部 ⚡ 临时变量池')
+          {/* Draggable & Keyboard-Accessible Split Separator */}
+          <div
+            role="separator"
+            tabIndex={0}
+            aria-orientation={splitMode === 'horizontal' ? 'vertical' : 'horizontal'}
+            aria-label="拖拽或按方向键调整请求与响应分屏比例"
+            aria-valuenow={Math.round(splitPct)}
+            aria-valuemin={28}
+            aria-valuemax={74}
+            onPointerDown={(e) => {
+              e.preventDefault()
+              setResizingSplit(true)
             }}
-            onRefreshHistory={async () => {
-              try {
-                setHistory(await api.listDebugHistory(projectId, 40, false))
-              } catch {
-                // ignore
+            onKeyDown={(e) => {
+              if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                e.preventDefault()
+                updateSplitPct(splitPct - 4)
+              } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                e.preventDefault()
+                updateSplitPct(splitPct + 4)
               }
             }}
-            onLoadHistoryRecord={loadHistoryIntoPanel}
-            onClearHistory={async () => {
-              try {
-                await api.clearDebugHistory(projectId)
-                setHistory([])
-                onToast('success', '已清空项目调试历史')
-              } catch (err) {
-                onToast('error', err instanceof APIError ? err.message : '清空历史失败')
-              }
-            }}
+            className={`shrink-0 bg-slate-200 hover:bg-sky-500 focus:bg-sky-600 focus:outline-none transition-colors flex items-center justify-center ${
+              splitMode === 'horizontal' ? 'w-1.5 cursor-col-resize' : 'h-1.5 cursor-row-resize'
+            }`}
           />
+
+          {/* Right / Bottom: Response Telemetry Inspector */}
+          <div className="tg-split-pane flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+            <ResponsePanel
+              projectId={projectId}
+              debugResp={activeTab.debugResp}
+              historyList={history}
+              loadingDebug={sending}
+              autoSyncTempVars={autoSyncTempVars}
+              onToggleAutoSync={setAutoSyncTempVars}
+              onPickExtractJSONPath={addExtractFromJSON}
+              onPickAssertJSONPath={addAssertFromJSON}
+              onPushTempVars={(vars) => {
+                onTempVarsChange({ ...tempVars, ...vars })
+                onToast('success', '已写入顶部临时变量池')
+              }}
+              onRefreshHistory={async () => {
+                try {
+                  setHistory(await api.listDebugHistory(projectId, 40, false))
+                } catch {
+                  // ignore
+                }
+              }}
+              onLoadHistoryRecord={loadHistoryIntoPanel}
+              onClearHistory={async () => {
+                try {
+                  await api.clearDebugHistory(projectId)
+                  setHistory([])
+                  onToast('success', '已清空项目调试历史')
+                } catch (err) {
+                  onToast('error', err instanceof APIError ? err.message : '清空历史失败')
+                }
+              }}
+            />
+          </div>
         </div>
       </main>
 

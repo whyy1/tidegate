@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"sort"
 	"strconv"
@@ -17,6 +19,7 @@ import (
 
 	"tidegate/internal/exporter"
 	"tidegate/internal/metrics"
+	"tidegate/internal/scenario"
 	"tidegate/internal/store"
 )
 
@@ -60,8 +63,53 @@ type metricsSink struct {
 	client *http.Client
 }
 
+func safeSinkDialContext(ctx context.Context, network, addr string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, err
+	}
+	d := &net.Dialer{Timeout: 4 * time.Second, KeepAlive: 30 * time.Second}
+	if ip := net.ParseIP(strings.Trim(host, "[]")); ip != nil {
+		if isBlockedSinkIP(ip) {
+			return nil, fmt.Errorf("拒绝向云元数据或链路本地地址 (%s) 推送指标", ip.String())
+		}
+		return d.DialContext(ctx, network, addr)
+	}
+	ips, err := net.DefaultResolver.LookupIPAddr(ctx, host)
+	if err != nil || len(ips) == 0 {
+		return nil, fmt.Errorf("解析指标外发目标 %q 失败：%v", host, err)
+	}
+	for _, entry := range ips {
+		if isBlockedSinkIP(entry.IP) {
+			return nil, fmt.Errorf("目标 %q 解析到受保护的链路本地/元数据地址 %s，已拦截", host, entry.IP.String())
+		}
+	}
+	var lastErr error
+	for _, entry := range ips {
+		c, derr := d.DialContext(ctx, network, net.JoinHostPort(entry.IP.String(), port))
+		if derr == nil {
+			return c, nil
+		}
+		lastErr = derr
+	}
+	return nil, lastErr
+}
+
+func isBlockedSinkIP(ip net.IP) bool {
+	if ip == nil {
+		return true
+	}
+	addr, ok := netip.AddrFromSlice(ip)
+	if !ok {
+		return true
+	}
+	u := addr.Unmap()
+	return u.IsUnspecified() || u.IsLinkLocalUnicast() || u.IsLinkLocalMulticast()
+}
+
 func newMetricsSink(ctrl *Controller) *metricsSink {
 	tr := &http.Transport{
+		DialContext:         safeSinkDialContext,
 		MaxIdleConns:        8,
 		MaxIdleConnsPerHost: 4,
 		IdleConnTimeout:     30 * time.Second,
@@ -408,6 +456,18 @@ func (c *Controller) TestMetricsSink(ctx context.Context, draft *MetricsSinkConf
 	if cfg.URL == "" || cfg.Type == "" {
 		return userErr(ErrInvalidInput, "请先填写目标类型和地址后再测试连接", nil)
 	}
+	if u, perr := url.Parse(cfg.URL); perr == nil && u.Hostname() != "" {
+		if pol, serr := c.GetSecurityPolicy(ctx); serr == nil && pol.AllowlistEnabled {
+			m, merr := scenario.NewTargetMatcher(pol.AllowedTargets)
+			if merr == nil && m.Len() > 0 {
+				if err := m.CheckDial(u.Hostname(), nil); err != nil {
+					if !polMatchSinkSavedURL(ctx, c, cfg.URL) {
+						return userErr(ErrTargetNotAllowed, fmt.Sprintf("指标外发地址 %q 不在安全策略白名单内，请先加入白名单或保持已保存配置", u.Hostname()), err)
+					}
+				}
+			}
+		}
+	}
 
 	now := time.Now()
 	testView := &metrics.SnapshotView{
@@ -617,3 +677,8 @@ func influxFloat(v float64) string {
 
 // Keep errors import explicitly used if additional sentinel checks are added later.
 var _ = errors.New
+
+func polMatchSinkSavedURL(ctx context.Context, c *Controller, targetURL string) bool {
+	saved, _, err := c.loadResolvedSinkConfig(ctx)
+	return err == nil && saved.URL != "" && strings.EqualFold(saved.URL, targetURL)
+}

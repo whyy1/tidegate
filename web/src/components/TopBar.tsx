@@ -1,8 +1,17 @@
-import { Activity, Cpu, FolderKanban, Globe, Layers, Play, Server, ShieldCheck, UserCheck, Workflow } from 'lucide-react'
+import { Activity, Bot, FolderKanban, Globe, Play, Search, Server } from 'lucide-react'
 import type { AgentView, Environment, Project, User } from '../lib/types'
 import { TempVarsPopover } from './TempVarsPopover'
 
 export type NavTab = 'workbench' | 'scenarios' | 'run' | 'history' | 'agents' | 'governance'
+
+const TAB_TITLES: Record<NavTab, string> = {
+  workbench: '接口调试工作台',
+  scenarios: '场景编排与数据驱动',
+  run: '实时分布式压测控制台',
+  history: '压测历史与基线对比',
+  agents: '发压集群与节点遥测',
+  governance: '系统治理、安全策略与 MCP',
+}
 
 interface Props {
   user: User
@@ -22,12 +31,12 @@ interface Props {
   onEnvironmentsChanged: () => Promise<void>
   onOpenProjectModal: () => void
   onOpenEnvModal: () => void
-  onOpenAccountModal: () => void
+  onOpenAccountModal: (initialTab?: 'sessions' | 'tokens' | 'mcp' | 'password') => void
+  onOpenCommandPalette: () => void
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
 }
 
 export function TopBar({
-  user,
   projects,
   activeProject,
   environments,
@@ -45,71 +54,29 @@ export function TopBar({
   onOpenProjectModal,
   onOpenEnvModal,
   onOpenAccountModal,
+  onOpenCommandPalette,
   onToast,
 }: Props) {
   const activeEnv = environments.find((e) => e.id === activeEnvId) || null
-  const navItems: Array<{ id: NavTab; label: string; icon: typeof Workflow; badge?: string }> = [
-    { id: 'workbench', label: '接口工作台', icon: Layers },
-    { id: 'scenarios', label: '场景与数据', icon: Workflow },
-    { id: 'run', label: '实时压测', icon: Play, badge: activeRunId ? '运行中' : undefined },
-    { id: 'history', label: '历史与对比', icon: Activity },
-    { id: 'agents', label: '发压节点', icon: Server, badge: String(agents.length) },
-    { id: 'governance', label: '系统治理', icon: ShieldCheck },
-  ]
 
   return (
-    <header className="bg-[#0B2A4A] text-white border-b border-slate-800 px-3 py-2 flex flex-wrap items-center justify-between gap-2 shrink-0">
-      <div className="flex items-center gap-3">
-        <div className="flex items-center gap-2 pr-2">
-          <img src="/favicon.svg" alt="Tidegate" className="w-7 h-7 rounded-md" />
-          <span className="font-bold tracking-tight text-sm text-white">Tidegate</span>
-        </div>
+    <header className="h-11 bg-white border-b border-slate-200 px-3.5 flex items-center justify-between gap-3 shrink-0">
+      {/* Left: View Context + Project + Environment */}
+      <div className="flex items-center gap-2.5 min-w-0">
+        <h2 className="text-xs font-bold text-slate-900 whitespace-nowrap hidden xl:block pr-2 border-r border-slate-200">
+          {TAB_TITLES[activeTab]}
+        </h2>
 
-        <nav className="flex items-center gap-1 bg-white/8 p-0.5 rounded-lg">
-          {navItems.map((item) => {
-            const Icon = item.icon
-            const active = activeTab === item.id
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => onChangeTab(item.id)}
-                className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-colors ${
-                  active ? 'bg-[#3BA7FF] text-slate-950 font-semibold shadow-xs' : 'text-slate-200 hover:bg-white/10'
-                }`}
-              >
-                <Icon className="w-3.5 h-3.5" />
-                <span>{item.label}</span>
-                {item.badge && (
-                  <span
-                    className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono ${
-                      item.id === 'run'
-                        ? 'bg-emerald-400 text-slate-950 font-bold animate-pulse'
-                        : active
-                          ? 'bg-slate-900/20 text-slate-950'
-                          : 'bg-white/15 text-slate-100'
-                    }`}
-                  >
-                    {item.badge}
-                  </span>
-                )}
-              </button>
-            )
-          })}
-        </nav>
-      </div>
-
-      <div className="flex flex-wrap items-center gap-2">
-        <div className="flex items-center bg-white/10 rounded-md border border-white/15">
-          <FolderKanban className="w-3.5 h-3.5 text-sky-300 ml-2 shrink-0" />
+        <div className="flex items-center bg-slate-100 rounded-md border border-slate-200/90 text-xs">
+          <FolderKanban className="w-3.5 h-3.5 text-sky-700 ml-2 shrink-0" />
           <select
             aria-label="切换项目"
             value={activeProject?.id || ''}
             onChange={(e) => onSelectProject(e.target.value)}
-            className="bg-transparent text-xs text-white px-2 py-1 focus:outline-none max-w-[140px]"
+            className="bg-transparent text-xs font-medium text-slate-800 px-2 py-1 focus:outline-none max-w-[140px]"
           >
             {projects.map((p) => (
-              <option key={p.id} value={p.id} className="text-slate-900">
+              <option key={p.id} value={p.id}>
                 {p.name}
               </option>
             ))}
@@ -117,33 +84,39 @@ export function TopBar({
           <button
             type="button"
             onClick={onOpenProjectModal}
-            className="px-2 py-1 text-[11px] border-l border-white/15 text-sky-200 hover:text-white hover:bg-white/10"
+            className="px-2 py-1 text-[11px] border-l border-slate-200 text-sky-700 hover:bg-slate-200/70 font-medium"
           >
             管理
           </button>
         </div>
 
-        <div className="flex items-center bg-white/10 rounded-md border border-white/15">
-          <Globe className="w-3.5 h-3.5 text-emerald-300 ml-2 shrink-0" />
+        <div className="flex items-center bg-slate-100 rounded-md border border-slate-200/90 text-xs min-w-0">
+          <Globe className="w-3.5 h-3.5 text-emerald-700 ml-2 shrink-0" />
           <select
             aria-label="切换环境"
             value={activeEnvId}
             onChange={(e) => onSelectEnv(e.target.value)}
-            className="bg-transparent text-xs text-white px-2 py-1 focus:outline-none max-w-[145px]"
+            className="bg-transparent text-xs font-medium text-slate-800 px-2 py-1 focus:outline-none max-w-[140px]"
           >
-            <option value="" className="text-slate-900">
-              无环境（直填完整URL）
-            </option>
+            <option value="">无环境（直填完整 URL）</option>
             {environments.map((env) => (
-              <option key={env.id} value={env.id} className="text-slate-900">
+              <option key={env.id} value={env.id}>
                 {env.name}
               </option>
             ))}
           </select>
+          {activeEnv?.base_url && (
+            <span
+              className="hidden md:inline-block max-w-[200px] truncate px-2 py-0.5 text-[11px] font-mono text-slate-500 border-l border-slate-200"
+              title={activeEnv.base_url}
+            >
+              {activeEnv.base_url}
+            </span>
+          )}
           <button
             type="button"
             onClick={onOpenEnvModal}
-            className="px-2 py-1 text-[11px] border-l border-white/15 text-sky-200 hover:text-white hover:bg-white/10"
+            className="px-2 py-1 text-[11px] border-l border-slate-200 text-sky-700 hover:bg-slate-200/70 font-medium shrink-0"
           >
             环境
           </button>
@@ -159,30 +132,72 @@ export function TopBar({
             onToast={onToast}
           />
         )}
+      </div>
+
+      {/* Right: Quick Search + Live Active Run Telemetry + Nodes + MCP */}
+      <div className="flex items-center gap-2 shrink-0">
+        {activeRunId && activeTab !== 'run' && (
+          <button
+            type="button"
+            onClick={() => onChangeTab('run')}
+            className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-50 border border-emerald-300 text-emerald-800 hover:bg-emerald-100 text-xs font-semibold transition-colors"
+            title="点击返回查看正在运行的实时压测遥测面板"
+          >
+            <span className="w-2 h-2 rounded-full bg-emerald-500 animate-pulse" />
+            <Play className="w-3 h-3 fill-current" />
+            <span>压测运行中</span>
+          </button>
+        )}
+
+        <button
+          type="button"
+          onClick={onOpenCommandPalette}
+          className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs text-slate-600 transition-colors"
+          title="打开快速搜索与命令面板 (Ctrl+K)"
+        >
+          <Search className="w-3.5 h-3.5 text-slate-400" />
+          <span>检索接口 / 命令</span>
+          <kbd className="px-1 py-0.2 rounded border border-slate-300 bg-white font-mono text-[10px] text-slate-500">
+            Ctrl+K
+          </kbd>
+        </button>
 
         <button
           type="button"
           onClick={() => onChangeTab('agents')}
-          title={wsConnected ? 'WebSocket 实时连接正常' : 'WebSocket 重连中'}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/20 border border-white/15 text-xs"
+          title={wsConnected ? 'WebSocket 实时遥测正常' : 'WebSocket 重连中'}
+          className="tg-tabular inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md border border-slate-200 bg-slate-50 hover:bg-slate-100 text-xs text-slate-700 font-medium"
         >
           <span
             className={`w-2 h-2 rounded-full ${
-              wsConnected && agents.length > 0 ? 'bg-emerald-400' : wsConnected ? 'bg-amber-400' : 'bg-rose-400'
+              wsConnected && agents.length > 0 ? 'bg-emerald-500' : wsConnected ? 'bg-amber-500' : 'bg-rose-500'
             }`}
           />
-          <Cpu className="w-3.5 h-3.5 text-sky-300" />
+          <Server className="w-3.5 h-3.5 text-slate-500" />
           <span>{agents.length} 节点</span>
         </button>
 
         <button
           type="button"
-          onClick={onOpenAccountModal}
-          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-white/10 hover:bg-white/20 border border-white/15 text-xs"
+          onClick={() => onOpenAccountModal('mcp')}
+          className="hidden lg:inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-sky-200 bg-sky-50 hover:bg-sky-100 text-xs text-sky-800 font-medium transition-colors"
+          title="配置 Claude Desktop / Cursor / Antigravity MCP 客户端接入"
         >
-          <UserCheck className="w-3.5 h-3.5 text-sky-200" />
-          <span>{user.username}</span>
+          <Bot className="w-3.5 h-3.5 text-sky-600" />
+          <span>MCP</span>
         </button>
+
+        {activeTab !== 'history' && (
+          <button
+            type="button"
+            onClick={() => onChangeTab('history')}
+            className="hidden 2xl:inline-flex items-center gap-1 px-2 py-1 rounded-md border border-slate-200 bg-white hover:bg-slate-50 text-xs text-slate-600"
+            title="查看压测历史对比"
+          >
+            <Activity className="w-3.5 h-3.5 text-slate-500" />
+            <span>对比</span>
+          </button>
+        )}
       </div>
     </header>
   )

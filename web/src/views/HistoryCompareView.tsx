@@ -113,20 +113,21 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
   }, [cmpResult])
 
   return (
-    <div className="flex-1 overflow-y-auto bg-slate-50 p-5 space-y-5 text-xs">
-      <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-xs space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-2">
+    <div className="flex-1 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-5 space-y-5 text-xs">
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
+        <div className="tg-telemetry-strip px-4 py-3.5 flex flex-wrap items-center justify-between gap-2">
           <div>
-            <h2 className="text-sm font-semibold text-slate-900">历史压测记录与基线对比</h2>
-            <p className="text-[11px] text-slate-500">勾选 2～6 条压测记录可叠加对比吞吐量、延迟分位变化与各步骤回归情况</p>
+            <h2 className="text-sm font-semibold text-white">历史压测记录与基线回归对比</h2>
+            <p className="text-[11px] text-sky-200/80">勾选 2～6 条压测记录可叠加对比吞吐量、延迟分位变化与各步骤回归情况</p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {selectedIds.length >= 2 && (
               <>
                 <select
+                  aria-label="选择基线压测记录"
                   value={baselineId}
                   onChange={(e) => setBaselineId(e.target.value)}
-                  className="px-2.5 py-1.5 border border-slate-300 rounded-md bg-white"
+                  className="px-2.5 py-1.5 border border-white/20 rounded-md bg-white/10 text-white [&>option]:text-slate-900"
                 >
                   {selectedIds.map((id) => {
                     const r = runs.find((x) => x.id === id)
@@ -141,7 +142,7 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
                   type="button"
                   disabled={comparing}
                   onClick={() => void handleCompare()}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-[#0B2A4A] hover:bg-[#123d69] text-white font-semibold disabled:opacity-50"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold disabled:opacity-50"
                 >
                   <GitCompare className="w-3.5 h-3.5" /> {comparing ? '计算中...' : `对比选中 (${selectedIds.length})`}
                 </button>
@@ -150,12 +151,13 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
             <button
               type="button"
               onClick={() => void loadRuns()}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700"
+              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-white/20 bg-white/10 hover:bg-white/20 text-white"
             >
               <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> 刷新
             </button>
           </div>
         </div>
+        <div className="p-4 space-y-3">
 
         {runs.length === 0 ? (
           <p className="text-slate-400 py-8 text-center">该项目暂无压测历史记录。</p>
@@ -174,7 +176,7 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
                   <th className="px-3 py-2 text-right">导出与操作</th>
                 </tr>
               </thead>
-              <tbody className="divide-y divide-slate-100">
+              <tbody className="divide-y divide-slate-100 tg-tabular">
                 {runs.map((r) => {
                   const checked = selectedIds.includes(r.id)
                   const active = r.status === 'preparing' || r.status === 'running' || r.status === 'stopping'
@@ -280,6 +282,7 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
             </table>
           </div>
         )}
+        </div>
       </div>
 
       {/* Comparison Results */}
@@ -299,7 +302,7 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
                     <th className="px-3 py-2">错误率 (差值)</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="divide-y divide-slate-100 tg-tabular">
                   {cmpResult.runs.map((item, idx) => (
                     <tr key={item.run.id} className={idx === 0 ? 'bg-sky-50/50' : ''}>
                       <td className="px-3 py-2">
@@ -364,7 +367,7 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
                       <th className="px-3 py-2">错误率差值</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-slate-100 tg-tabular">
                     {cmpResult.runs.slice(1).flatMap((item, runIdx) =>
                       Object.entries(item.delta?.step_deltas || {}).map(([stepKey, sd]) => (
                         <tr key={`${item.run.id}-${stepKey}`}>

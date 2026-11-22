@@ -31,3 +31,4 @@ Thumbs.db
 /docs/*
 !/docs/product-plan.md
 /bench/RESULTS.md
+/.agents/

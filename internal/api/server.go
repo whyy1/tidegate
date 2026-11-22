@@ -10,6 +10,7 @@ import (
 
 	"tidegate/internal/auth"
 	"tidegate/internal/controller"
+	"tidegate/internal/mcp"
 	"tidegate/internal/store"
 )
 
@@ -33,6 +34,7 @@ type Options struct {
 type Server struct {
 	opts         Options
 	ctrl         *controller.Controller
+	mcp          *mcp.Server
 	store        *store.Store
 	results      *store.ResultDB
 	auth         *auth.Service
@@ -76,6 +78,13 @@ func NewServer(opts Options) (*Server, error) {
 		allowedHosts: allowed,
 		wsSet:        make(map[*wsConn]struct{}),
 	}
+	s.mcp = mcp.NewServer(mcp.Options{
+		Store:      opts.Store,
+		Results:    opts.Results,
+		Controller: opts.Controller,
+		Version:    opts.Version,
+		Audit:      s.audit,
+	})
 	s.handler = s.buildHandler()
 	return s, nil
 }
@@ -246,7 +255,23 @@ func (s *Server) buildHandler() http.Handler {
 	// Protect every state-changing /api/ request with CSRF + Origin validation.
 	protectedAPI := s.guard.CSRF(apiMux)
 
+	// MCP Streamable HTTP supports standard Bearer clients without browser CSRF
+	// headers while still enforcing CSRF/Origin when cookie sessions are used.
+	mcpHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if auth.BearerToken(r) == "" && auth.SessionToken(r) == "" {
+			if err := s.guard.CheckOrigin(r); err != nil {
+				writeError(w, err)
+				return
+			}
+			w.Header().Set("WWW-Authenticate", `Bearer realm="tidegate-mcp"`)
+			writeError(w, auth.ErrUnauthenticated)
+			return
+		}
+		s.guard.CSRF(authed(s.mcp.ServeHTTP)).ServeHTTP(w, r)
+	})
+
 	rootMux := http.NewServeMux()
+	rootMux.Handle("/api/v1/mcp", mcpHandler)
 	rootMux.Handle("/api/", protectedAPI)
 	rootMux.HandleFunc("/", s.handleUI)
 

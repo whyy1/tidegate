@@ -4,6 +4,7 @@
 //
 //	tidegate serve [flags]            (default when invoked with no subcommand)
 //	tidegate agent --join ... --token ... [--name ...]
+//	tidegate mcp --url https://127.0.0.1:8080 --token tg_...
 //	tidegate reset-password [--data ./data] [--user admin] [--password-file FILE]
 //	tidegate run <scenario> [--out result.json] [--csv result.csv] [--quiet]
 //	tidegate testserver [--addr :18080]
@@ -28,6 +29,7 @@ const usage = `Tidegate：API 管理与压测一体化工具
 用法：
   tidegate serve [选项]                 启动控制台与内置控制器（默认子命令）
   tidegate agent [选项]                 启动压测发压节点并接入控制器
+  tidegate mcp [选项]                   以 Stdio MCP 代理模式连接运行中的 Tidegate 服务
   tidegate reset-password [选项]        重置管理员账户密码
   tidegate run <场景文件> [选项]        直接运行单次 CLI 压测（YAML 或 JSON）
   tidegate testserver [--addr :18080]   启动内置的高性能被测服务
@@ -50,6 +52,12 @@ agent 常用选项：
   --labels <k=v,k2=v2>           节点标签（TIDEGATE_LABELS）
   --cert-dir <目录>              mTLS 节点证书持久化目录（TIDEGATE_CERT_DIR）
   --name <名称>                  节点显示名称（TIDEGATE_NAME）
+
+mcp 常用选项：
+  --url <地址>                   Tidegate 服务地址（TIDEGATE_URL，默认 https://127.0.0.1:8080）
+  --token <令牌>                 API 访问令牌 tg_...（TIDEGATE_TOKEN）
+  --ca-file <文件>               自签 HTTPS CA 证书路径（TIDEGATE_CA_FILE）
+  --insecure                     跳过 HTTPS 证书校验（仅本地开发）
 
 run 常用选项：
   --out <文件>                   写出每秒快照和汇总（JSON）
@@ -89,6 +97,8 @@ func runMainWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		return cmdServe(args[1:], stdout, stderr)
 	case "agent":
 		return cmdAgent(args[1:], stdout, stderr)
+	case "mcp":
+		return cmdMCP(args[1:], stdin, stdout, stderr)
 	case "reset-password":
 		return cmdResetPassword(args[1:], stdin, stdout, stderr)
 	case "run":

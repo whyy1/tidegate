@@ -167,8 +167,28 @@ func (s *Service) RevokeAPIToken(ctx context.Context, actorUserID int64, tokenID
 // AuthenticateBearer validates a raw bearer token and returns the owning user
 // with u.Role capped to EffectiveRole(userRole, tokenRole).
 func (s *Service) AuthenticateBearer(ctx context.Context, rawToken string) (*User, *APIToken, error) {
+	return s.AuthenticateBearerFrom(ctx, rawToken, "")
+}
+
+// AuthenticateBearerFrom validates rawToken while enforcing per-address rate
+// limiting on repeated invalid bearer token attempts when remoteAddr is non-empty.
+func (s *Service) AuthenticateBearerFrom(ctx context.Context, rawToken, remoteAddr string) (*User, *APIToken, error) {
+	var addrKey string
+	if remoteAddr != "" && s.bearerByAddr != nil {
+		addrKey = addressKey(remoteAddr)
+		if d := s.bearerByAddr.retryAfter(addrKey); d > 0 {
+			return nil, nil, rateLimited(d)
+		}
+	}
+	fail := func(err error) (*User, *APIToken, error) {
+		if addrKey != "" && s.bearerByAddr != nil {
+			s.bearerByAddr.fail(addrKey)
+		}
+		return nil, nil, err
+	}
+
 	if !strings.HasPrefix(rawToken, apiTokenPrefix) || len(rawToken) < len(apiTokenPrefix)+16 {
-		return nil, nil, ErrUnauthenticated
+		return fail(ErrUnauthenticated)
 	}
 	sum := sha256.Sum256([]byte(rawToken))
 	var (
@@ -187,7 +207,7 @@ func (s *Service) AuthenticateBearer(ctx context.Context, rawToken string) (*Use
 		Scan(&tok.ID, &tok.UserID, &tok.Name, &tok.Prefix, &tokRole, &tokCreated, &lastUsed, &exp,
 			&u.Username, &userRole, &userCreated, &userPwChangedAt)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil, ErrUnauthenticated
+		return fail(ErrUnauthenticated)
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("auth: load api token: %w", err)
@@ -208,7 +228,11 @@ func (s *Service) AuthenticateBearer(ctx context.Context, rawToken string) (*Use
 		if _, err := s.db.ExecContext(ctx, `DELETE FROM auth_tokens WHERE id = ?`, tok.ID); err != nil {
 			s.log.Warn("auth: delete expired api token failed", "err", err)
 		}
-		return nil, nil, ErrTokenExpired
+		return fail(ErrTokenExpired)
+	}
+
+	if addrKey != "" && s.bearerByAddr != nil {
+		s.bearerByAddr.reset(addrKey)
 	}
 
 	u.ID = tok.UserID

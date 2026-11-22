@@ -683,6 +683,14 @@ func TestRolesUsersAndAPITokens(t *testing.T) {
 	if _, _, err := s.AuthenticateBearer(ctx, adminRaw); !errors.Is(err, ErrUnauthenticated) {
 		t.Fatalf("revoked bearer token should be unauthenticated, got %v", err)
 	}
+	for i := 0; i < DefaultFreeAttempts+1; i++ {
+		if _, _, err := s.AuthenticateBearerFrom(ctx, "tg_invalidtokenvalue123456", "203.0.113.10:4444"); !errors.Is(err, ErrUnauthenticated) {
+			t.Fatalf("attempt %d: expected ErrUnauthenticated, got %v", i, err)
+		}
+	}
+	if _, _, err := s.AuthenticateBearerFrom(ctx, "tg_invalidtokenvalue123456", "203.0.113.10:5555"); !errors.Is(err, ErrRateLimited) {
+		t.Fatalf("expected ErrRateLimited after repeated invalid bearer tokens, got %v", err)
+	}
 	if err := s.DeleteUser(ctx, setup.User.ID, viewer.ID); err != nil {
 		t.Fatal(err)
 	}

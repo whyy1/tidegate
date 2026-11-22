@@ -292,6 +292,11 @@ func (s *Server) handleGetMetricsSink(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if u, _ := auth.UserFromContext(r.Context()); u == nil || !u.Role.IsAdmin() {
+		if cfg.Username != "" {
+			cfg.Username = store.SecretMask
+		}
+	}
 	writeJSON(w, http.StatusOK, cfg)
 }
 

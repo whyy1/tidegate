@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -1417,5 +1418,120 @@ afterRun1:
 		}
 	case <-time.After(4 * time.Second):
 		t.Fatal("timed out waiting for revoked edge-c disconnect")
+	}
+}
+
+func TestSecurityAuditHardeningB1toB3(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.OpenDB(filepath.Join(dir, "tidegate.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rdb := store.NewResultDB(db)
+	box, err := store.LoadOrCreateMasterKey(filepath.Join(dir, "master.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetSecretVault(store.NewSecretVault(rdb, box))
+
+	echoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"auth":%q,"q":%q}`, r.Header.Get("Authorization"), r.URL.Query().Get("tok"))
+	}))
+	defer echoSrv.Close()
+
+	c, err := New(ctx, Options{
+		Store:               st,
+		Results:             rdb,
+		Version:             "1.0-audit-test",
+		ClusterListen:       "127.0.0.1:0",
+		InProcessLocalAgent: true,
+		StartDelay:          30 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+
+	const secretVal = "super-vault-secret-token-999"
+	pr, err := st.CreateProject(&store.Project{
+		Name: "AuditProj",
+		Variables: store.KeyValueList{
+			{Name: "api_key", Value: scenario.Scalar(secretVal), Secret: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiObj, err := st.CreateAPI(pr.ID, &store.API{
+		Name: "EchoSecret",
+		Request: store.APIRequest{
+			Method:  "GET",
+			URL:     echoSrv.URL + "/echo?tok={{api_key}}",
+			Headers: store.KeyValueList{{Name: "Authorization", Value: "Bearer {{api_key}}"}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-redacted Web debug succeeds AND scrubs debug_history persisted in SQLite.
+	dbg, err := c.DebugAPI(ctx, pr.ID, DebugAPIRequest{APIID: apiObj.ID})
+	if err != nil {
+		t.Fatalf("DebugAPI: %v", err)
+	}
+	if !strings.Contains(dbg.Result.Body, secretVal) {
+		t.Fatalf("expected live target echo to verify secret was sent, body=%s", dbg.Result.Body)
+	}
+	rec, err := rdb.GetDebugRecord(ctx, dbg.RecordID)
+	if err != nil {
+		t.Fatalf("GetDebugRecord: %v", err)
+	}
+	if strings.Contains(string(rec.Data), secretVal) {
+		t.Fatalf("Vault secret plaintext leaked into SQLite debug_history: %s", string(rec.Data))
+	}
+
+	// RedactSecrets=true scrubs response URL, headers, body, and FinalVars.
+	redactedDbg, err := c.DebugAPI(ctx, pr.ID, DebugAPIRequest{
+		APIID:         apiObj.ID,
+		RedactSecrets: true,
+	})
+	if err != nil {
+		t.Fatalf("DebugAPI(RedactSecrets): %v", err)
+	}
+	rawJSON, _ := json.Marshal(redactedDbg)
+	if strings.Contains(string(rawJSON), secretVal) {
+		t.Fatalf("RedactSecrets=true leaked secret value: %s", string(rawJSON))
+	}
+
+	// safeSinkDialContext rejects cloud metadata link-local IP 169.254.169.254.
+	if _, err := safeSinkDialContext(ctx, "tcp", "169.254.169.254:80"); err == nil {
+		t.Fatal("expected safeSinkDialContext to reject 169.254.169.254")
+	}
+
+	// ValidateMCPRunScale enforces default VU and duration ceilings.
+	scen, err := st.CreateScenario(pr.ID, &store.Scenario{
+		Name:  "MCPOverLimit",
+		Steps: []store.ScenarioStep{{ID: "s1", APIID: apiObj.ID}},
+		Load: scenario.Load{
+			Mode:   "vus",
+			Stages: []scenario.Stage{{Duration: scenario.Duration(1 * time.Second), Target: DefaultMCPMaxVUs + 50}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.StartRun(ctx, pr.ID, StartRunRequest{
+		ScenarioID: scen.ID,
+		ActorRole:  "admin",
+		MCPSource:  true,
+	}); !errors.Is(err, ErrScaleLimitExceeded) {
+		t.Fatalf("expected ErrScaleLimitExceeded on MCP run > %d VUs, got %v", DefaultMCPMaxVUs, err)
 	}
 }

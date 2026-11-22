@@ -5,18 +5,26 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"math"
 	"net"
 	"net/netip"
 	"strings"
 	"time"
 
+	"tidegate/internal/engine"
 	"tidegate/internal/metrics"
 	"tidegate/internal/scenario"
 	"tidegate/internal/store"
 )
 
 const securityPolicySettingKey = "security_policy"
+
+// Default MCP execution safety ceilings applied when SecurityPolicy leaves limits at 0.
+const (
+	DefaultMCPMaxVUs         = 200
+	DefaultMCPMaxDurationSec = 300
+)
 
 // ErrTargetNotAllowed indicates a request target fell outside the configured allowlist.
 var ErrTargetNotAllowed = scenario.ErrTargetNotAllowed
@@ -27,13 +35,34 @@ var ErrScaleLimitExceeded = errors.New("压测规模超出当前角色上限")
 // ErrScriptsDisabled indicates sandboxed script steps have been disabled by policy.
 var ErrScriptsDisabled = errors.New("管理员已全局禁用脚本步骤")
 
-// SecurityPolicy controls outbound target allowlisting and per-role scale limits.
+// SecurityPolicy controls outbound target allowlisting, per-role scale limits,
+// and MCP server execution guardrails.
 type SecurityPolicy struct {
-	AllowlistEnabled bool     `json:"allowlist_enabled"`
-	AllowedTargets   []string `json:"allowed_targets,omitempty"`
-	MemberMaxVUs     int      `json:"member_max_vus,omitempty"`
-	MemberMaxRPS     float64  `json:"member_max_rps,omitempty"`
-	ScriptsDisabled  bool     `json:"scripts_disabled,omitempty"`
+	AllowlistEnabled   bool     `json:"allowlist_enabled"`
+	AllowedTargets     []string `json:"allowed_targets,omitempty"`
+	MemberMaxVUs       int      `json:"member_max_vus,omitempty"`
+	MemberMaxRPS       float64  `json:"member_max_rps,omitempty"`
+	ScriptsDisabled    bool     `json:"scripts_disabled,omitempty"`
+	MCPDisabled        bool     `json:"mcp_disabled,omitempty"`
+	MCPDisableLoadRuns bool     `json:"mcp_disable_load_runs,omitempty"`
+	MCPMaxVUs          int      `json:"mcp_max_vus,omitempty"`
+	MCPMaxDurationSec  int      `json:"mcp_max_duration_sec,omitempty"`
+}
+
+// EffectiveMCPMaxVUs returns the configured MCP VU cap or DefaultMCPMaxVUs.
+func (p SecurityPolicy) EffectiveMCPMaxVUs() int {
+	if p.MCPMaxVUs > 0 {
+		return p.MCPMaxVUs
+	}
+	return DefaultMCPMaxVUs
+}
+
+// EffectiveMCPMaxDuration returns the configured MCP load duration cap or DefaultMCPMaxDurationSec.
+func (p SecurityPolicy) EffectiveMCPMaxDuration() time.Duration {
+	if p.MCPMaxDurationSec > 0 {
+		return time.Duration(p.MCPMaxDurationSec) * time.Second
+	}
+	return time.Duration(DefaultMCPMaxDurationSec) * time.Second
 }
 
 // GetSecurityPolicy loads the active SecurityPolicy (zero values when unset).
@@ -62,6 +91,12 @@ func (c *Controller) SetSecurityPolicy(ctx context.Context, pol SecurityPolicy) 
 	}
 	if math.IsNaN(pol.MemberMaxRPS) || math.IsInf(pol.MemberMaxRPS, 0) || pol.MemberMaxRPS < 0 {
 		return pol, userErr(ErrInvalidInput, "member_max_rps 必须是非负有限数字", nil)
+	}
+	if pol.MCPMaxVUs < 0 {
+		return pol, userErr(ErrInvalidInput, "mcp_max_vus 不能为负数", nil)
+	}
+	if pol.MCPMaxDurationSec < 0 {
+		return pol, userErr(ErrInvalidInput, "mcp_max_duration_sec 不能为负数", nil)
 	}
 	cleaned := make([]string, 0, len(pol.AllowedTargets))
 	seen := make(map[string]bool, len(pol.AllowedTargets))
@@ -318,6 +353,148 @@ func ValidateRoleScale(plan *scenario.Plan, actorRole string, policy SecurityPol
 		}
 	}
 	return nil
+}
+
+// ValidateMCPRunScale enforces hard MCP safety ceilings (VU count and stage
+// duration) on runs started by AI/MCP callers unless explicitly raised by admin.
+func ValidateMCPRunScale(plan *scenario.Plan, policy SecurityPolicy) error {
+	if plan == nil {
+		return nil
+	}
+	maxVUs := policy.EffectiveMCPMaxVUs()
+	reqVUs := int(math.Ceil(plan.Load.PeakTarget))
+	if plan.Load.Mode == scenario.LoadRate {
+		reqVUs = plan.Load.MaxVUs
+	}
+	if reqVUs > maxVUs {
+		return userErr(ErrScaleLimitExceeded, fmt.Sprintf("MCP 触发的并发虚拟用户数 %d 超出安全上限 %d", reqVUs, maxVUs), nil)
+	}
+	maxDur := policy.EffectiveMCPMaxDuration()
+	if plan.Load.TotalDuration > maxDur {
+		return userErr(ErrScaleLimitExceeded, fmt.Sprintf("MCP 触发的压测总时长 %s 超出安全上限 %s", plan.Load.TotalDuration.Round(time.Second), maxDur), nil)
+	}
+	return nil
+}
+
+func collectSecretValues(def *scenario.Definition, secretNames map[string]bool) []string {
+	if def == nil || len(secretNames) == 0 || len(def.Variables) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool)
+	var vals []string
+	for k := range secretNames {
+		v := strings.TrimSpace(string(def.Variables[k]))
+		if len(v) < 3 || v == store.SecretMask || seen[v] {
+			continue
+		}
+		seen[v] = true
+		vals = append(vals, v)
+	}
+	return vals
+}
+
+func maskSecretText(s string, secretVals []string) string {
+	if s == "" || len(secretVals) == 0 {
+		return s
+	}
+	for _, sv := range secretVals {
+		if strings.Contains(s, sv) {
+			s = strings.ReplaceAll(s, sv, store.SecretMask)
+		}
+	}
+	return s
+}
+
+func scrubDebugStepSecrets(step engine.DebugStepResult, secretNames map[string]bool, secretVals []string) engine.DebugStepResult {
+	cp := step
+	cp.ActualRequest.URL = maskSecretText(cp.ActualRequest.URL, secretVals)
+	cp.ActualRequest.Body = maskSecretText(cp.ActualRequest.Body, secretVals)
+	if len(cp.ActualRequest.Headers) > 0 {
+		hdrs := make([]metrics.Header, len(cp.ActualRequest.Headers))
+		for i, h := range cp.ActualRequest.Headers {
+			val := maskSecretText(h.Value, secretVals)
+			if metrics.RedactHeader(h.Name, h.Value) != h.Value {
+				val = store.SecretMask
+			}
+			hdrs[i] = metrics.Header{Name: h.Name, Value: val}
+		}
+		cp.ActualRequest.Headers = hdrs
+	}
+	if len(cp.Redirects) > 0 {
+		redirs := make([]engine.DebugHop, len(cp.Redirects))
+		for i, rd := range cp.Redirects {
+			rd.URL = maskSecretText(rd.URL, secretVals)
+			rd.Location = maskSecretText(rd.Location, secretVals)
+			redirs[i] = rd
+		}
+		cp.Redirects = redirs
+	}
+	if len(cp.ResponseHeaders) > 0 {
+		rh := make([]metrics.Header, len(cp.ResponseHeaders))
+		for i, h := range cp.ResponseHeaders {
+			val := maskSecretText(h.Value, secretVals)
+			if metrics.RedactHeader(h.Name, h.Value) != h.Value {
+				val = store.SecretMask
+			}
+			rh[i] = metrics.Header{Name: h.Name, Value: val}
+		}
+		cp.ResponseHeaders = rh
+	}
+	cp.Body = maskSecretText(cp.Body, secretVals)
+	if len(cp.Extracts) > 0 {
+		exs := make([]engine.DebugExtractResult, len(cp.Extracts))
+		for i, ex := range cp.Extracts {
+			if secretNames[ex.Name] && ex.Value != "" {
+				ex.Value = store.SecretMask
+			} else {
+				ex.Value = maskSecretText(ex.Value, secretVals)
+			}
+			exs[i] = ex
+		}
+		cp.Extracts = exs
+	}
+	if len(cp.ExtractedVars) > 0 {
+		ev := maps.Clone(cp.ExtractedVars)
+		for k, v := range ev {
+			if secretNames[k] {
+				ev[k] = store.SecretMask
+			} else {
+				ev[k] = maskSecretText(v, secretVals)
+			}
+		}
+		cp.ExtractedVars = ev
+	}
+	return cp
+}
+
+func scrubDebugVars(vars map[string]string, secretNames map[string]bool, secretVals []string) map[string]string {
+	if len(vars) == 0 {
+		return nil
+	}
+	out := maps.Clone(vars)
+	for k, v := range out {
+		if secretNames[k] {
+			out[k] = store.SecretMask
+		} else {
+			out[k] = maskSecretText(v, secretVals)
+		}
+	}
+	return out
+}
+
+func scrubDebugRunSecrets(res *engine.DebugRunResult, secretNames map[string]bool, secretVals []string) *engine.DebugRunResult {
+	if res == nil {
+		return nil
+	}
+	cp := *res
+	if len(res.Steps) > 0 {
+		cp.Steps = make([]engine.DebugStepResult, len(res.Steps))
+		for i, st := range res.Steps {
+			cp.Steps[i] = scrubDebugStepSecrets(st, secretNames, secretVals)
+		}
+	}
+	cp.FinalVars = scrubDebugVars(res.FinalVars, secretNames, secretVals)
+	return &cp
 }
 
 // scrubDefinitionSecrets clones def and redacts secret variables, credential

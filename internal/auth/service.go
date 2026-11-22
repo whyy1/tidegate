@@ -142,6 +142,7 @@ type Service struct {
 
 	loginByUser  *limiter
 	loginByAddr  *limiter
+	bearerByAddr *limiter
 	setupLimiter *limiter
 
 	// setupMu serializes first-admin creation and guards setup.
@@ -215,6 +216,7 @@ func New(db *sql.DB, opts Options) (*Service, error) {
 
 	s.loginByUser = newLimiter(opts.RateLimit, s.now)
 	s.loginByAddr = newLimiter(opts.RateLimit, s.now)
+	s.bearerByAddr = newLimiter(opts.RateLimit, s.now)
 	s.setupLimiter = newLimiter(opts.RateLimit, s.now)
 
 	// Unknown usernames are checked against this hash so that a missing

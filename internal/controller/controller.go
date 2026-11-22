@@ -113,6 +113,11 @@ type Controller struct {
 	lastSys map[string]sysEntry
 }
 
+const (
+	maxDebugAPITimeout      = 60 * time.Second
+	maxDebugScenarioTimeout = 120 * time.Second
+)
+
 // DebugAPIRequest configures an interactive single-API debug call.
 type DebugAPIRequest struct {
 	APIID         string                     `json:"api_id,omitempty"`
@@ -122,6 +127,7 @@ type DebugAPIRequest struct {
 	HTTP          *scenario.HTTPOptions      `json:"http,omitempty"`
 	MaxBodyBytes  int64                      `json:"max_body_bytes,omitempty"`
 	SaveHistory   *bool                      `json:"save_history,omitempty"`
+	RedactSecrets bool                       `json:"redact_secrets,omitempty"`
 }
 
 // DebugAPIResponse is the result of DebugAPI.
@@ -140,6 +146,7 @@ type DebugScenarioRequest struct {
 	SkipThink     *bool                      `json:"skip_think,omitempty"`
 	StopOnError   bool                       `json:"stop_on_error,omitempty"`
 	MaxBodyBytes  int64                      `json:"max_body_bytes,omitempty"`
+	RedactSecrets bool                       `json:"redact_secrets,omitempty"`
 }
 
 // StartRunRequest starts a distributed or local load test run.
@@ -155,6 +162,7 @@ type StartRunRequest struct {
 	NodeSelector      map[string]string          `json:"node_selector,omitempty"`
 	NodeFailurePolicy string                     `json:"node_failure_policy,omitempty"`
 	ActorRole         string                     `json:"-"`
+	MCPSource         bool                       `json:"-"`
 }
 
 // New starts the cluster listener, cleans up interrupted runs, optionally starts
@@ -293,6 +301,17 @@ func New(ctx context.Context, opts Options) (*Controller, error) {
 // ClusterAddr returns the controller's cluster gRPC listening address.
 func (c *Controller) ClusterAddr() string {
 	return c.lis.Addr().String()
+}
+
+// ActiveRunID returns the currently executing run ID, or empty when idle.
+func (c *Controller) ActiveRunID() string {
+	c.mu.Lock()
+	ar := c.active
+	c.mu.Unlock()
+	if ar == nil {
+		return ""
+	}
+	return ar.id
 }
 
 // Close shuts down the local agent supervisor, cluster server, and event hub.
@@ -491,6 +510,8 @@ func (c *Controller) DebugAPI(ctx context.Context, projectID string, req DebugAP
 		return nil, err
 	}
 
+	secretVals := collectSecretValues(resolved.Definition, resolved.SecretNames)
+
 	plan, err := resolved.Compile()
 	if err != nil {
 		return nil, userErr(ErrInvalidInput, err.Error(), err)
@@ -500,7 +521,10 @@ func (c *Controller) DebugAPI(ctx context.Context, projectID string, req DebugAP
 		return nil, err
 	}
 
-	runRes, err := engine.RunDebug(ctx, plan, engine.DebugOptions{
+	runCtx, cancel := context.WithTimeout(ctx, maxDebugAPITimeout)
+	defer cancel()
+
+	runRes, err := engine.RunDebug(runCtx, plan, engine.DebugOptions{
 		Client:       c.clientKind,
 		MaxBodyBytes: req.MaxBodyBytes,
 		SkipThink:    true,
@@ -514,9 +538,16 @@ func (c *Controller) DebugAPI(ctx context.Context, projectID string, req DebugAP
 	}
 
 	step0 := runRes.Steps[0]
+	scrubbedStep := scrubDebugStepSecrets(step0, resolved.SecretNames, secretVals)
+	scrubbedVars := scrubDebugVars(runRes.FinalVars, resolved.SecretNames, secretVals)
+
 	resp := &DebugAPIResponse{
 		Result:    step0,
 		FinalVars: runRes.FinalVars,
+	}
+	if req.RedactSecrets {
+		resp.Result = scrubbedStep
+		resp.FinalVars = scrubbedVars
 	}
 
 	save := req.SaveHistory == nil || *req.SaveHistory
@@ -527,17 +558,17 @@ func (c *Controller) DebugAPI(ctx context.Context, projectID string, req DebugAP
 			FinalVars     map[string]string      `json:"final_vars,omitempty"`
 		}{
 			EnvironmentID: req.EnvironmentID,
-			Result:        step0,
-			FinalVars:     runRes.FinalVars,
+			Result:        scrubbedStep,
+			FinalVars:     scrubbedVars,
 		})
 		if err == nil {
 			rec := store.DebugRecord{
 				ProjectID:  projectID,
 				APIID:      apiID,
-				Method:     step0.ActualRequest.Method,
-				URL:        step0.ActualRequest.URL,
-				Status:     step0.Status,
-				DurationMs: step0.Timing.TotalMs,
+				Method:     scrubbedStep.ActualRequest.Method,
+				URL:        scrubbedStep.ActualRequest.URL,
+				Status:     scrubbedStep.Status,
+				DurationMs: scrubbedStep.Timing.TotalMs,
 				Data:       payload,
 			}
 			if err := c.results.SaveDebugRecord(ctx, &rec); err == nil {
@@ -582,6 +613,8 @@ func (c *Controller) DebugScenario(ctx context.Context, projectID string, req De
 		MaxRequests: int64(len(resolved.Definition.Steps)),
 	}
 
+	secretVals := collectSecretValues(resolved.Definition, resolved.SecretNames)
+
 	plan, err := resolved.Compile()
 	if err != nil {
 		return nil, userErr(ErrInvalidInput, err.Error(), err)
@@ -591,14 +624,24 @@ func (c *Controller) DebugScenario(ctx context.Context, projectID string, req De
 		return nil, err
 	}
 
+	runCtx, cancel := context.WithTimeout(ctx, maxDebugScenarioTimeout)
+	defer cancel()
+
 	skipThink := req.SkipThink == nil || *req.SkipThink
-	return engine.RunDebug(ctx, plan, engine.DebugOptions{
+	out, err := engine.RunDebug(runCtx, plan, engine.DebugOptions{
 		Client:       c.clientKind,
 		MaxBodyBytes: req.MaxBodyBytes,
 		SkipThink:    skipThink,
 		StopOnError:  req.StopOnError,
 		TargetCheck:  targetCheck,
 	})
+	if err != nil {
+		return nil, err
+	}
+	if req.RedactSecrets {
+		out = scrubDebugRunSecrets(out, resolved.SecretNames, secretVals)
+	}
+	return out, nil
 }
 
 func (c *Controller) enforceDebugSecurity(ctx context.Context, plan *scenario.Plan) (func(host string, ip net.IP) error, error) {
@@ -696,6 +739,17 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 	pol, err := c.GetSecurityPolicy(ctx)
 	if err != nil {
 		return nil, err
+	}
+	if req.MCPSource {
+		if pol.MCPDisabled {
+			return nil, userErr(ErrScaleLimitExceeded, "管理员已全局关闭 MCP 服务", nil)
+		}
+		if pol.MCPDisableLoadRuns {
+			return nil, userErr(ErrScaleLimitExceeded, "管理员已禁止通过 MCP 启动压测任务", nil)
+		}
+		if err := ValidateMCPRunScale(plan, pol); err != nil {
+			return nil, err
+		}
 	}
 	if err := ValidatePlanTargets(ctx, plan, pol); err != nil {
 		return nil, err

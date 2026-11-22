@@ -2,30 +2,153 @@
 @import "uplot/dist/uPlot.min.css";
 
 :root {
-  --tg-navy: #0B2A4A;
-  --tg-accent: #3BA7FF;
+  --tg-navy-950: #07192e;
+  --tg-navy-900: #0b2a4a;
+  --tg-navy-800: #123862;
+  --tg-tidal-600: #0284c7;
+  --tg-tidal-500: #0ea5e9;
+  --tg-tidal-400: #38bdf8;
+  --tg-canvas: #f3f6fa;
+  --tg-surface: #ffffff;
+  --tg-surface-subtle: #f8fafc;
+  --tg-border: #e2e8f0;
+  --tg-border-strong: #cbd5e1;
+  --tg-scrollbar-thumb: #94a3b8;
+  --tg-scrollbar-track: #f1f5f9;
 }
 
 body {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
+  background-color: var(--tg-canvas);
+  color: #0f172a;
 }
 
 code, pre, .font-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
-/* Subtle custom scrollbars for dense workbenches */
-::-webkit-scrollbar {
-  width: 6px;
-  height: 6px;
+/* Numeric telemetry & table column alignment */
+.tg-tabular {
+  font-variant-numeric: tabular-nums;
 }
-::-webkit-scrollbar-track {
-  background: transparent;
+
+/* Split-pane CSS container query + flex-shrink safety for long URLs/code */
+.tg-split-pane {
+  container-type: inline-size;
+  min-inline-size: 0;
 }
-::-webkit-scrollbar-thumb {
-  background: #cbd5e1;
-  border-radius: 9999px;
+
+/* Accessible single-row tab strip: indicator via ::after border so forced-colors & dimensions stay stable */
+.tg-tablist {
+  display: flex;
+  align-items: stretch;
+  overflow-x: auto;
+  scrollbar-width: none;
 }
-::-webkit-scrollbar-thumb:hover {
-  background: #94a3b8;
+.tg-tablist::-webkit-scrollbar {
+  display: none;
+}
+
+.tg-tab {
+  position: relative;
+  flex: none;
+  white-space: nowrap;
+}
+
+.tg-tab[aria-selected="true"]::after {
+  content: "";
+  position: absolute;
+  inset: auto 0 0;
+  border-block-end: 2px solid var(--tg-tidal-600);
+}
+
+/* Subtle architectural grid background for telemetry strips & hero panels */
+.tg-hero-grid {
+  background-color: var(--tg-navy-950);
+  background-image:
+    radial-gradient(circle at 80% 15%, rgb(56 189 248 / 0.16), transparent 46%),
+    radial-gradient(circle at 12% 85%, rgb(2 132 199 / 0.18), transparent 44%),
+    linear-gradient(to right, rgb(148 163 184 / 0.08) 1px, transparent 1px),
+    linear-gradient(to bottom, rgb(148 163 184 / 0.08) 1px, transparent 1px);
+  background-size: 100% 100%, 100% 100%, 28px 28px, 28px 28px;
+}
+
+.tg-telemetry-strip {
+  background: linear-gradient(135deg, var(--tg-navy-950) 0%, var(--tg-navy-900) 68%, #0f3a65 100%);
+  color: #f8fafc;
+}
+
+/* Native <dialog> modal scroll containment & backdrop */
+dialog.tg-dialog[open] {
+  margin: auto;
+  padding: 0;
+  border: 1px solid var(--tg-border);
+  border-radius: 0.75rem;
+  box-shadow: 0 24px 60px -12px rgb(7 25 46 / 0.38);
+  background: var(--tg-surface);
+  color: #0f172a;
+}
+
+dialog.tg-dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog.tg-dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+  background-color: rgb(7 25 46 / 0.56);
+  backdrop-filter: blur(3px);
+}
+
+/* Standard scrollbar color/thickness with guarded WebKit fallback */
+.tg-scroller {
+  --scrollbar-thumb: var(--tg-scrollbar-thumb);
+  --scrollbar-track: var(--tg-scrollbar-track);
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  scrollbar-gutter: stable;
+  overscroll-behavior: contain;
+}
+
+.tg-scroller-dark {
+  --scrollbar-thumb: #475569;
+  --scrollbar-track: #0b1624;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+  overscroll-behavior: contain;
+}
+
+@supports not (scrollbar-color: auto) {
+  .tg-scroller,
+  .tg-scroller-dark {
+    scrollbar-width: auto;
+  }
+
+  .tg-scroller::-webkit-scrollbar,
+  .tg-scroller-dark::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+
+  .tg-scroller::-webkit-scrollbar-thumb,
+  .tg-scroller-dark::-webkit-scrollbar-thumb {
+    background: var(--scrollbar-thumb);
+    border-radius: 9999px;
+  }
+
+  .tg-scroller::-webkit-scrollbar-track,
+  .tg-scroller-dark::-webkit-scrollbar-track {
+    background: var(--scrollbar-track);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }

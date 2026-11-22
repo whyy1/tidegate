@@ -527,17 +527,17 @@ export function LiveRunView({
   const filteredSamples = samples.filter((s) => sampleFilter === 'all' || s.kind === sampleFilter)
 
   return (
-    <div className="flex-1 overflow-y-auto bg-slate-50 p-4 space-y-4 text-xs">
+    <div className="flex-1 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-4 space-y-4 text-xs">
       {/* Top Launcher Card */}
       <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
         <div
           onClick={() => setShowLauncher((v) => !v)}
-          className="px-4 py-2.5 bg-slate-50 border-b border-slate-200 flex items-center justify-between cursor-pointer"
+          className="px-4 py-2.5 tg-telemetry-strip flex items-center justify-between cursor-pointer"
         >
-          <span className="font-semibold text-sm text-slate-900 flex items-center gap-2">
-            <Play className="w-4 h-4 text-sky-600" /> 发起新压测与开压容量预估
+          <span className="font-semibold text-sm text-white flex items-center gap-2">
+            <Play className="w-4 h-4 text-[#38BDF8]" /> 发起新压测与开压容量预估
           </span>
-          <span className="text-sky-700 font-medium">{showLauncher ? '收起配置' : '展开发起新压测'}</span>
+          <span className="text-sky-300 font-medium">{showLauncher ? '收起配置' : '展开发起新压测'}</span>
         </div>
 
         {showLauncher && (

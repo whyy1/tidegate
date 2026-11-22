@@ -127,7 +127,7 @@ func (g *Guard) RequireSession(next http.Handler) http.Handler {
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if bt := BearerToken(r); bt != "" {
-			u, tok, err := g.svc.AuthenticateBearer(r.Context(), bt)
+			u, tok, err := g.svc.AuthenticateBearerFrom(r.Context(), bt, r.RemoteAddr)
 			if err != nil {
 				if _, ok := AsError(err); !ok && !errors.Is(err, context.Canceled) {
 					g.svc.log.Error("auth: authenticate bearer request", "err", err)

@@ -496,20 +496,22 @@ export function ScenariosView({
       </aside>
 
       {/* Main Scenario Builder */}
-      <main className="flex-1 min-w-0 overflow-y-auto p-5 space-y-5 text-xs">
-        <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+      <main className="flex-1 min-w-0 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-5 space-y-5 text-xs">
+        <div className="tg-telemetry-strip rounded-xl border border-slate-800 p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
           <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[260px]">
             <input
               type="text"
+              aria-label="场景名称"
               value={draft.name || ''}
               onChange={(e) => updateDraft({ name: e.target.value })}
               placeholder="输入场景名称"
-              className="px-3 py-1.5 border border-slate-300 rounded-lg font-semibold text-sm text-slate-900 focus:border-sky-500 focus:outline-none min-w-[220px]"
+              className="px-3 py-1.5 border border-white/20 rounded-lg font-semibold text-sm text-white placeholder:text-slate-300 bg-white/10 focus:border-sky-400 focus:outline-none min-w-[220px]"
             />
             <select
+              aria-label="场景默认环境"
               value={draft.environment_id || ''}
               onChange={(e) => updateDraft({ environment_id: e.target.value })}
-              className="px-2.5 py-1.5 border border-slate-300 rounded-lg bg-slate-50 text-xs"
+              className="px-2.5 py-1.5 border border-white/20 rounded-lg bg-white/10 text-white text-xs [&>option]:text-slate-900"
             >
               <option value="">跟随顶部激活环境</option>
               {environments.map((env) => (
@@ -916,7 +918,7 @@ function ScenarioStepListEditor({
   }
 
   return (
-    <div className="space-y-2">
+    <div className={depth > 0 ? 'pl-3.5 border-l-2 border-sky-300/80 space-y-2' : 'space-y-2'}>
       {depth > 0 && (
         <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
           <select
