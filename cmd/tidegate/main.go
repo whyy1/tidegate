@@ -55,6 +55,7 @@ run 常用选项：
   --out <文件>                   写出每秒快照和汇总（JSON）
   --csv <文件>                   写出每秒聚合指标（CSV）
   --html <文件>                  写出离线单文件 HTML 压测报告
+  --jtl <文件>                   写出 JMeter 兼容 JTL 日志
   --quiet                        不输出每秒摘要，只输出汇总
   --client fast|std              HTTP 客户端实现，默认 fast
 `

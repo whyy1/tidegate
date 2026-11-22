@@ -35,25 +35,27 @@ logo 是一道抬起的闸门，形状正好是字母 T，潮水从闸下流过�
 
 | 模块 | 内容 |
 |---|---|
-| 接口管理 | 项目与目录树、多环境、多级变量、鉴权、单次调试、提取器、断言 |
-| 场景编排 | 步骤引用接口、思考时间、数据文件驱动、流程控制、多场景混合 |
-| 压测配置 | 固定并发和固定速率两种模式，预热、爬坡、保持、下降的阶段编排，阈值 |
-| 实时图表 | 吞吐量、延迟百分位、错误、并发、带宽，可按接口拆分 |
-| 报告 | 历史记录、错误采样、HTML 报告、多次对比 |
-| 发压机监控 | 带宽占用、CPU、内存、端口、TCP 重传，饱和时告警 |
-| 分布式集群 | 节点加入、负载分配、同步启动、指标合并 |
-| 导入导出 | OpenAPI、cURL、Postman、HAR 等格式，项目可整体打包 |
-| 部署 | 原生可执行文件和 Docker 镜像，支持 Windows、Linux、macOS |
+| 接口管理 | 项目与目录树、多环境、多级变量与 AES-256-GCM 密钥保险箱、Bearer / Basic / API Key / OAuth 2.0 鉴权；支持 HTTP / WebSocket / gRPC / SSE 多协议调试、XPath / JSONPath / 正则提取、JSON Schema 断言与响应示例文档 |
+| 场景编排 | 步骤覆盖、事务分组 (`group`) / 循环 (`loop`) / 条件 (`if`) / 权重分流 (`weighted`) 与受限沙箱脚本、固定 / 均匀 / 正态分布思考时间、CSV / JSON / JSONL 数据驱动、多场景加权 Mix 与 HTTP/2 / 代理 / DNS 覆写 |
+| 压测配置 | 闭环并发（VUs）与开环速率（RPS）双模式，预热、爬坡、保持、下降阶段编排与 SLA 违约自动中止阈值 |
+| 实时图表与观测 | `uPlot` 吞吐量、延迟百分位、并发、双层带宽与瓶颈区间标注；HDR 延迟直方图、时间热力图、五段耗时分解与分节点明细；支持 `/api/v1/metrics/prometheus` 采集及 InfluxDB / Prometheus Pushgateway 实时外发 |
+| 安全与治理 | 多角色 RBAC（`admin` / `member` / `viewer`）、`tg_` API 访问令牌、出站目标 Host/CIDR 白名单与成员并发/RPS 上限、操作审计日志 |
+| 报告与对比 | 历史记录、异常采样一键工作台复现、离线 HTML 报告、CSV / JSON / JTL / HAR 导出、2–6 次多次基线与分步骤回归对比 |
+| 发压机监控 | 带宽占用、CPU、内存、端口、TCP 重传率，发压机饱和时自动告警并标注可信区间 |
+| 分布式集群 | 集群 ECDSA CA 与双向 mTLS、Join Token 换签与证书持久化重连、`--ca-fingerprint` 指纹校验、节点吊销、标签筛选 (`node_selector`)、自定义权重与断线自动重平衡 / 中止策略 |
+| 导入导出 | 两步预览导入 `.tidegate`、OpenAPI 3.x / Swagger 2.0、Postman v2.1、Apifox、JMeter (`.jmx`)、HAR 1.2、cURL；支持导出 k6 (`.js`)、JMeter (`.jtl`)、OpenAPI（含示例与字段文档）与 Postman |
+| 部署 | 单文件原生可执行文件与多阶段非 root 只读容器镜像，支持 Windows、Linux、macOS |
 
 完整的功能设计见[产品规划与功能设计](docs/product-plan.md)。
 
 ## 当前进度
 
-目前已交付 **单文件控制台（Web 界面 + 控制器 + 本机发压节点）**、**CLI 压测与离线 HTML 报告**、**分布式集群** 与 **Docker 容器部署**：
+目前全阶段能力（**接口管理与多协议工作台**、**复杂场景控制流与 Mix 混合**、**全链路观测与对比大盘**、**RBAC 权限与安全围栏**、**零信任 mTLS 分布式集群** 与 **Docker 部署**）均已完整实现并通过多节点端到端验收：
 
-- **Web 控制台与接口工作台**：本地账户初始化（一次性初始化码 + Argon2id）与多设备会话管理；项目 / 环境 / 会话级临时变量池；目录树拖拽排序与两步安全导入导出（`.tidegate`、OpenAPI 3.x / Swagger 2.0、Postman Collection v2.1、HAR 1.2、cURL）；多标签请求调试、cURL 导入导出与脱敏、生效预览（继承请求头 / 鉴权 / 变量来源）、JSONPath 可视化拾取、五段耗时瀑布条与“一键发起单接口压测”。
-- **场景编排与发压引擎**：多步骤顺序执行、思考时间、CSV 参数化、开压前带宽与集群容量预估；闭环并发（VUs）与开环速率（RPS）双模式、多阶段线性曲线编辑与动态调压；SLA 阈值配置与运行时违约自动中止；基于 `uPlot` 的实时多维图表（吞吐量、延迟分位、活跃连接、应用层 vs 物理网卡双层带宽与瓶颈区间标注）及多压测基线对比。
-- **报告与分布式集群**：离线单文件 HTML 报告、CSV / JSON 与错误采样 HAR 导出；支持多机节点一键接入、跨节点 HDR 直方图与系统遥测合并。
+- **Web 控制台与多协议接口工作台**：本地账户初始化（一次性初始化码 + Argon2id）、多角色 RBAC（`admin`/`member`/`viewer`）、多设备会话注销与长期 `tg_` API 访问令牌；项目 / 环境 / 会话级临时变量池与 AES-256-GCM 敏感变量保险箱；目录树拖拽排序与两步安全导入导出（`.tidegate`、OpenAPI 3.x / Swagger 2.0、Postman v2.1、Apifox、JMeter `.jmx`、HAR 1.2、cURL）；支持 HTTP/1.1 & HTTP/2、WebSocket、gRPC Unary 与 SSE 调试、OAuth 2.0 客户端凭证鉴权、XPath 与 JSONPath 提取、JSON Schema 断言、响应示例/字段文档、五段耗时瀑布条与“一键压测”。
+- **复杂场景编排与发压引擎**：支持嵌套 `group` / `loop` / `if` / `weighted` 流程控制、受限纯 Go 沙箱脚本、固定/均匀/正态分布思考时间、CSV/JSON/JSONL 参数化与多场景权重 `Mix`；支持代理、自定义 DNS 覆写、开压前容量预估、VUs/RPS 在线动态调压与 SLA 违约自动中止。
+- **可观测大盘与生态导出**：支持 `uPlot` 多维趋势图、HDR 直方图与时间×延迟分桶热力图、五段网络耗时分解、分节点实况视图及 2–6 次历史基线对比；支持 k6 (`.js`) 脚本导出、JMeter (`.jtl`)、离线单文件 HTML、CSV、JSON、HAR 1.2 报告，以及 Prometheus 采集端点与 InfluxDB/Pushgateway 实时外发。
+- **零信任 mTLS 集群与系统治理**：控制器内置集群 CA 与 Join Token 签发、发压节点 CSR 换签、`--ca-fingerprint` 校验、`--cert-dir` 免密续连、节点吊销隔离、标签筛选（`node_selector`）、自定义权重与断线自动重平衡/中止容错；内置目标 Host/CIDR 白名单、成员规模上限及操作审计日志面板。
 
 ### 快速开始（Web 控制台）
 
@@ -78,23 +80,23 @@ CGO_ENABLED=0 go build -o tidegate ./cmd/tidegate
 
 ```bash
 ./tidegate testserver                                                   # 启动内置的被测服务（默认 :18080）
-./tidegate run examples/ping.yaml --out result.json --csv result.csv --html report.html
+./tidegate run examples/ping.yaml --out result.json --csv result.csv --html report.html --jtl result.jtl
 ```
 
-场景中配置的 `thresholds` 在压测结束或运行期违约校验失败时，`tidegate run` 将返回退出码 `3`，便于流水线直接作为性能门禁拦截回归。更多场景写法见 [examples](examples) 目录。
+场景中配置的 `thresholds` 在压测结束或运行期违约校验失败时，`tidegate run` 将返回退出码 `3`，便于流水线直接作为性能门禁拦截回归；亦可通过账号弹窗签发 `tg_` 前缀个人 API 令牌携带 `Authorization: Bearer tg_...` 从 Prometheus 或自动化脚本调用 `/api/v1/metrics/prometheus` 等接口。更多场景写法见 [examples](examples) 目录。
 
-### 多机分布式压测
+### 多机分布式压测（零信任 mTLS）
 
-在控制器节点启用集群监听端口与认证令牌：
+在控制器节点启用集群监听端口，并在 Web 控制台「发压节点」页面签发加入令牌（或通过 `--cluster-token` 指定静态令牌）：
 
 ```bash
-./tidegate serve --listen 0.0.0.0:8080 --cluster-listen 0.0.0.0:7443 --cluster-token <集群令牌> --tls-self-signed
+./tidegate serve --listen 0.0.0.0:8080 --cluster-listen 0.0.0.0:7443 --tls-self-signed
 ```
 
-在其他发压机上接入集群：
+在其他发压机上携带加入令牌、CA 指纹与节点标签首次注册接入集群（后续重启仅凭 `--cert-dir` 内持久化的签名证书即可免令牌重连）：
 
 ```bash
-./tidegate agent --join <控制器IP:7443> --token <集群令牌>
+./tidegate agent --join <控制器IP:7443> --token <加入令牌> --cert-dir ./agent-certs --ca-fingerprint <CA_SHA256指纹> --labels zone=cn-east,tier=perf
 ```
 
 ### Docker 部署

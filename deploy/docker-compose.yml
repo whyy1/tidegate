@@ -49,6 +49,10 @@ services:
       TIDEGATE_JOIN: tidegate:7443
       TIDEGATE_TOKEN: ${TIDEGATE_CLUSTER_TOKEN:-}
       TIDEGATE_NAME: docker-agent-1
+      # 推荐生产环境持久化 mTLS 节点证书并绑定 CA 指纹与调度标签：
+      # TIDEGATE_CERT_DIR: /data/agent-certs
+      # TIDEGATE_CA_FINGERPRINT: <控制台显示的64位CA_SHA256指纹>
+      # TIDEGATE_LABELS: zone=docker,tier=default
     depends_on:
       - tidegate
     restart: unless-stopped
