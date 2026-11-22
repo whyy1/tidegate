@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { AccountModal } from './components/AccountModal'
 import { AuthGate } from './components/AuthGate'
 import { EnvModal } from './components/EnvModal'
@@ -6,11 +6,70 @@ import { ProjectModal } from './components/ProjectModal'
 import { ToastContainer, type ToastItem } from './components/Toast'
 import { TopBar, type NavTab } from './components/TopBar'
 import { api, UNAUTHORIZED_EVENT } from './lib/api'
-import type { API, AgentView, Environment, Project, SetupStatus, User } from './lib/types'
+import type {
+  API,
+  APIBody,
+  AgentView,
+  Environment,
+  KeyValue,
+  Project,
+  SampleView,
+  SetupStatus,
+  SysmonStats,
+  User,
+} from './lib/types'
 import { wsClient } from './lib/ws'
+import { AgentsView } from './views/AgentsView'
+import { HistoryCompareView } from './views/HistoryCompareView'
+import { LiveRunView } from './views/LiveRunView'
+import { ScenariosView } from './views/ScenariosView'
 import { WorkbenchView } from './views/WorkbenchView'
 
 let toastSeq = 1
+let replaySeq = 1
+
+function sampleToDraftAPI(sample: SampleView): Partial<API> {
+  const headers: KeyValue[] = []
+  let contentType = ''
+  for (const h of sample.request_headers || []) {
+    const low = h.name.toLowerCase()
+    if (low === 'host' || low === 'content-length') continue
+    if (low === 'content-type') contentType = h.value
+    headers.push({ name: h.name, value: h.value })
+  }
+
+  let body: APIBody = { type: 'none' }
+  if (sample.request_body) {
+    const ctLow = contentType.toLowerCase()
+    const trimmed = sample.request_body.trim()
+    if (ctLow.includes('application/json') || trimmed.startsWith('{') || trimmed.startsWith('[')) {
+      body = { type: 'json', content: sample.request_body }
+    } else if (ctLow.includes('application/x-www-form-urlencoded')) {
+      const params = new URLSearchParams(sample.request_body)
+      const fields: KeyValue[] = []
+      params.forEach((v, k) => fields.push({ name: k, value: v }))
+      body = fields.length > 0 ? { type: 'form', fields } : { type: 'raw', content_type: contentType, content: sample.request_body }
+    } else {
+      body = { type: 'raw', content_type: contentType || 'text/plain', content: sample.request_body }
+    }
+  }
+
+  return {
+    name: sample.step ? `复现: ${sample.step}` : `复现 ${sample.method || 'GET'}`,
+    folder_id: '',
+    request: {
+      method: sample.method || 'GET',
+      url: sample.url || '',
+      path_params: [],
+      query: [],
+      headers,
+      body,
+    },
+    auth: { type: 'none' },
+    extract: [],
+    assert: [],
+  }
+}
 
 export function App() {
   const [booting, setBooting] = useState(true)
@@ -24,10 +83,14 @@ export function App() {
   const [tempVars, setTempVars] = useState<Record<string, string>>({})
 
   const [agents, setAgents] = useState<AgentView[]>([])
+  const [sysByAgent, setSysByAgent] = useState<Record<string, SysmonStats>>({})
   const [wsConnected, setWsConnected] = useState(false)
   const [activeRunId, setActiveRunId] = useState('')
   const [activeTab, setActiveTab] = useState<NavTab>('workbench')
   const [quickLoadAPI, setQuickLoadAPI] = useState<Partial<API> | null>(null)
+  const [preloadedScenarioId, setPreloadedScenarioId] = useState('')
+  const [inspectRunId, setInspectRunId] = useState('')
+  const [incomingReplay, setIncomingReplay] = useState<{ seq: number; api: Partial<API> } | null>(null)
 
   const [projectModalOpen, setProjectModalOpen] = useState(false)
   const [envModalOpen, setEnvModalOpen] = useState(false)
@@ -113,6 +176,10 @@ export function App() {
     const unsubEv = wsClient.onEvent((ev) => {
       if (ev.type === 'agents' && ev.agents) {
         setAgents(ev.agents)
+      } else if (ev.type === 'sys' && ev.agent_id && ev.sys) {
+        const aid = ev.agent_id
+        const sys = ev.sys
+        setSysByAgent((prev) => ({ ...prev, [aid]: sys }))
       } else if (ev.type === 'run_status' && ev.run_id) {
         if (ev.status === 'running' || ev.status === 'preparing' || ev.status === 'stopping') {
           setActiveRunId(ev.run_id)
@@ -133,6 +200,19 @@ export function App() {
       void loadEnvironments(activeProjectId)
     }
   }, [user, activeProjectId, loadEnvironments])
+
+  const liveAgents = useMemo(
+    () => agents.map((ag) => (sysByAgent[ag.id] ? { ...ag, stats: sysByAgent[ag.id] } : ag)),
+    [agents, sysByAgent]
+  )
+
+  const selectProject = useCallback((pid: string) => {
+    setActiveProjectId(pid)
+    setTempVars({})
+    setQuickLoadAPI(null)
+    setPreloadedScenarioId('')
+    setInspectRunId('')
+  }, [])
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || null
 
@@ -166,15 +246,12 @@ export function App() {
         environments={environments}
         activeEnvId={activeEnvId}
         tempVars={tempVars}
-        agents={agents}
+        agents={liveAgents}
         wsConnected={wsConnected}
         activeTab={activeTab}
         activeRunId={activeRunId}
         onChangeTab={setActiveTab}
-        onSelectProject={(pid) => {
-          setActiveProjectId(pid)
-          setTempVars({})
-        }}
+        onSelectProject={selectProject}
         onSelectEnv={setActiveEnvId}
         onTempVarsChange={setTempVars}
         onEnvironmentsChanged={async () => {
@@ -190,46 +267,91 @@ export function App() {
         <div className="flex-1 flex items-center justify-center text-sm text-slate-500">
           暂无可用项目，请点击顶部「项目管理」新建或导入项目。
         </div>
-      ) : activeTab === 'workbench' ? (
-        <WorkbenchView
-          projectId={activeProject.id}
-          activeEnvId={activeEnvId}
-          tempVars={tempVars}
-          onTempVarsChange={setTempVars}
-          onWorkspaceMutated={() => loadEnvironments(activeProject.id)}
-          onQuickLoadTest={(apiDraft) => {
-            setQuickLoadAPI(apiDraft)
-            setActiveTab('run')
-            pushToast('info', `已将「${apiDraft.name || '未命名接口'}」带入压测视图`)
-          }}
-          onToast={pushToast}
-        />
       ) : (
-        <div className="flex-1 flex items-center justify-center p-8 bg-slate-50">
-          <div className="max-w-lg text-center space-y-2 border border-slate-200 bg-white rounded-xl p-6 shadow-xs">
-            <h2 className="text-base font-semibold text-slate-900">
-              {activeTab === 'scenarios'
-                ? '场景编排、CSV 数据预览与功能试跑'
-                : activeTab === 'run'
-                  ? '实时压测控制台与 uPlot 多维监控'
-                  : activeTab === 'history'
-                    ? '压测历史报告、基线对比与 HTML/HAR 导出'
-                    : '集群发压节点健康与带宽上限管理'}
-            </h2>
-            <p className="text-xs text-slate-500 leading-relaxed">
-              当前阶段（F3A）已集成核心工作台与 API 调试全流程；本视图将在下一步里程碑（F3B）装配完整交互面板。
-              {quickLoadAPI && activeTab === 'run' ? `（已预载接口：${quickLoadAPI.name || '草稿'}）` : ''}
-            </p>
-            <div>
-              <button
-                type="button"
-                onClick={() => setActiveTab('workbench')}
-                className="mt-2 px-4 py-1.5 rounded-md bg-sky-600 text-white text-xs font-medium hover:bg-sky-700"
-              >
-                返回接口工作台
-              </button>
-            </div>
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          <div className={activeTab === 'workbench' ? 'flex-1 flex min-h-0 overflow-hidden' : 'hidden'}>
+            <WorkbenchView
+              projectId={activeProject.id}
+              activeEnvId={activeEnvId}
+              tempVars={tempVars}
+              onTempVarsChange={setTempVars}
+              onWorkspaceMutated={() => loadEnvironments(activeProject.id)}
+              onQuickLoadTest={(apiDraft) => {
+                setPreloadedScenarioId('')
+                setInspectRunId('')
+                setQuickLoadAPI(apiDraft)
+                setActiveTab('run')
+                pushToast('info', `已将「${apiDraft.name || '未命名接口'}」带入压测视图`)
+              }}
+              incomingReplay={incomingReplay}
+              isActive={activeTab === 'workbench'}
+              onToast={pushToast}
+            />
           </div>
+
+          {activeTab === 'scenarios' && (
+            <ScenariosView
+              projectId={activeProject.id}
+              environments={environments}
+              activeEnvId={activeEnvId}
+              tempVars={tempVars}
+              onLaunchScenario={(scenarioId) => {
+                setQuickLoadAPI(null)
+                setInspectRunId('')
+                setPreloadedScenarioId(scenarioId)
+                setActiveTab('run')
+              }}
+              onToast={pushToast}
+            />
+          )}
+
+          {activeTab === 'run' && (
+            <LiveRunView
+              projectId={activeProject.id}
+              environments={environments}
+              activeEnvId={activeEnvId}
+              tempVars={tempVars}
+              agents={liveAgents}
+              preloadedAPI={quickLoadAPI}
+              preloadedScenarioId={preloadedScenarioId}
+              inspectRunId={inspectRunId}
+              onClearPreloads={() => {
+                setQuickLoadAPI(null)
+                setPreloadedScenarioId('')
+                setInspectRunId('')
+              }}
+              onReplaySample={(sample) => {
+                setIncomingReplay({ seq: replaySeq++, api: sampleToDraftAPI(sample) })
+                setActiveTab('workbench')
+                pushToast('info', '已将异常采样带入工作台，可直接调整并重发调试')
+              }}
+              onToast={pushToast}
+            />
+          )}
+
+          {activeTab === 'history' && (
+            <HistoryCompareView
+              projectId={activeProject.id}
+              onInspectRun={(runId) => {
+                setQuickLoadAPI(null)
+                setPreloadedScenarioId('')
+                setInspectRunId(runId)
+                setActiveTab('run')
+              }}
+              onToast={pushToast}
+            />
+          )}
+
+          {activeTab === 'agents' && (
+            <AgentsView
+              agents={liveAgents}
+              onAgentsRefresh={async () => {
+                const list = await api.listAgents()
+                setAgents(list)
+              }}
+              onToast={pushToast}
+            />
+          )}
         </div>
       )}
 
@@ -238,7 +360,7 @@ export function App() {
         projects={projects}
         activeProject={activeProject}
         onClose={() => setProjectModalOpen(false)}
-        onSelectProject={setActiveProjectId}
+        onSelectProject={selectProject}
         onProjectsChanged={loadProjects}
         onToast={pushToast}
       />
@@ -263,6 +385,12 @@ export function App() {
         onToast={pushToast}
         onLoggedOut={() => {
           setUser(null)
+          setSysByAgent({})
+          setActiveRunId('')
+          setQuickLoadAPI(null)
+          setPreloadedScenarioId('')
+          setInspectRunId('')
+          setIncomingReplay(null)
           wsClient.stop()
         }}
       />

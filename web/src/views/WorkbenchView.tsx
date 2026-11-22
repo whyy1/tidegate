@@ -52,6 +52,7 @@ interface Props {
   onWorkspaceMutated: () => Promise<void>
   onQuickLoadTest: (apiDraft: Partial<API>) => void
   incomingReplay?: { seq: number; api: Partial<API> } | null
+  isActive?: boolean
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
 }
 
@@ -135,6 +136,7 @@ export function WorkbenchView({
   onWorkspaceMutated,
   onQuickLoadTest,
   incomingReplay,
+  isActive = true,
   onToast,
 }: Props) {
   const [tree, setTree] = useState<Tree>({ children: [] })
@@ -400,17 +402,19 @@ export function WorkbenchView({
   const actionsRef = useRef({
     save: handleSave,
     send: handleDebugSend,
+    active: isActive,
     modalOpen: false,
   })
   actionsRef.current = {
     save: handleSave,
     send: handleDebugSend,
+    active: isActive,
     modalOpen: importOpen || curlOpen || saveModalOpen || folderModal.open,
   }
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (actionsRef.current.modalOpen) return
+      if (!actionsRef.current.active || actionsRef.current.modalOpen) return
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault()
         void actionsRef.current.save()
