@@ -15,6 +15,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"tidegate/internal/curl"
+	"tidegate/internal/scenario"
 	"tidegate/internal/store"
 )
 
@@ -77,12 +78,14 @@ type ConversionReport struct {
 
 // ImportDiff describes the planned or executed action for one API entry.
 type ImportDiff struct {
-	Action     string `json:"action"` // create | update | skip
-	FolderPath string `json:"folder_path,omitempty"`
-	Method     string `json:"method"`
-	URL        string `json:"url"`
-	Name       string `json:"name"`
-	ExistingID string `json:"existing_id,omitempty"`
+	Action          string   `json:"action"` // create | update | skip
+	FolderPath      string   `json:"folder_path,omitempty"`
+	Method          string   `json:"method"`
+	URL             string   `json:"url"`
+	Name            string   `json:"name"`
+	ExistingID      string   `json:"existing_id,omitempty"`
+	ChangedFields   []string `json:"changed_fields,omitempty"`
+	PreservedFields []string `json:"preserved_fields,omitempty"`
 }
 
 // PreviewResult is returned by Preview without mutating the store.
@@ -314,7 +317,7 @@ func Preview(st *store.Store, projectID string, in PreviewInput) (*PreviewResult
 		return nil, err
 	}
 
-	diffs := computeDiffs(bundle, idx, strategy)
+	diffs := computeDiffs(st, projectID, bundle, idx, strategy)
 	return &PreviewResult{
 		Report: bundle.Report,
 		Diffs:  diffs,
@@ -451,7 +454,7 @@ func Apply(st *store.Store, projectID string, in PreviewInput) (*ApplyResult, er
 
 	// 5. Create or update APIs preserving existing API ULIDs.
 	apiIDMap := make(map[string]string, len(bundle.APIs))
-	diffs := computeDiffs(bundle, idx, strategy)
+	diffs := computeDiffs(st, projectID, bundle, idx, strategy)
 
 	for i, pa := range bundle.APIs {
 		d := diffs[i]
@@ -479,17 +482,12 @@ func Apply(st *store.Store, projectID string, in PreviewInput) (*ApplyResult, er
 				report.APIsSkipped++
 				continue
 			}
-			apiCopy.ID = cur.ID
-			apiCopy.Version = cur.Version
-			apiCopy.FolderID = cur.FolderID
-			// In merge strategy, keep existing extractors/assertions unless incoming supplied them.
 			if strategy == StrategyMerge {
-				if len(apiCopy.Extract) == 0 {
-					apiCopy.Extract = cur.Extract
-				}
-				if len(apiCopy.Assert) == 0 {
-					apiCopy.Assert = cur.Assert
-				}
+				apiCopy, diffs[i].ChangedFields, diffs[i].PreservedFields = smartMergeAPI(cur, pa.API)
+			} else {
+				apiCopy.ID = cur.ID
+				apiCopy.Version = cur.Version
+				apiCopy.FolderID = cur.FolderID
 			}
 			updated, err := st.UpdateAPI(projectID, &apiCopy)
 			if err != nil {
@@ -657,7 +655,7 @@ func buildExistingIndex(st *store.Store, projectID, targetFolderID string) (*exi
 	return idx, nil
 }
 
-func computeDiffs(b *parsedBundle, idx *existingIndex, strategy string) []ImportDiff {
+func computeDiffs(st *store.Store, projectID string, b *parsedBundle, idx *existingIndex, strategy string) []ImportDiff {
 	diffs := make([]ImportDiff, 0, len(b.APIs))
 	for _, pa := range b.APIs {
 		m := strings.ToUpper(strings.TrimSpace(pa.API.Request.Method))
@@ -668,23 +666,214 @@ func computeDiffs(b *parsedBundle, idx *existingIndex, strategy string) []Import
 		key := matchKey(fRel, m, pa.API.Request.URL)
 		existingID := idx.apiByKey[key]
 		action := ActionCreate
+		var changedFields, preservedFields []string
 		if existingID != "" {
 			if strategy == StrategySkip {
 				action = ActionSkip
 			} else {
 				action = ActionUpdate
+				if strategy == StrategyMerge && st != nil {
+					if cur, err := st.GetAPI(projectID, existingID); err == nil {
+						_, changedFields, preservedFields = smartMergeAPI(cur, pa.API)
+					}
+				}
 			}
 		}
 		diffs = append(diffs, ImportDiff{
-			Action:     action,
-			FolderPath: strings.Join(pa.FolderPath, "/"),
-			Method:     m,
-			URL:        pa.API.Request.URL,
-			Name:       pa.API.Name,
-			ExistingID: existingID,
+			Action:          action,
+			FolderPath:      strings.Join(pa.FolderPath, "/"),
+			Method:          m,
+			URL:             pa.API.Request.URL,
+			Name:            pa.API.Name,
+			ExistingID:      existingID,
+			ChangedFields:   changedFields,
+			PreservedFields: preservedFields,
 		})
 	}
 	return diffs
+}
+
+func smartMergeAPI(cur *store.API, incoming store.API) (merged store.API, changed []string, preserved []string) {
+	merged = incoming
+	merged.ID = cur.ID
+	merged.Version = cur.Version
+	merged.FolderID = cur.FolderID
+	merged.Order = cur.Order
+
+	if cur.Name != incoming.Name && incoming.Name != "" {
+		changed = append(changed, "名称")
+	} else if incoming.Name == "" {
+		merged.Name = cur.Name
+	}
+
+	if strings.TrimSpace(incoming.Description) == "" && strings.TrimSpace(cur.Description) != "" {
+		merged.Description = cur.Description
+		preserved = append(preserved, "接口说明")
+	} else if strings.TrimSpace(incoming.Description) != "" && incoming.Description != cur.Description {
+		changed = append(changed, "接口说明")
+	}
+
+	// Preserve existing auth when user set concrete credentials and incoming has no real secret/token.
+	if hasConcreteUserAuth(cur.Auth) && (incoming.Auth == nil || incoming.Auth.Type == "" || incoming.Auth.Type == store.AuthNone || isOpenAPIPlaceholderAuth(cur.Auth, incoming.Auth)) {
+		merged.Auth = cur.Auth
+		preserved = append(preserved, "鉴权配置")
+	} else if incoming.Auth != nil && cur.Auth == nil {
+		changed = append(changed, "鉴权配置")
+	}
+
+	// Smart-merge path params, query params, and headers preserving user {{var}} templates, secrets, and extra custom headers.
+	var pChg, pKeep bool
+	merged.Request.PathParams, pChg, pKeep = mergeParamList(cur.Request.PathParams, incoming.Request.PathParams, false)
+	var qChg, qKeep bool
+	merged.Request.Query, qChg, qKeep = mergeParamList(cur.Request.Query, incoming.Request.Query, false)
+	var hChg, hKeep bool
+	merged.Request.Headers, hChg, hKeep = mergeParamList(cur.Request.Headers, incoming.Request.Headers, true)
+	if pChg || qChg || hChg {
+		changed = append(changed, "参数/请求头")
+	}
+	if pKeep || qKeep || hKeep {
+		preserved = append(preserved, "已有参数值/模板")
+	}
+
+	if len(cur.Examples) == 0 && len(incoming.Examples) > 0 {
+		changed = append(changed, "响应示例")
+	} else if len(incoming.Examples) > 0 && len(cur.Examples) > 0 {
+		changed = append(changed, "响应示例")
+	} else if len(incoming.Examples) == 0 && len(cur.Examples) > 0 {
+		merged.Examples = cur.Examples
+	}
+
+	// Keep existing extractors and append newly discovered non-conflicting ones.
+	if len(cur.Extract) > 0 {
+		seen := make(map[string]bool, len(cur.Extract))
+		out := append([]scenario.Extract(nil), cur.Extract...)
+		for _, ex := range out {
+			seen[ex.Name] = true
+		}
+		for _, ex := range incoming.Extract {
+			if !seen[ex.Name] {
+				out = append(out, ex)
+				seen[ex.Name] = true
+				changed = append(changed, "提取规则")
+			}
+		}
+		merged.Extract = out
+		preserved = append(preserved, fmt.Sprintf("提取器(%d)", len(cur.Extract)))
+	}
+
+	// Union assertions by signature so user assertions never disappear on OpenAPI sync.
+	if len(cur.Assert) > 0 {
+		seen := make(map[string]bool, len(cur.Assert))
+		out := append([]scenario.Assert(nil), cur.Assert...)
+		for _, as := range out {
+			seen[assertSignature(as)] = true
+		}
+		for _, as := range incoming.Assert {
+			sig := assertSignature(as)
+			if !seen[sig] {
+				out = append(out, as)
+				seen[sig] = true
+			}
+		}
+		merged.Assert = out
+		preserved = append(preserved, fmt.Sprintf("断言(%d)", len(cur.Assert)))
+	}
+
+	return merged, changed, preserved
+}
+
+func hasConcreteUserAuth(a *store.Auth) bool {
+	if a == nil {
+		return false
+	}
+	switch a.Type {
+	case store.AuthBearer, store.AuthBasic, store.AuthAPIKey, store.AuthOAuth2:
+		return true
+	default:
+		return false
+	}
+}
+
+func isOpenAPIPlaceholderAuth(cur, inc *store.Auth) bool {
+	if inc == nil {
+		return true
+	}
+	if inc.Type == store.AuthBearer && strings.HasPrefix(inc.Token, "{{") && cur.Token != inc.Token {
+		return true
+	}
+	if inc.Type == store.AuthAPIKey && strings.HasPrefix(inc.Value, "{{") && cur.Value != inc.Value {
+		return true
+	}
+	return false
+}
+
+func assertSignature(a scenario.Assert) string {
+	eq := ""
+	if a.Equals != nil {
+		eq = string(*a.Equals)
+	}
+	cont := ""
+	if a.Contains != nil {
+		cont = *a.Contains
+	}
+	return fmt.Sprintf("%s|%s|%s|%s|%s|%v", a.Type, a.Expr, a.Value, eq, cont, a.In)
+}
+
+func mergeParamList(cur, incoming store.KeyValueList, caseFold bool) (merged store.KeyValueList, changed, preservedExisting bool) {
+	if len(cur) == 0 {
+		return incoming, len(incoming) > 0, false
+	}
+	if len(incoming) == 0 {
+		return cur, false, true
+	}
+	norm := func(s string) string {
+		t := strings.TrimSpace(s)
+		if caseFold {
+			return strings.ToLower(t)
+		}
+		return t
+	}
+	curMap := make(map[string]store.KeyValue, len(cur))
+	for _, kv := range cur {
+		if k := norm(kv.Name); k != "" {
+			curMap[k] = kv
+		}
+	}
+	seen := make(map[string]bool, len(incoming))
+	out := make(store.KeyValueList, 0, len(incoming)+len(cur))
+	for _, inc := range incoming {
+		k := norm(inc.Name)
+		if k == "" {
+			continue
+		}
+		seen[k] = true
+		if prev, ok := curMap[k]; ok {
+			mergedKV := inc
+			if string(prev.Value) != "" {
+				mergedKV.Value = prev.Value
+				preservedExisting = true
+			}
+			if mergedKV.Description == "" {
+				mergedKV.Description = prev.Description
+			} else if mergedKV.Description != prev.Description {
+				changed = true
+			}
+			mergedKV.Secret = prev.Secret
+			mergedKV.Disabled = prev.Disabled
+			out = append(out, mergedKV)
+		} else {
+			out = append(out, inc)
+			changed = true
+		}
+	}
+	// Preserve extra custom params/headers added by user.
+	for _, prev := range cur {
+		if k := norm(prev.Name); k != "" && !seen[k] {
+			out = append(out, prev)
+			preservedExisting = true
+		}
+	}
+	return out, changed, preservedExisting
 }
 
 func fullRelPath(base string, segs []string) string {

@@ -15,6 +15,7 @@ import type {
   Environment,
   FilePreview,
   Folder,
+  GRPCSchemaCatalog,
   HTTPOptions,
   JoinTokenCreated,
   KeyValue,
@@ -263,6 +264,21 @@ export const api = {
     }),
   parseCurl: (command: string) =>
     request<{ api: API }>('/api/v1/tools/curl/parse', { method: 'POST', jsonBody: { command } }),
+  discoverGRPC: (
+    pid: string,
+    payload: {
+      environment_id?: string
+      target?: string
+      tls?: boolean
+      insecure_skip_verify?: boolean
+      proto_file?: string
+      metadata?: Record<string, string>
+    }
+  ) =>
+    request<GRPCSchemaCatalog>(`/api/v1/projects/${encodeURIComponent(pid)}/grpc/discover`, {
+      method: 'POST',
+      jsonBody: payload,
+    }),
 
   // Environments
   listEnvironments: async (pid: string) =>

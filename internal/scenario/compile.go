@@ -11,11 +11,14 @@ import (
 	"net/textproto"
 	"net/url"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
+
+	"tidegate/internal/grpcproto"
 )
 
 // CompileOptions configure compilation.
@@ -974,9 +977,17 @@ func (c *compiler) compileGRPCStep(i int, st *Step) *GRPCStepPlan {
 	c.plan.FlatSteps = append(c.plan.FlatSteps, info)
 	s := &GRPCStepPlan{
 		StepInfo:       info,
+		ProtoFile:      strings.TrimSpace(g.ProtoFile),
+		UseReflection:  g.UseReflection,
 		ExpectedStatus: g.ExpectedStatus,
 		Timeout:        g.Timeout.D(),
 		OnError:        c.compileOnError(w("on_error"), st.OnError, c.plan.HTTP.OnError),
+	}
+	if s.ProtoFile != "" {
+		cleanBase := filepath.Base(s.ProtoFile)
+		if cleanBase != s.ProtoFile || s.ProtoFile == "." || s.ProtoFile == ".." || strings.ContainsAny(s.ProtoFile, `/\`) {
+			c.fail(w("grpc.proto_file"), "Proto 描述文件名 %q 非法", g.ProtoFile)
+		}
 	}
 	if g.TLS != nil {
 		s.HasTLSOverride = true
@@ -1031,11 +1042,15 @@ func (c *compiler) compileGRPCStep(i int, st *Step) *GRPCStepPlan {
 	s.Payload = c.template(w("grpc.payload"), g.Payload, escapeNone)
 
 	pe := strings.ToLower(strings.TrimSpace(g.PayloadEncoding))
+	if pe == "" && (s.ProtoFile != "" || s.UseReflection) {
+		pe = "proto_json"
+	}
 	switch pe {
 	case "", "utf8", "json":
 		if pe == "" {
 			pe = "utf8"
 		}
+	case "proto_json":
 	case "base64":
 		if s.Payload.Static() && strings.TrimSpace(s.Payload.Literal()) != "" {
 			if _, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s.Payload.Literal())); err != nil {
@@ -1050,19 +1065,57 @@ func (c *compiler) compileGRPCStep(i int, st *Step) *GRPCStepPlan {
 		}
 	case "proto_string":
 	default:
-		c.fail(w("grpc.payload_encoding"), "不支持的 payload_encoding %q（可选 utf8、json、base64、hex、proto_string）", g.PayloadEncoding)
+		c.fail(w("grpc.payload_encoding"), "不支持的 payload_encoding %q（可选 proto_json、utf8、json、base64、hex、proto_string）", g.PayloadEncoding)
 	}
 	s.PayloadEncoding = pe
 
 	re := strings.ToLower(strings.TrimSpace(g.ResponseEncoding))
+	if re == "" && (s.ProtoFile != "" || s.UseReflection) {
+		re = "proto_json"
+	}
 	switch re {
 	case "", "raw", "utf8":
 		re = "raw"
-	case "proto_string", "base64":
+	case "proto_json", "proto_string", "base64":
 	default:
-		c.fail(w("grpc.response_encoding"), "不支持的 response_encoding %q（可选 raw、proto_string、base64）", g.ResponseEncoding)
+		c.fail(w("grpc.response_encoding"), "不支持的 response_encoding %q（可选 proto_json、raw、proto_string、base64）", g.ResponseEncoding)
 	}
 	s.ResponseEncoding = re
+
+	if s.ProtoFile != "" && s.FullMethod != "" && c.opts.BaseDir != "" && filepath.Base(s.ProtoFile) == s.ProtoFile {
+		protoFiles := map[string][]byte{}
+		if entries, err := os.ReadDir(c.opts.BaseDir); err == nil {
+			for _, de := range entries {
+				if de.Type().IsRegular() {
+					n := de.Name()
+					low := strings.ToLower(n)
+					if n == s.ProtoFile || strings.HasSuffix(low, ".proto") || strings.HasSuffix(low, ".pb") || strings.HasSuffix(low, ".desc") {
+						if data, rerr := os.ReadFile(filepath.Join(c.opts.BaseDir, n)); rerr == nil {
+							protoFiles[n] = data
+						}
+					}
+				}
+			}
+		}
+		if _, ok := protoFiles[s.ProtoFile]; !ok {
+			data, rerr := os.ReadFile(filepath.Join(c.opts.BaseDir, s.ProtoFile))
+			if rerr != nil {
+				c.fail(w("grpc.proto_file"), "读取 Proto 描述文件 %q 失败：%v", s.ProtoFile, rerr)
+			} else {
+				protoFiles[s.ProtoFile] = data
+			}
+		}
+		if len(protoFiles) > 0 {
+			filesReg, perr := grpcproto.ParseProtoFiles(s.ProtoFile, protoFiles)
+			if perr != nil {
+				c.fail(w("grpc.proto_file"), "%v", perr)
+			} else if codec, cerr := grpcproto.NewMethodCodec(filesReg, s.FullMethod); cerr != nil {
+				c.fail(w("grpc.method"), "%v", cerr)
+			} else {
+				s.Codec = codec
+			}
+		}
+	}
 
 	if g.ExpectedStatus != nil && (*g.ExpectedStatus < 0 || *g.ExpectedStatus > 16) {
 		c.fail(w("grpc.expected_status"), "gRPC 状态码必须在 0-16 之间")

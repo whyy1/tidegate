@@ -163,6 +163,8 @@ type APIWebSocket struct {
 type APIGRPC struct {
 	Service          string            `yaml:"service" json:"service"`
 	Method           string            `yaml:"method" json:"method"`
+	ProtoFile        string            `yaml:"proto_file,omitempty" json:"proto_file,omitempty"`
+	UseReflection    bool              `yaml:"use_reflection,omitempty" json:"use_reflection,omitempty"`
 	TLS              *bool             `yaml:"tls,omitempty" json:"tls,omitempty"`
 	PayloadEncoding  string            `yaml:"payload_encoding,omitempty" json:"payload_encoding,omitempty"`
 	ResponseEncoding string            `yaml:"response_encoding,omitempty" json:"response_encoding,omitempty"`

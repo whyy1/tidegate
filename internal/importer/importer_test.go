@@ -589,3 +589,112 @@ func TestJMeterAndApifoxImport(t *testing.T) {
 		t.Fatalf("unexpected Apifox API: %+v", afAPI)
 	}
 }
+
+func TestOpenAPI3SmartMergePreservesAssets(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, _ := st.CreateProject(&store.Project{Name: "sync-demo"})
+	f, _ := st.CreateFolder(pr.ID, &store.Folder{Name: "Orders"})
+
+	eq200 := scenario.Scalar("ok")
+	existing, err := st.CreateAPI(pr.ID, &store.API{
+		Name:        "旧名称",
+		FolderID:    f.ID,
+		Description: "自定义保留说明",
+		Request: store.APIRequest{
+			Method: "GET",
+			URL:    "/orders",
+			Query: store.KeyValueList{
+				{Name: "status", Value: "{{order_status}}", Description: "old desc"},
+			},
+			Headers: store.KeyValueList{
+				{Name: "X-Custom-Tenant", Value: "{{tenant_id}}", Secret: true},
+			},
+		},
+		Auth: &store.Auth{Type: store.AuthBearer, Token: "{{my_custom_jwt}}"},
+		Extract: []scenario.Extract{
+			{Name: "first_order", From: "jsonpath", Expr: "$.data[0].id"},
+		},
+		Assert: []scenario.Assert{
+			{Type: "jsonpath", Expr: "$.code", Equals: &eq200},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	updatedSpec := `{
+		"openapi": "3.0.3",
+		"info": {"title": "Orders API", "version": "2.0"},
+		"tags": [{"name": "Orders"}],
+		"components": {
+			"securitySchemes": {
+				"bearerAuth": {"type": "http", "scheme": "bearer"}
+			}
+		},
+		"paths": {
+			"/orders": {
+				"get": {
+					"tags": ["Orders"],
+					"summary": "查询订单列表 v2",
+					"security": [{"bearerAuth": []}],
+					"parameters": [
+						{"name": "status", "in": "query", "description": "新文档枚举说明", "example": "paid"},
+						{"name": "page_size", "in": "query", "description": "每页数量", "example": "20"}
+					],
+					"responses": {
+						"200": {
+							"description": "ok",
+							"content": {
+								"application/json": {
+									"schema": {
+										"type": "object",
+										"required": ["code"],
+										"properties": {
+											"code": {"type": "string"}
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	}`
+
+	pv, err := Preview(st, pr.ID, PreviewInput{Content: []byte(updatedSpec), Strategy: StrategyMerge})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pv.Diffs) != 1 || pv.Diffs[0].Action != ActionUpdate || len(pv.Diffs[0].PreservedFields) == 0 {
+		t.Fatalf("expected non-destructive merge preview metadata, got %+v", pv.Diffs)
+	}
+
+	res, err := Apply(st, pr.ID, PreviewInput{Content: []byte(updatedSpec), Strategy: StrategyMerge})
+	if err != nil || res.Report.APIsUpdated != 1 {
+		t.Fatalf("Apply err=%v report=%+v", err, res.Report)
+	}
+
+	after, err := st.GetAPI(pr.ID, existing.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Name != "查询订单列表 v2" || after.Description != "自定义保留说明" {
+		t.Fatalf("expected updated name + preserved description, got %+v", after)
+	}
+	if after.Auth == nil || after.Auth.Token != "{{my_custom_jwt}}" {
+		t.Fatalf("expected custom auth preserved instead of placeholder, got %+v", after.Auth)
+	}
+	if len(after.Extract) != 1 || len(after.Assert) != 1 || after.Assert[0].Expr != "$.code" {
+		t.Fatalf("expected extract & assertions preserved, got extract=%+v assert=%+v", after.Extract, after.Assert)
+	}
+	if len(after.Request.Query) != 2 || string(after.Request.Query[0].Value) != "{{order_status}}" || after.Request.Query[0].Description != "新文档枚举说明" || after.Request.Query[1].Name != "page_size" {
+		t.Fatalf("expected smart-merged query params keeping template value & adding new param, got %+v", after.Request.Query)
+	}
+	if len(after.Request.Headers) != 1 || after.Request.Headers[0].Name != "X-Custom-Tenant" || !after.Request.Headers[0].Secret {
+		t.Fatalf("expected custom secret header preserved, got %+v", after.Request.Headers)
+	}
+}

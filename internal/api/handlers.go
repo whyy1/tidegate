@@ -1411,3 +1411,33 @@ func (s *Server) handleSystemInfo(w http.ResponseWriter, _ *http.Request) {
 		"cluster_ca_fingerprint": s.ctrl.ClusterCAFingerprint(),
 	})
 }
+
+func (s *Server) handleDiscoverGRPC(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	var body struct {
+		EnvironmentID      string            `json:"environment_id,omitempty"`
+		Target             string            `json:"target,omitempty"`
+		TLS                bool              `json:"tls,omitempty"`
+		InsecureSkipVerify bool              `json:"insecure_skip_verify,omitempty"`
+		ProtoFile          string            `json:"proto_file,omitempty"`
+		Metadata           map[string]string `json:"metadata,omitempty"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	cat, err := s.ctrl.DiscoverGRPC(r.Context(), controller.DiscoverGRPCRequest{
+		ProjectID:          pid,
+		EnvironmentID:      body.EnvironmentID,
+		Target:             body.Target,
+		TLS:                body.TLS,
+		InsecureSkipVerify: body.InsecureSkipVerify,
+		ProtoFile:          body.ProtoFile,
+		Metadata:           body.Metadata,
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cat)
+}

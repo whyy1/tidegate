@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"tidegate/internal/grpcproto"
 )
 
 // Plan is the compiled, immutable form of a Definition. It is safe for
@@ -455,6 +457,9 @@ type GRPCStepPlan struct {
 	TLS              bool
 	HasTLSOverride   bool
 	FullMethod       string
+	ProtoFile        string
+	UseReflection    bool
+	Codec            *grpcproto.MethodCodec
 	Metadata         []HeaderTemplate
 	Payload          *Template
 	PayloadEncoding  string

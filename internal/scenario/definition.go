@@ -112,6 +112,8 @@ type GRPCStep struct {
 	TLS              *bool             `yaml:"tls,omitempty" json:"tls,omitempty"`
 	Service          string            `yaml:"service" json:"service"`
 	Method           string            `yaml:"method" json:"method"`
+	ProtoFile        string            `yaml:"proto_file,omitempty" json:"proto_file,omitempty"`
+	UseReflection    bool              `yaml:"use_reflection,omitempty" json:"use_reflection,omitempty"`
 	Metadata         map[string]string `yaml:"metadata,omitempty" json:"metadata,omitempty"`
 	MetadataList     []NameValue       `yaml:"metadata_list,omitempty" json:"metadata_list,omitempty"`
 	Payload          string            `yaml:"payload,omitempty" json:"payload,omitempty"`

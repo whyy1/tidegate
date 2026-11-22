@@ -21,6 +21,7 @@ import (
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/encoding/protowire"
 
+	"tidegate/internal/grpcproto"
 	"tidegate/internal/metrics"
 	"tidegate/internal/scenario"
 )
@@ -81,20 +82,56 @@ func (e *grpcConnEntry) takeBytes() (sent, recv int64, firstDial *dialTiming) {
 }
 
 type grpcPool struct {
-	cfg      *scenario.HTTPConfig
-	dial     *dialer
-	tlsCache tls.ClientSessionCache
-	mu       sync.Mutex
-	entries  map[string]*grpcConnEntry
+	cfg          *scenario.HTTPConfig
+	dial         *dialer
+	tlsCache     tls.ClientSessionCache
+	mu           sync.Mutex
+	entries      map[string]*grpcConnEntry
+	reflectMu    sync.Mutex
+	reflectFiles map[string]*grpcproto.MethodCodec
 }
 
 func newGRPCPool(cfg *scenario.HTTPConfig, d *dialer) *grpcPool {
 	return &grpcPool{
-		cfg:      cfg,
-		dial:     d,
-		tlsCache: tls.NewLRUClientSessionCache(256),
-		entries:  make(map[string]*grpcConnEntry),
+		cfg:          cfg,
+		dial:         d,
+		tlsCache:     tls.NewLRUClientSessionCache(256),
+		entries:      make(map[string]*grpcConnEntry),
+		reflectFiles: make(map[string]*grpcproto.MethodCodec),
 	}
+}
+
+func (p *grpcPool) codecViaReflection(ctx context.Context, o *scenario.Origin, fullMethod string) (*grpcproto.MethodCodec, error) {
+	key := o.Addr + "|tls=" + strconv.FormatBool(o.TLS) + "|" + fullMethod
+	p.reflectMu.Lock()
+	if c, ok := p.reflectFiles[key]; ok {
+		p.reflectMu.Unlock()
+		return c, nil
+	}
+	p.reflectMu.Unlock()
+
+	var dialCheck func(host string, ip net.IP) error
+	if p.dial != nil {
+		dialCheck = p.dial.targetCheck
+	}
+	_, files, err := grpcproto.DiscoverViaReflection(ctx, grpcproto.ReflectOptions{
+		Target:             o.Addr,
+		TLS:                o.TLS,
+		InsecureSkipVerify: p.cfg.InsecureSkipVerify,
+		Timeout:            10 * time.Second,
+		DialCheck:          dialCheck,
+	})
+	if err != nil {
+		return nil, err
+	}
+	codec, err := grpcproto.NewMethodCodec(files, fullMethod)
+	if err != nil {
+		return nil, err
+	}
+	p.reflectMu.Lock()
+	p.reflectFiles[key] = codec
+	p.reflectMu.Unlock()
+	return codec, nil
 }
 
 func (p *grpcPool) get(o *scenario.Origin) (*grpcConnEntry, error) {
@@ -250,8 +287,29 @@ func (v *vu) execGRPC(s *scenario.GRPCStepPlan, maxKeep int64) grpcCallResult {
 		out.targetStr = origin.Scheme + "://" + origin.Addr + s.FullMethod
 	}
 
+	codec := s.Codec
+	if codec == nil && (s.UseReflection || s.PayloadEncoding == "proto_json" || s.ResponseEncoding == "proto_json") {
+		c, rerr := v.eng.grpc.codecViaReflection(v.eng.hardCtx, origin, s.FullMethod)
+		if rerr != nil {
+			out.end = nanotime()
+			if errors.Is(rerr, scenario.ErrTargetNotAllowed) {
+				out.err = &hopError{phase: phaseDial, err: rerr}
+			} else {
+				out.err = &hopError{phase: phaseWrite, err: fmt.Errorf("gRPC Reflection 获取契约失败：%w", rerr)}
+			}
+			return out
+		}
+		codec = c
+	}
+
 	rawPayload := s.Payload.Append(nil, &v.env)
-	wireReq, err := encodeGRPCPayload(s.PayloadEncoding, rawPayload)
+	var wireReq []byte
+	var err error
+	if s.PayloadEncoding == "proto_json" && codec != nil {
+		wireReq, err = codec.EncodeJSON(rawPayload)
+	} else {
+		wireReq, err = encodeGRPCPayload(s.PayloadEncoding, rawPayload)
+	}
 	if err != nil {
 		out.end = nanotime()
 		out.err = &hopError{phase: phaseWrite, err: fmt.Errorf("gRPC 请求编码失败：%w", err)}
@@ -344,7 +402,16 @@ func (v *vu) execGRPC(s *scenario.GRPCStepPlan, maxKeep int64) grpcCallResult {
 		out.respHeaders = append(out.respHeaders, metrics.Header{Name: "grpc-status", Value: "0"})
 	}
 
-	decoded := decodeGRPCResponse(s.ResponseEncoding, wireResp)
+	var decoded []byte
+	if s.ResponseEncoding == "proto_json" && codec != nil && invokeErr == nil {
+		var derr error
+		decoded, derr = codec.DecodeToJSON(wireResp)
+		if derr != nil {
+			decoded = decodeGRPCResponse("base64", wireResp)
+		}
+	} else {
+		decoded = decodeGRPCResponse(s.ResponseEncoding, wireResp)
+	}
 	if int64(len(decoded)) > maxKeep {
 		decoded = decoded[:maxKeep]
 		out.bodyTruncated = true

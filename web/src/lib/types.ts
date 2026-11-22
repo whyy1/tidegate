@@ -101,11 +101,32 @@ export interface APIWebSocket {
 export interface APIGRPC {
   service: string
   method: string
+  proto_file?: string
+  use_reflection?: boolean
   tls?: boolean
   payload_encoding?: string
   response_encoding?: string
   expected_status?: number
   timeout?: string
+}
+
+export interface GRPCMethodInfo {
+  name: string
+  full_method: string
+  input_type: string
+  output_type: string
+  client_streaming?: boolean
+  server_streaming?: boolean
+  sample_json?: string
+}
+
+export interface GRPCServiceInfo {
+  name: string
+  methods: GRPCMethodInfo[]
+}
+
+export interface GRPCSchemaCatalog {
+  services: GRPCServiceInfo[]
 }
 
 export interface APISSE {
@@ -819,6 +840,8 @@ export interface ImportDiff {
   url: string
   name: string
   existing_id?: string
+  changed_fields?: string[]
+  preserved_fields?: string[]
 }
 
 export interface PreviewResult {

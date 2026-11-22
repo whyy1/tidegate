@@ -46,6 +46,7 @@ import type {
   EffectiveAPIPreview,
   ExtractRule,
   Folder,
+  GRPCSchemaCatalog,
   KeyValue,
   Tree,
   TreeNode,
@@ -199,6 +200,8 @@ export function WorkbenchView({
     parentId: '',
   })
   const [dragNodeId, setDragNodeId] = useState<string>('')
+  const [grpcCatalog, setGrpcCatalog] = useState<GRPCSchemaCatalog | null>(null)
+  const [grpcDiscoverBusy, setGrpcDiscoverBusy] = useState(false)
 
   const activeTab = tabs.find((t) => t.tabKey === activeTabKey) || tabs[0]
 
@@ -769,6 +772,35 @@ export function WorkbenchView({
         grpc: { service: '', method: '', ...(req.grpc || {}), ...patch },
       },
     }))
+  }
+
+  const handleDiscoverGRPC = async () => {
+    setGrpcDiscoverBusy(true)
+    try {
+      const cat = await api.discoverGRPC(projectId, {
+        environment_id: activeEnvId || undefined,
+        target: req.grpc?.proto_file ? undefined : req.url,
+        tls: req.grpc?.tls,
+        proto_file: req.grpc?.proto_file || undefined,
+      })
+      setGrpcCatalog(cat)
+      const count = cat.services?.reduce((n, s) => n + (s.methods?.length || 0), 0) || 0
+      onToast('success', `探测成功：发现 ${cat.services?.length || 0} 个服务、${count} 个方法`)
+      if (cat.services?.length && !req.grpc?.service) {
+        const firstSvc = cat.services[0]
+        const firstMethod = firstSvc.methods?.[0]
+        updateGRPC({
+          service: firstSvc.name,
+          method: firstMethod?.name || '',
+          payload_encoding: req.grpc?.payload_encoding || 'proto_json',
+          response_encoding: req.grpc?.response_encoding || 'proto_json',
+        })
+      }
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : 'gRPC 契约探测失败')
+    } finally {
+      setGrpcDiscoverBusy(false)
+    }
   }
 
   const updateSSE = (patch: Partial<NonNullable<API['request']['sse']>>) => {
@@ -1398,7 +1430,113 @@ export function WorkbenchView({
 
                 {protocol === 'grpc' && (
                   <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-3 space-y-3">
-                    <div className="font-semibold text-indigo-900">gRPC 一元调用 (Unary) 参数与消息体</div>
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <div className="font-semibold text-indigo-900">gRPC 一元调用 (Unary) 契约与载荷</div>
+                      <div className="flex flex-wrap items-center gap-2">
+                        <select
+                          value={req.grpc?.proto_file || ''}
+                          onChange={(e) => {
+                            const pf = e.target.value || undefined
+                            updateGRPC({
+                              proto_file: pf,
+                              use_reflection: pf ? false : req.grpc?.use_reflection,
+                              payload_encoding: pf ? 'proto_json' : req.grpc?.payload_encoding,
+                              response_encoding: pf ? 'proto_json' : req.grpc?.response_encoding,
+                            })
+                          }}
+                          className="px-2 py-1 border border-slate-300 rounded bg-white text-[11px]"
+                        >
+                          <option value="">不绑定 .proto/.desc 文件</option>
+                          {files
+                            .filter((f) => /\.(proto|pb|desc)$/i.test(f.name))
+                            .map((f) => (
+                              <option key={f.name} value={f.name}>
+                                {f.name}
+                              </option>
+                            ))}
+                        </select>
+                        <label className="inline-flex items-center gap-1 text-[11px] text-slate-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(req.grpc?.use_reflection)}
+                            onChange={(e) =>
+                              updateGRPC({
+                                use_reflection: e.target.checked,
+                                payload_encoding: e.target.checked ? 'proto_json' : req.grpc?.payload_encoding,
+                                response_encoding: e.target.checked ? 'proto_json' : req.grpc?.response_encoding,
+                              })
+                            }
+                          />
+                          <span>Server Reflection</span>
+                        </label>
+                        <button
+                          type="button"
+                          disabled={grpcDiscoverBusy}
+                          onClick={() => void handleDiscoverGRPC()}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-medium disabled:opacity-50"
+                        >
+                          <Sparkles className="w-3 h-3" /> {grpcDiscoverBusy ? '探测中...' : '探测服务/方法'}
+                        </button>
+                      </div>
+                    </div>
+
+                    {grpcCatalog && grpcCatalog.services?.length > 0 && (
+                      <div className="rounded border border-indigo-200 bg-white p-2 flex flex-wrap items-center gap-2 text-[11px]">
+                        <span className="text-slate-500 font-medium">快速选择：</span>
+                        <select
+                          value={req.grpc?.service || ''}
+                          onChange={(e) => {
+                            const svc = grpcCatalog.services.find((s) => s.name === e.target.value)
+                            const firstM = svc?.methods?.[0]
+                            updateGRPC({
+                              service: e.target.value,
+                              method: firstM?.name || '',
+                              payload_encoding: 'proto_json',
+                              response_encoding: 'proto_json',
+                            })
+                          }}
+                          className="px-2 py-1 border border-slate-300 rounded font-mono bg-slate-50"
+                        >
+                          {grpcCatalog.services.map((s) => (
+                            <option key={s.name} value={s.name}>
+                              {s.name}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          value={req.grpc?.method || ''}
+                          onChange={(e) =>
+                            updateGRPC({
+                              method: e.target.value,
+                              payload_encoding: 'proto_json',
+                              response_encoding: 'proto_json',
+                            })
+                          }
+                          className="px-2 py-1 border border-slate-300 rounded font-mono bg-slate-50"
+                        >
+                          {(grpcCatalog.services.find((s) => s.name === req.grpc?.service)?.methods || []).map((m) => (
+                            <option key={m.name} value={m.name}>
+                              {m.name}
+                            </option>
+                          ))}
+                        </select>
+                        {(() => {
+                          const mInfo = grpcCatalog.services
+                            .find((s) => s.name === req.grpc?.service)
+                            ?.methods?.find((m) => m.name === req.grpc?.method)
+                          return mInfo?.sample_json ? (
+                            <button
+                              type="button"
+                              onClick={() => updateBody({ type: 'json', content: mInfo.sample_json! })}
+                              className="px-2 py-1 rounded bg-sky-50 hover:bg-sky-100 text-sky-700 border border-sky-200 font-medium"
+                            >
+                              填入示例 JSON
+                            </button>
+                          ) : null
+                        })()}
+                      </div>
+                    )}
+
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                       <div>
                         <label className="block text-slate-600 mb-1">服务名 (Service)</label>
@@ -1437,18 +1575,23 @@ export function WorkbenchView({
                           onChange={(e) => updateGRPC({ payload_encoding: e.target.value })}
                           className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
                         >
-                          <option value="json">JSON 编解码</option>
+                          <option value="proto_json">Proto JSON 动态编码（反射 / .proto）</option>
+                          <option value="json">原始 JSON/UTF-8 直传</option>
+                          <option value="proto_string">单字符串 Protobuf 封装</option>
                           <option value="base64">Raw Protobuf (Base64)</option>
+                          <option value="hex">Raw Protobuf (Hex)</option>
                         </select>
                       </div>
                       <div>
                         <label className="block text-slate-600 mb-1">响应载荷编码</label>
                         <select
-                          value={req.grpc?.response_encoding || 'json'}
+                          value={req.grpc?.response_encoding || 'raw'}
                           onChange={(e) => updateGRPC({ response_encoding: e.target.value })}
                           className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
                         >
-                          <option value="json">JSON 解码</option>
+                          <option value="proto_json">Proto JSON 动态解码（反射 / .proto）</option>
+                          <option value="raw">原始 UTF-8 响应</option>
+                          <option value="proto_string">单字符串 Protobuf 解包</option>
                           <option value="base64">Raw Protobuf (Base64)</option>
                         </select>
                       </div>

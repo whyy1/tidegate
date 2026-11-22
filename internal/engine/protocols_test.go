@@ -13,6 +13,8 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -25,6 +27,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"tidegate/internal/scenario"
+	"tidegate/internal/testserver"
 )
 
 // minimal pure-Go RFC 6455 test server accepting WS upgrade, reading masked client
@@ -578,3 +581,113 @@ func sPtr(s string) *scenario.Scalar {
 	return &v
 }
 func intPtr(i int) *int { return &i }
+
+func TestProtocolGRPCReflectionAndProtoFileCodec(t *testing.T) {
+	gs, err := testserver.ListenGRPC("127.0.0.1:0", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gs.Start()
+	defer gs.Close()
+
+	// 1. Server Reflection mode: JSON in -> wire proto -> JSON out -> JSONPath extract & assert
+	defRefl := &scenario.Definition{
+		Version: 1,
+		Name:    "grpc-reflection-json",
+		Steps: []scenario.Step{
+			{
+				ID: "echo_refl",
+				GRPC: &scenario.GRPCStep{
+					Target:        "grpc://" + gs.Addr(),
+					Service:       "tidegate.test.EchoService",
+					Method:        "UnaryEcho",
+					UseReflection: true,
+					Payload:       `{"message":"hello-reflection","count":99}`,
+					Timeout:       scenario.Duration(3 * time.Second),
+				},
+				Extract: []scenario.Extract{
+					{Name: "seq", From: "jsonpath", Expr: "$.seq"},
+				},
+				Assert: []scenario.Assert{
+					{Type: "jsonpath", Expr: "$.message", Equals: sPtr("hello-reflection")},
+					{Type: "jsonpath", Expr: "$.count", Equals: sPtr("99")},
+				},
+			},
+		},
+		Load: scenario.Load{
+			Mode:        "vus",
+			Stages:      []scenario.Stage{{Duration: scenario.Duration(time.Second), Target: 1}},
+			MaxRequests: 2,
+		},
+	}
+	planRefl, err := scenario.Compile(defRefl, scenario.CompileOptions{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	dbg, err := RunDebug(context.Background(), planRefl, DebugOptions{SkipThink: true})
+	if err != nil || !dbg.Passed || dbg.Steps[0].ExtractedVars["seq"] == "" {
+		t.Fatalf("Reflection RunDebug failed: err=%v dbg=%+v", err, dbg)
+	}
+
+	// 2. Local .proto file mode via CompileOptions.BaseDir
+	protoDir := t.TempDir()
+	protoSrc := `
+syntax = "proto3";
+package tidegate.test;
+message EchoRequest {
+  string message = 1;
+  int64 count = 2;
+}
+message EchoReply {
+  string message = 1;
+  int64 count = 2;
+  int64 seq = 3;
+}
+service EchoService {
+  rpc UnaryEcho (EchoRequest) returns (EchoReply);
+}
+`
+	if err := os.WriteFile(filepath.Join(protoDir, "echo.proto"), []byte(protoSrc), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defProto := &scenario.Definition{
+		Version: 1,
+		Name:    "grpc-proto-file",
+		Steps: []scenario.Step{
+			{
+				ID: "echo_proto",
+				GRPC: &scenario.GRPCStep{
+					Target:    "grpc://" + gs.Addr(),
+					Service:   "tidegate.test.EchoService",
+					Method:    "UnaryEcho",
+					ProtoFile: "echo.proto",
+					Payload:   `{"message":"from-proto-file","count":7}`,
+					Timeout:   scenario.Duration(3 * time.Second),
+				},
+				Assert: []scenario.Assert{
+					{Type: "jsonpath", Expr: "$.message", Equals: sPtr("from-proto-file")},
+				},
+			},
+		},
+		Load: scenario.Load{
+			Mode:        "vus",
+			Stages:      []scenario.Stage{{Duration: scenario.Duration(time.Second), Target: 1}},
+			MaxRequests: 2,
+		},
+	}
+	planProto, err := scenario.Compile(defProto, scenario.CompileOptions{BaseDir: protoDir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	eng, err := New(planProto, Options{Shards: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := eng.Run(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	sum := eng.Summary()
+	if sum.Total.Requests != 2 || sum.Total.ErrorCount() != 0 {
+		t.Fatalf("ProtoFile gRPC load run mismatch: reqs=%d errs=%d", sum.Total.Requests, sum.Total.ErrorCount())
+	}
+}

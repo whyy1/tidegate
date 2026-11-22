@@ -187,6 +187,7 @@ func (s *Server) buildHandler() http.Handler {
 	apiMux.Handle("POST /api/v1/projects/{pid}/apis", writer(s.handleCreateAPI))
 	apiMux.Handle("POST /api/v1/projects/{pid}/apis/resolve-preview", authed(s.handleResolvePreviewAPI))
 	apiMux.Handle("POST /api/v1/projects/{pid}/apis/to-curl", authed(s.handleAPIToCurl))
+	apiMux.Handle("POST /api/v1/projects/{pid}/grpc/discover", authed(s.handleDiscoverGRPC))
 	apiMux.Handle("GET /api/v1/projects/{pid}/apis/{id}", authed(s.handleGetAPI))
 	apiMux.Handle("PUT /api/v1/projects/{pid}/apis/{id}", writer(s.handleUpdateAPI))
 	apiMux.Handle("DELETE /api/v1/projects/{pid}/apis/{id}", writer(s.handleDeleteAPI))

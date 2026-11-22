@@ -635,11 +635,26 @@ func (r *resolver) step(id string, src *stepSource) (scenario.Step, error) {
 		if apiBody != nil {
 			payload = apiBody.Content
 		}
+		if a.Request.GRPC.ProtoFile != "" {
+			if err := r.file(joinField(src.field, "request.grpc.proto_file"), a.Request.GRPC.ProtoFile); err != nil {
+				return scenario.Step{}, err
+			}
+			// Ship sibling .proto dependencies stored in the project files dir too.
+			if allFiles, lerr := r.p.store.ListFiles(r.p.id); lerr == nil {
+				for _, df := range allFiles {
+					if strings.HasSuffix(strings.ToLower(df.Name), ".proto") && df.Name != a.Request.GRPC.ProtoFile {
+						_ = r.file(joinField(src.field, "request.grpc.proto_file"), df.Name)
+					}
+				}
+			}
+		}
 		step.GRPC = &scenario.GRPCStep{
 			Target:           target,
 			TLS:              a.Request.GRPC.TLS,
 			Service:          a.Request.GRPC.Service,
 			Method:           a.Request.GRPC.Method,
+			ProtoFile:        a.Request.GRPC.ProtoFile,
+			UseReflection:    a.Request.GRPC.UseReflection,
 			MetadataList:     headers,
 			Payload:          payload,
 			PayloadEncoding:  a.Request.GRPC.PayloadEncoding,
