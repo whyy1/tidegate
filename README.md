@@ -49,20 +49,64 @@ logo 是一道抬起的闸门，形状正好是字母 T，潮水从闸下流过�
 
 ## 当前进度
 
-Tidegate 还在早期开发中。
+目前已交付 **单文件控制台（Web 界面 + 控制器 + 本机发压节点）**、**CLI 压测与离线 HTML 报告**、**分布式集群** 与 **Docker 容器部署**：
 
-- **已经可用**：命令行压测。用 YAML 描述场景，支持固定并发和固定速率两种模式，输出每秒指标和汇总，结果可导出为 JSON 和 CSV。在一台 32 线程的机器上压本机接口，单机吞吐量超过每秒 20 万请求。
-- **开发中**：浏览器界面、接口管理、实时图表、发压机监控、集群、导入导出、Docker 镜像。
+- **Web 控制台与接口工作台**：本地账户初始化（一次性初始化码 + Argon2id）与多设备会话管理；项目 / 环境 / 会话级临时变量池；目录树拖拽排序与两步安全导入导出（`.tidegate`、OpenAPI 3.x / Swagger 2.0、Postman Collection v2.1、HAR 1.2、cURL）；多标签请求调试、cURL 导入导出与脱敏、生效预览（继承请求头 / 鉴权 / 变量来源）、JSONPath 可视化拾取、五段耗时瀑布条与“一键发起单接口压测”。
+- **场景编排与发压引擎**：多步骤顺序执行、思考时间、CSV 参数化、开压前带宽与集群容量预估；闭环并发（VUs）与开环速率（RPS）双模式、多阶段线性曲线编辑与动态调压；SLA 阈值配置与运行时违约自动中止；基于 `uPlot` 的实时多维图表（吞吐量、延迟分位、活跃连接、应用层 vs 物理网卡双层带宽与瓶颈区间标注）及多压测基线对比。
+- **报告与分布式集群**：离线单文件 HTML 报告、CSV / JSON 与错误采样 HAR 导出；支持多机节点一键接入、跨节点 HDR 直方图与系统遥测合并。
 
-想先试试命令行（需要 Go 1.25 或更高版本）：
+### 快速开始（Web 控制台）
+
+从源码构建前后端合一的可执行文件（需要 Go 1.26+ 与 Node.js 22+/24+）：
 
 ```bash
-go build -o tidegate ./cmd/tidegate
-./tidegate testserver                 # 启动内置的被测服务
-./tidegate run examples/ping.yaml     # 在另一个终端运行示例场景
+npm --prefix web ci
+npm --prefix web run build
+CGO_ENABLED=0 go build -o tidegate ./cmd/tidegate
+./tidegate
 ```
 
-更多场景写法见 [examples](examples) 目录。
+首次启动会在终端输出管理地址（默认 `http://127.0.0.1:8080/`）与一次性初始化码，按页面引导创建管理员密码后即可使用，系统会自动创建「默认项目」。若忘记管理员密码，可通过命令行重置：
+
+```bash
+./tidegate reset-password --data ./data --user admin
+```
+
+### 命令行压测与 CI 门禁
+
+无需界面时，可直接用 CLI 运行 YAML / JSON 场景并接入持续集成检查：
+
+```bash
+./tidegate testserver                                                   # 启动内置的被测服务（默认 :18080）
+./tidegate run examples/ping.yaml --out result.json --csv result.csv --html report.html
+```
+
+场景中配置的 `thresholds` 在压测结束或运行期违约校验失败时，`tidegate run` 将返回退出码 `3`，便于流水线直接作为性能门禁拦截回归。更多场景写法见 [examples](examples) 目录。
+
+### 多机分布式压测
+
+在控制器节点启用集群监听端口与认证令牌：
+
+```bash
+./tidegate serve --listen 0.0.0.0:8080 --cluster-listen 0.0.0.0:7443 --cluster-token <集群令牌> --tls-self-signed
+```
+
+在其他发压机上接入集群：
+
+```bash
+./tidegate agent --join <控制器IP:7443> --token <集群令牌>
+```
+
+### Docker 部署
+
+仓库内置多阶段 [Dockerfile](deploy/Dockerfile) 与开箱即用的 [docker-compose.yml](deploy/docker-compose.yml)（非 root 运行并启用只读根文件系统）：
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build
+docker logs tidegate-controller   # 查看首次启动的一次性初始化码与自签名 TLS 证书指纹
+```
+
+默认以自签名 HTTPS 监听 `https://localhost:8080/`（集群通信端口 `7443`，数据持久化卷挂载于 `/data`）。若置于 HTTPS 反向代理之后，可在 `docker-compose.yml` 中配置 `command: ["serve"]`、`TIDEGATE_ALLOW_INSECURE_REMOTE=true` 与 `TIDEGATE_ALLOWED_ORIGINS`；在 Windows 上作为远程发压机时推荐直接运行原生可执行文件 `./tidegate agent`。
 
 ## 许可
 

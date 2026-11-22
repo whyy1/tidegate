@@ -1,0 +1,16 @@
+.git
+.gitignore
+bin/
+data/
+bench/out/
+bench/RESULTS.md
+docs/*
+!docs/product-plan.md
+web/node_modules/
+web/dist/
+internal/webui/dist/*
+!internal/webui/dist/.gitkeep
+*.db
+*.db-*
+*.exe
+*.test

@@ -1,0 +1,57 @@
+services:
+  tidegate:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: tidegate:latest
+    container_name: tidegate-controller
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    ports:
+      - "8080:8080"
+      - "7443:7443"
+    volumes:
+      - tidegate-data:/data
+    environment:
+      TIDEGATE_DATA: /data
+      TIDEGATE_LISTEN: 0.0.0.0:8080
+      TIDEGATE_CLUSTER_LISTEN: 0.0.0.0:7443
+      TIDEGATE_TLS_SELF_SIGNED: "true"
+      TIDEGATE_NO_OPEN: "true"
+      # 集群认证令牌：默认留空表示拒绝未授权外部节点接入；启用分布式 --profile cluster 前请设置强随机令牌：
+      TIDEGATE_CLUSTER_TOKEN: ${TIDEGATE_CLUSTER_TOKEN:-}
+      # 如需通过挂载密码文件自动创建管理员（跳过终端一次性初始化码），可挂载秘密文件并指定路径：
+      # TIDEGATE_ADMIN_PASSWORD_FILE: /run/secrets/tidegate_admin_pw
+      # 若置于 HTTPS 反向代理后以明文 HTTP 桥接访问，可改为 command: ["serve"] 并取消注释：
+      # TIDEGATE_ALLOW_INSECURE_REMOTE: "true"
+      # TIDEGATE_ALLOWED_ORIGINS: https://tidegate.example.com
+    restart: unless-stopped
+
+  tidegate-agent:
+    image: tidegate:latest
+    profiles:
+      - cluster
+    command: ["agent"]
+    user: "65532:65532"
+    read_only: true
+    tmpfs:
+      - /tmp
+    security_opt:
+      - no-new-privileges:true
+    # 在 Linux 压测发压机上运行分布式节点时，推荐启用宿主机网络避免容器 NAT 端口耗尽与额外转发开销：
+    # network_mode: host
+    # 启用 --profile cluster 前请先设置环境变量 TIDEGATE_CLUSTER_TOKEN=<强随机令牌>
+    environment:
+      TIDEGATE_JOIN: tidegate:7443
+      TIDEGATE_TOKEN: ${TIDEGATE_CLUSTER_TOKEN:-}
+      TIDEGATE_NAME: docker-agent-1
+    depends_on:
+      - tidegate
+    restart: unless-stopped
+
+volumes:
+  tidegate-data: {}
