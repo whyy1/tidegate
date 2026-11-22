@@ -3,6 +3,8 @@ package engine
 import (
 	"bytes"
 	"compress/gzip"
+	"encoding/base64"
+	"errors"
 	"io"
 	"math/rand/v2"
 	"net/http"
@@ -71,6 +73,8 @@ type vu struct {
 	urlBuf    []byte
 	hdrBuf    []byte
 	hdrOff    []int
+	authBuf   []byte
+	rawAuth   []byte
 	bodyBuf   []byte
 	cookieBuf []byte
 	keyBuf    []byte
@@ -125,7 +129,7 @@ func (v *vu) stopped() bool {
 
 func (v *vu) runClosed() {
 	defer v.eng.vuExited(v)
-	for !v.stopped() {
+	for !v.stopped() && !v.eng.requestsExhausted() {
 		v.iteration(0)
 	}
 }
@@ -134,7 +138,7 @@ func (v *vu) runOpen(planned int64) {
 	defer v.eng.vuExited(v)
 	for {
 		v.iteration(planned)
-		if v.stopped() {
+		if v.stopped() || v.eng.requestsExhausted() {
 			return
 		}
 		select {
@@ -208,18 +212,32 @@ func (v *vu) iteration(planned int64) {
 	v.rec.RecordIteration()
 }
 
-// takeRequestSlot enforces load.max_requests. It returns false when the
-// limit was reached and the request must not be sent.
+// takeRequestSlot enforces load.max_requests. It returns false when all
+// allowed request slots have already been claimed.
 func (v *vu) takeRequestSlot() bool {
 	e := v.eng
 	if e.maxReq <= 0 {
 		return true
 	}
-	n := e.reqCount.Add(1)
-	if n >= e.maxReq {
+	return e.reqCount.Add(1) <= e.maxReq
+}
+
+func (v *vu) finishRequestSlot() {
+	e := v.eng
+	if e.maxReq <= 0 {
+		return
+	}
+	if e.reqDone.Add(1) >= e.maxReq {
 		e.Stop()
 	}
-	return n <= e.maxReq
+}
+
+func isConnectPhaseErr(err error) bool {
+	var he *hopError
+	if errors.As(err, &he) {
+		return he.phase == phaseDNS || he.phase == phaseDial || he.phase == phaseTLS
+	}
+	return false
 }
 
 // buildRequest renders the step's request into the VU's buffers.
@@ -283,6 +301,21 @@ func (v *vu) buildRequest(rt *stepRT) bool {
 			start = v.hdrOff[i]
 		}
 		q.headers = append(q.headers, rh)
+	}
+	if s.BasicUser != nil {
+		v.rawAuth = s.BasicUser.Append(v.rawAuth[:0], env)
+		v.rawAuth = append(v.rawAuth, ':')
+		if s.BasicPass != nil {
+			v.rawAuth = s.BasicPass.Append(v.rawAuth, env)
+		}
+		need := len("Basic ") + base64.StdEncoding.EncodedLen(len(v.rawAuth))
+		if cap(v.authBuf) < need {
+			v.authBuf = make([]byte, need)
+		}
+		v.authBuf = v.authBuf[:need]
+		copy(v.authBuf, "Basic ")
+		base64.StdEncoding.Encode(v.authBuf[len("Basic "):], v.rawAuth)
+		q.headers = append(q.headers, reqHeader{name: "Authorization", canon: "Authorization", value: v.authBuf})
 	}
 
 	switch {
@@ -445,6 +478,7 @@ func (v *vu) runHTTP(rt *stepRT, planned int64) bool {
 		r.reset()
 		err := v.client.do(&v.req, r)
 		if e.aborted.Load() {
+			v.finishRequestSlot()
 			return false // interrupted by a hard stop: not recorded
 		}
 		start := r.start
@@ -458,6 +492,10 @@ func (v *vu) runHTTP(rt *stepRT, planned int64) bool {
 			kind := classify(err)
 			v.record(s.Index, start, kind)
 			v.maybeSample(rt, kind, err.Error(), start)
+			v.finishRequestSlot()
+			if e.plan.Load.Mode == scenario.LoadVUs && cfg.ConnectBackoff > 0 && isConnectPhaseErr(err) && !v.stopped() {
+				v.sleep(cfg.ConnectBackoff)
+			}
 			return true
 		}
 		if cfg.Cookies {
@@ -466,6 +504,7 @@ func (v *vu) runHTTP(rt *stepRT, planned int64) bool {
 		if cfg.FollowRedirects && isRedirect(r.status) && hop < cfg.MaxRedirects {
 			if v.followRedirect() {
 				v.record(s.Index, start, metrics.ErrNone)
+				v.finishRequestSlot()
 				if v.stopped() {
 					return false // stopping: do not start the next hop
 				}
@@ -475,6 +514,7 @@ func (v *vu) runHTTP(rt *stepRT, planned int64) bool {
 		kind, msg := v.evaluate(rt, time.Duration(r.end-stepStart))
 		v.record(s.Index, start, kind)
 		v.maybeSample(rt, kind, msg, start)
+		v.finishRequestSlot()
 		return true
 	}
 }
@@ -631,6 +671,11 @@ func (v *vu) maybeSample(rt *stepRT, kind metrics.ErrorKind, msg string, start i
 	v.resp.eachHeader(func(name string, value []byte) {
 		smp.ResponseHeaders = append(smp.ResponseHeaders, metrics.Header{Name: name, Value: metrics.RedactHeader(name, string(value))})
 	})
+	reqBody := q.body
+	if limit := v.eng.opts.SampleBodyBytes; len(reqBody) > limit {
+		reqBody, smp.RequestBodyTruncated = reqBody[:limit], true
+	}
+	smp.RequestBody = string(reqBody)
 	body := r.body
 	if limit := v.eng.opts.SampleBodyBytes; len(body) > limit {
 		body, smp.BodyTruncated = body[:limit], true

@@ -37,7 +37,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	csvPath := fs.String("csv", "", "写出每秒 CSV")
 	quiet := fs.Bool("quiet", false, "不输出每秒摘要")
 	client := fs.String("client", string(engine.ClientFast), "HTTP 客户端：fast 或 std")
-	cpuProfile := fs.String("cpuprofile", "", "写出 CPU 性能分析文件（pprof）")
+	startProfiles := profileFlags(fs)
 	memProfile := fs.String("memprofile", "", "结束时写出堆内存分析文件（pprof）")
 	pos, err := parseArgs(fs, args)
 	if err != nil {
@@ -85,19 +85,12 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		}
 		defer outF.Close()
 	}
-	if *cpuProfile != "" {
-		f, err := os.Create(*cpuProfile)
-		if err != nil {
-			fmt.Fprintf(stderr, "无法创建性能分析文件：%v\n", err)
-			return 1
-		}
-		defer f.Close()
-		if err := pprof.StartCPUProfile(f); err != nil {
-			fmt.Fprintf(stderr, "无法开始 CPU 分析：%v\n", err)
-			return 1
-		}
-		defer pprof.StopCPUProfile()
+	stopProfiles, err := startProfiles()
+	if err != nil {
+		fmt.Fprintln(stderr, err)
+		return 1
 	}
+	defer stopProfiles()
 
 	w := bufio.NewWriter(stdout)
 	defer w.Flush()

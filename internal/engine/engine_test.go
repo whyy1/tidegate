@@ -668,3 +668,28 @@ load: {stages: [{duration: 0s, target: 2}, {duration: 1500ms, target: 2}]}
 		t.Fatalf("peak VUs = %d after SetTarget(6)", e.Summary().ActiveVUs)
 	}
 }
+
+func TestConnectBackoff(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := ln.Addr().String()
+	ln.Close()
+
+	// Closed-loop VU with 100ms connect_backoff over 350ms should produce
+	// only a handful of attempts instead of spinning thousands of times.
+	p := compile(t, `
+http: {connect_backoff: 100ms}
+steps: [{id: closed, request: {url: "http://`+closed+`/"}}]
+load: {stages: [{duration: 0s, target: 1}, {duration: 350ms, target: 1}]}
+`, "http://127.0.0.1:1", nil)
+	r := run(t, p, Options{Client: ClientFast})
+	s := r.summary
+	if s.Total.Requests == 0 || s.Total.Requests > 10 {
+		t.Fatalf("requests=%d (expected 1..10 with 100ms backoff)", s.Total.Requests)
+	}
+	if s.Total.Errors[metrics.ErrConnectRefused] != s.Total.Requests {
+		t.Fatalf("errors=%v requests=%d", s.Total.Errors, s.Total.Requests)
+	}
+}

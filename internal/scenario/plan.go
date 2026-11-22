@@ -80,8 +80,9 @@ type HTTPConfig struct {
 	// MaxBodyRead caps how many body bytes are kept for extractors and
 	// assertions. The rest of the body is still read (and counted) so the
 	// connection stays reusable. 0 keeps the whole body when needed.
-	MaxBodyRead int64
-	DNSRefresh  time.Duration
+	MaxBodyRead    int64
+	DNSRefresh     time.Duration
+	ConnectBackoff time.Duration
 }
 
 // LoadMode is the load model.
@@ -257,6 +258,8 @@ type HTTPStep struct {
 	Method      string
 	URL         URLTemplate
 	Headers     []HeaderTemplate
+	BasicUser   *Template // non-nil when BasicAuth needs runtime evaluation
+	BasicPass   *Template
 	Body        *Template // nil when there is no body
 	ContentType string    // default Content-Type when the user set none
 	Extract     []Extractor
@@ -327,10 +330,11 @@ type Extractor struct {
 	Expr       string
 	Path       *JSONPath
 	Regex      *regexp.Regexp
-	Group      int
-	Header     string
-	Default    string
-	HasDefault bool
+	Group       int
+	Header      string
+	Default     string
+	HasDefault  bool
+	Description string
 }
 
 // ResponseView gives extractors and assertions access to a response.
@@ -383,6 +387,7 @@ const (
 // Assertion is a compiled response check.
 type Assertion struct {
 	Kind        AssertKind
+	Type        string
 	Statuses    []int
 	MaxDuration time.Duration
 	Contains    []byte
@@ -393,7 +398,8 @@ type Assertion struct {
 	HasExists   bool
 	HasContains bool
 	// Desc describes the expectation for error messages.
-	Desc string
+	Desc        string
+	Description string
 }
 
 // Check evaluates the assertion. msg explains a failure.

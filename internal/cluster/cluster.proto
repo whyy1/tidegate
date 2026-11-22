@@ -1,0 +1,161 @@
+// Protocol between the Tidegate controller and its load generator nodes.
+//
+// A node dials the controller and opens a single Connect stream. The first
+// node message must be Hello; the controller answers with Welcome or Reject.
+// After Welcome both sides send messages at any time until the stream ends.
+//
+// The Go types in package tidegate/internal/cluster are written by hand with
+// google.golang.org/protobuf/encoding/protowire and produce exactly this wire
+// format, so code generated from this file can replace them without breaking
+// compatibility. Unknown fields are skipped on decode.
+//
+// Timestamps are Unix nanoseconds; 0 means unset.
+
+syntax = "proto3";
+
+package tidegate.cluster.v1;
+
+option go_package = "tidegate/internal/cluster";
+
+service Cluster {
+  rpc Connect(stream NodeMessage) returns (stream ControllerMessage);
+}
+
+// Envelope for everything a node sends.
+message NodeMessage {
+  oneof body {
+    Hello hello = 1;
+    SysStats sys_stats = 2;
+    RunSnapshot run_snapshot = 3;
+    RunFinished run_finished = 4;
+    Pong pong = 5;
+  }
+}
+
+// Envelope for everything the controller sends.
+message ControllerMessage {
+  oneof body {
+    Welcome welcome = 1;
+    Reject reject = 2;
+    StartRun start_run = 3;
+    StopRun stop_run = 4;
+    SetTarget set_target = 5;
+    Ping ping = 6;
+  }
+}
+
+// First message of every connection.
+message Hello {
+  string token = 1;
+  // ID assigned by an earlier Welcome, sent again when reconnecting so the
+  // controller can keep the same node ID. Empty on the first connection.
+  string node_id = 2;
+  string name = 3;
+  string version = 4;
+  string os = 5;
+  string arch = 6;
+  int32 cpu_cores = 7;
+  uint64 memory_bytes = 8;
+  repeated NetInterface interfaces = 9;
+}
+
+message NetInterface {
+  string name = 1;
+  // Negotiated link speed in bits per second, 0 when unknown.
+  uint64 link_speed_bps = 2;
+}
+
+// Machine statistics, sent about once per second whether or not a run is
+// active. The payload is the node's JSON encoding of its statistics.
+message SysStats {
+  int64 time_unix_nano = 1;
+  bytes json = 2;
+}
+
+// One per-second metrics snapshot of a run, in the metrics binary encoding.
+message RunSnapshot {
+  string run_id = 1;
+  int64 seq = 2;
+  bytes snapshot = 3;
+}
+
+// Sent once when a run ends on the node. summary is the whole-run snapshot in
+// the metrics binary encoding; error is empty when the run succeeded.
+message RunFinished {
+  string run_id = 1;
+  bytes summary = 2;
+  string error = 3;
+}
+
+// Answer to Ping. ping_time_unix_nano echoes Ping.time_unix_nano.
+message Pong {
+  uint64 nonce = 1;
+  int64 ping_time_unix_nano = 2;
+  int64 node_time_unix_nano = 3;
+}
+
+message Welcome {
+  string node_id = 1;
+  // Controller clock when the Welcome was sent, for clock offset estimation.
+  int64 server_time_unix_nano = 2;
+  string server_version = 3;
+  // How often the controller sends Ping.
+  int64 ping_interval_ms = 4;
+}
+
+enum RejectReason {
+  REJECT_REASON_UNSPECIFIED = 0;
+  REJECT_REASON_BAD_TOKEN = 1;
+  REJECT_REASON_VERSION_MISMATCH = 2;
+  REJECT_REASON_PROTOCOL = 3;
+}
+
+// Refusal of a connection. The controller closes the stream after sending it
+// and the node must not retry automatically.
+message Reject {
+  RejectReason reason = 1;
+  // Human readable explanation in Simplified Chinese.
+  string message = 2;
+  // Controller version; only set for REJECT_REASON_VERSION_MISMATCH.
+  string server_version = 3;
+}
+
+message DataFile {
+  string name = 1;
+  bytes content = 2;
+}
+
+message StartRun {
+  string run_id = 1;
+  // Scenario definition in JSON.
+  bytes scenario_json = 2;
+  repeated DataFile data_files = 3;
+  // Fraction of the plan's load this node runs, in (0, 1].
+  double load_share = 4;
+  // The node uses data row i when i % data_slice_count == data_slice_index.
+  int32 data_slice_index = 5;
+  int32 data_slice_count = 6;
+  // Common start time on the controller clock.
+  int64 start_time_unix_nano = 7;
+}
+
+enum StopMode {
+  STOP_MODE_GRACEFUL = 0;
+  STOP_MODE_ABORT = 1;
+}
+
+message StopRun {
+  string run_id = 1;
+  StopMode mode = 2;
+}
+
+// Changes the load target of a running run.
+message SetTarget {
+  string run_id = 1;
+  double value = 2;
+}
+
+message Ping {
+  uint64 nonce = 1;
+  int64 time_unix_nano = 2;
+}

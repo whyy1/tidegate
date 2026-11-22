@@ -217,3 +217,23 @@ func TestFormatting(t *testing.T) {
 		t.Fatal("display width")
 	}
 }
+
+func TestProfileFlagsAndStats(t *testing.T) {
+	srv := startServer(t)
+	file := writeExample(t, "ping.yaml", srv.URL())
+	dir := t.TempDir()
+	tracePath := filepath.Join(dir, "trace.out")
+	var stdout, stderr bytes.Buffer
+	code := runMain([]string{"run", "--quiet", "--trace", tracePath, "--trace-for", "50ms", file}, &stdout, &stderr)
+	if code != 0 {
+		t.Fatalf("exit %d\nstderr:\n%s", code, &stderr)
+	}
+	info, err := os.Stat(tracePath)
+	if err != nil || info.Size() == 0 {
+		t.Fatalf("trace file missing or empty: info=%v err=%v", info, err)
+	}
+	st := srv.TakeStats()
+	if st.Accepted == 0 {
+		t.Fatalf("expected accepted connections on testserver, got %+v", st)
+	}
+}

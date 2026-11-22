@@ -82,6 +82,7 @@ type Engine struct {
 	maxVUs   int
 	maxReq   int64
 	reqCount atomic.Int64
+	reqDone  atomic.Int64
 
 	hardCtx    context.Context
 	hardCancel context.CancelFunc
@@ -399,6 +400,10 @@ func (e *Engine) runClosed() {
 	}
 }
 
+func (e *Engine) requestsExhausted() bool {
+	return e.maxReq > 0 && e.reqCount.Load() >= e.maxReq
+}
+
 // runOpen starts iterations at the profile's rate. Each iteration has a
 // planned start time; latency of its first request is measured from that
 // time, so a slow target or a busy generator cannot hide queueing delay.
@@ -408,6 +413,15 @@ func (e *Engine) runOpen() {
 	nvus := 0
 	k := 0.0
 	for !e.stopping.Load() {
+		if e.requestsExhausted() {
+			timer.Reset(10 * time.Millisecond)
+			select {
+			case <-timer.C:
+			case <-e.stopCh:
+				return
+			}
+			continue
+		}
 		p := e.prof.Load()
 		at, ok := p.timeOf(k)
 		if !ok {

@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"net"
 	"net/netip"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -94,12 +95,13 @@ type dnsEntry struct {
 // out its addresses round robin. Lookups are lock free after the first.
 type dnsCache struct {
 	refresh time.Duration
+	timeout time.Duration
 	mu      sync.Mutex
 	entries atomic.Pointer[map[string]*dnsEntry]
 }
 
-func newDNSCache(refresh time.Duration) *dnsCache {
-	c := &dnsCache{refresh: refresh}
+func newDNSCache(refresh, timeout time.Duration) *dnsCache {
+	c := &dnsCache{refresh: refresh, timeout: timeout}
 	m := map[string]*dnsEntry{}
 	c.entries.Store(&m)
 	return c
@@ -157,6 +159,17 @@ func (c *dnsCache) resolve(ctx context.Context, o *scenario.Origin, e *dnsEntry)
 		e.addrs = []string{netip.AddrPortFrom(ip, mustPort(o.Port)).String()}
 		return false
 	}
+	// RFC 6761 section 6.4: ".invalid" domains must always fail without network traffic.
+	host := strings.TrimSuffix(strings.ToLower(o.HostName), ".")
+	if host == "invalid" || strings.HasSuffix(host, ".invalid") {
+		e.err = &net.DNSError{Err: "no such host", Name: o.HostName, IsNotFound: true}
+		return true
+	}
+	if c.timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.timeout)
+		defer cancel()
+	}
 	ips, err := net.DefaultResolver.LookupNetIP(ctx, "ip", o.HostName)
 	if err != nil {
 		e.err = err
@@ -209,7 +222,7 @@ func newDialer(e *Engine, cfg *scenario.HTTPConfig) *dialer {
 	return &dialer{
 		eng: e,
 		nd:  net.Dialer{Timeout: cfg.ConnectTimeout, KeepAlive: 30 * time.Second},
-		dns: newDNSCache(cfg.DNSRefresh),
+		dns: newDNSCache(cfg.DNSRefresh, cfg.ConnectTimeout),
 		tlsBase: &tls.Config{
 			InsecureSkipVerify: cfg.InsecureSkipVerify,
 			NextProtos:         []string{"http/1.1"}, // never negotiate HTTP/2

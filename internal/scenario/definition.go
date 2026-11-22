@@ -35,8 +35,9 @@ type HTTPOptions struct {
 	InsecureSkipVerify bool     `yaml:"insecure_skip_verify,omitempty" json:"insecure_skip_verify,omitempty"`
 	Cookies            *bool    `yaml:"cookies,omitempty" json:"cookies,omitempty"`
 	Timeout            Timeouts `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-	MaxBodyRead        int64    `yaml:"max_body_read,omitempty" json:"max_body_read,omitempty"`
-	DNSRefresh         Duration `yaml:"dns_refresh,omitempty" json:"dns_refresh,omitempty"`
+	MaxBodyRead        int64     `yaml:"max_body_read,omitempty" json:"max_body_read,omitempty"`
+	DNSRefresh         Duration  `yaml:"dns_refresh,omitempty" json:"dns_refresh,omitempty"`
+	ConnectBackoff     *Duration `yaml:"connect_backoff,omitempty" json:"connect_backoff,omitempty"`
 }
 
 // Timeouts are the four request timeouts. Zero means the default.
@@ -67,21 +68,40 @@ type Step struct {
 	Think   *Think    `yaml:"think,omitempty" json:"think,omitempty"`
 }
 
+// NameValue is an ordered key-value entry, used where order or duplicate
+// names matter.
+type NameValue struct {
+	Name  string `yaml:"name" json:"name"`
+	Value Scalar `yaml:"value" json:"value"`
+}
+
+// BasicAuth configures HTTP Basic credentials evaluated per request.
+type BasicAuth struct {
+	Username string `yaml:"username" json:"username"`
+	Password string `yaml:"password,omitempty" json:"password,omitempty"`
+}
+
 // Request is an HTTP request.
 type Request struct {
-	Method  string            `yaml:"method,omitempty" json:"method,omitempty"`
-	URL     string            `yaml:"url" json:"url"`
-	Headers map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
-	Query   map[string]Scalar `yaml:"query,omitempty" json:"query,omitempty"`
-	Body    *Body             `yaml:"body,omitempty" json:"body,omitempty"`
+	Method     string            `yaml:"method,omitempty" json:"method,omitempty"`
+	URL        string            `yaml:"url" json:"url"`
+	Headers    map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	HeaderList []NameValue       `yaml:"header_list,omitempty" json:"header_list,omitempty"`
+	Query      map[string]Scalar `yaml:"query,omitempty" json:"query,omitempty"`
+	QueryList  []NameValue       `yaml:"query_list,omitempty" json:"query_list,omitempty"`
+	BasicAuth  *BasicAuth        `yaml:"basic_auth,omitempty" json:"basic_auth,omitempty"`
+	Body       *Body             `yaml:"body,omitempty" json:"body,omitempty"`
 }
 
 // Body is an HTTP request body.
 type Body struct {
-	Type    string            `yaml:"type" json:"type"`
-	Content string            `yaml:"content,omitempty" json:"content,omitempty"`
-	Fields  map[string]Scalar `yaml:"fields,omitempty" json:"fields,omitempty"`
-	Files   []BodyFile        `yaml:"files,omitempty" json:"files,omitempty"`
+	Type        string            `yaml:"type" json:"type"`
+	Content     string            `yaml:"content,omitempty" json:"content,omitempty"`
+	Fields      map[string]Scalar `yaml:"fields,omitempty" json:"fields,omitempty"`
+	FieldList   []NameValue       `yaml:"field_list,omitempty" json:"field_list,omitempty"`
+	Files       []BodyFile        `yaml:"files,omitempty" json:"files,omitempty"`
+	File        string            `yaml:"file,omitempty" json:"file,omitempty"`
+	ContentType string            `yaml:"content_type,omitempty" json:"content_type,omitempty"`
 }
 
 // BodyFile is a file part of a multipart body.
@@ -90,27 +110,32 @@ type BodyFile struct {
 	Path        string `yaml:"path" json:"path"`
 	Filename    string `yaml:"filename,omitempty" json:"filename,omitempty"`
 	ContentType string `yaml:"content_type,omitempty" json:"content_type,omitempty"`
+	Disabled    bool   `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 // Extract stores a value from the response in a variable.
 type Extract struct {
-	Name    string  `yaml:"name" json:"name"`
-	From    string  `yaml:"from" json:"from"`
-	Expr    string  `yaml:"expr" json:"expr"`
-	Group   *int    `yaml:"group,omitempty" json:"group,omitempty"`
-	Default *string `yaml:"default,omitempty" json:"default,omitempty"`
+	Name        string  `yaml:"name" json:"name"`
+	From        string  `yaml:"from" json:"from"`
+	Expr        string  `yaml:"expr" json:"expr"`
+	Group       *int    `yaml:"group,omitempty" json:"group,omitempty"`
+	Default     *string `yaml:"default,omitempty" json:"default,omitempty"`
+	Description string  `yaml:"description,omitempty" json:"description,omitempty"`
+	Disabled    bool    `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 // Assert checks the response.
 type Assert struct {
-	Type     string   `yaml:"type" json:"type"`
-	Equals   *Scalar  `yaml:"equals,omitempty" json:"equals,omitempty"`
-	In       []int    `yaml:"in,omitempty" json:"in,omitempty"`
-	Max      Duration `yaml:"max,omitempty" json:"max,omitempty"`
-	Value    string   `yaml:"value,omitempty" json:"value,omitempty"`
-	Expr     string   `yaml:"expr,omitempty" json:"expr,omitempty"`
-	Exists   *bool    `yaml:"exists,omitempty" json:"exists,omitempty"`
-	Contains *string  `yaml:"contains,omitempty" json:"contains,omitempty"`
+	Type        string   `yaml:"type" json:"type"`
+	Equals      *Scalar  `yaml:"equals,omitempty" json:"equals,omitempty"`
+	In          []int    `yaml:"in,omitempty" json:"in,omitempty"`
+	Max         Duration `yaml:"max,omitempty" json:"max,omitempty"`
+	Value       string   `yaml:"value,omitempty" json:"value,omitempty"`
+	Expr        string   `yaml:"expr,omitempty" json:"expr,omitempty"`
+	Exists      *bool    `yaml:"exists,omitempty" json:"exists,omitempty"`
+	Contains    *string  `yaml:"contains,omitempty" json:"contains,omitempty"`
+	Description string   `yaml:"description,omitempty" json:"description,omitempty"`
+	Disabled    bool     `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 }
 
 // Think is the pause after a step.

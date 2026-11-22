@@ -49,6 +49,42 @@ type Server struct {
 	closed atomic.Bool
 	reqs   atomic.Int64
 	done   chan struct{}
+
+	accepted     atomic.Int64
+	open         atomic.Int64
+	maxAcceptGap atomic.Int64 // ns, longest wait inside one Accept call since the last TakeStats
+	maxFirstReq  atomic.Int64 // ns, longest time from accept to a connection's first request
+}
+
+// Stats are connection counters of a running server.
+type Stats struct {
+	Accepted int64 // connections accepted since start
+	Open     int64 // connections currently open
+	// MaxAcceptWait is the longest time one Accept call waited for a
+	// connection since the previous TakeStats.
+	MaxAcceptWait time.Duration
+	// MaxFirstRequest is the longest time between accepting a connection
+	// and reading its first complete request since the previous TakeStats.
+	MaxFirstRequest time.Duration
+}
+
+// TakeStats returns the counters and resets the interval maxima.
+func (s *Server) TakeStats() Stats {
+	return Stats{
+		Accepted:        s.accepted.Load(),
+		Open:            s.open.Load(),
+		MaxAcceptWait:   time.Duration(s.maxAcceptGap.Swap(0)),
+		MaxFirstRequest: time.Duration(s.maxFirstReq.Swap(0)),
+	}
+}
+
+func storeMax(v *atomic.Int64, d int64) {
+	for {
+		old := v.Load()
+		if d <= old || v.CompareAndSwap(old, d) {
+			return
+		}
+	}
 }
 
 // Listen creates a server listening on addr (for example ":18080" or
@@ -91,7 +127,9 @@ func (s *Server) Start() { go s.Serve() }
 // Serve accepts connections until Close is called.
 func (s *Server) Serve() error {
 	for {
+		t0 := time.Now()
 		c, err := s.ln.Accept()
+		storeMax(&s.maxAcceptGap, int64(time.Since(t0)))
 		if err != nil {
 			if s.closed.Load() {
 				return nil
@@ -112,7 +150,9 @@ func (s *Server) Serve() error {
 		s.conns[c] = struct{}{}
 		s.wg.Add(1)
 		s.mu.Unlock()
-		go s.handle(c)
+		s.accepted.Add(1)
+		s.open.Add(1)
+		go s.handle(c, time.Now())
 	}
 }
 
@@ -148,12 +188,13 @@ type request struct {
 
 var errBadRequest = errors.New("bad request")
 
-func (s *Server) handle(c net.Conn) {
+func (s *Server) handle(c net.Conn, accepted time.Time) {
 	defer func() {
 		c.Close()
 		s.mu.Lock()
 		delete(s.conns, c)
 		s.mu.Unlock()
+		s.open.Add(-1)
 		s.wg.Done()
 	}()
 	br := bufio.NewReaderSize(c, 4096)
@@ -169,6 +210,9 @@ func (s *Server) handle(c net.Conn) {
 				c.Write(out)
 			}
 			return
+		}
+		if served == 0 {
+			storeMax(&s.maxFirstReq, int64(time.Since(accepted)))
 		}
 		served++
 		var keep bool

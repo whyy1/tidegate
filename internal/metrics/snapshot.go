@@ -74,10 +74,12 @@ type Sample struct {
 	Status          int
 	Error           string
 	Duration        time.Duration
-	RequestHeaders  []Header
-	ResponseHeaders []Header
-	Body            string
-	BodyTruncated   bool
+	RequestHeaders       []Header
+	ResponseHeaders      []Header
+	RequestBody          string
+	RequestBodyTruncated bool
+	Body                 string
+	BodyTruncated        bool
 }
 
 // Snapshot is the aggregated state of a run over one interval (normally one

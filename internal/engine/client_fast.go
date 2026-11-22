@@ -3,6 +3,7 @@ package engine
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -76,7 +77,19 @@ func (f *fastVU) acquire(o *scenario.Origin, r *hopResponse) (*fastConn, error) 
 		f.track(fc)
 		return fc, nil
 	}
-	cc, nc, err := f.c.dial.dial(f.c.eng.hardCtx, o, &r.dial)
+	dialCtx := f.c.eng.hardCtx
+	var dialCancel context.CancelFunc
+	if tot := f.c.cfg.TotalTimeout; tot > 0 {
+		rem := tot - time.Duration(nanotime()-r.start)
+		if rem <= 0 {
+			rem = time.Nanosecond
+		}
+		dialCtx, dialCancel = context.WithTimeout(dialCtx, rem)
+	}
+	cc, nc, err := f.c.dial.dial(dialCtx, o, &r.dial)
+	if dialCancel != nil {
+		dialCancel()
+	}
 	if err != nil {
 		return nil, err
 	}

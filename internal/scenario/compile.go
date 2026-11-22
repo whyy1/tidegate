@@ -2,6 +2,7 @@ package scenario
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -53,6 +54,7 @@ const (
 	DefaultTotalTimeout     = 60 * time.Second
 	DefaultMaxRedirects     = 10
 	DefaultGracefulStop     = 5 * time.Second
+	DefaultConnectBackoff   = 200 * time.Millisecond
 	maxAutoVUs              = 100_000
 )
 
@@ -139,6 +141,7 @@ func (c *compiler) compileHTTP() {
 		TotalTimeout:       durOr(o.Timeout.Total, DefaultTotalTimeout),
 		MaxBodyRead:        o.MaxBodyRead,
 		DNSRefresh:         o.DNSRefresh.D(),
+		ConnectBackoff:     DefaultConnectBackoff,
 	}
 	switch o.ConnMode {
 	case "", "per_vu":
@@ -159,6 +162,12 @@ func (c *compiler) compileHTTP() {
 	}
 	if o.MaxBodyRead < 0 {
 		c.fail("http.max_body_read", "不能是负数")
+	}
+	if o.ConnectBackoff != nil {
+		h.ConnectBackoff = o.ConnectBackoff.D()
+		if h.ConnectBackoff < 0 {
+			c.fail("http.connect_backoff", "不能是负数")
+		}
 	}
 	for name, d := range map[string]Duration{
 		"http.timeout.connect": o.Timeout.Connect, "http.timeout.tls": o.Timeout.TLS,
@@ -258,6 +267,9 @@ func (c *compiler) collectVars() {
 	}
 	for i, st := range c.def.Steps {
 		for j, ex := range st.Extract {
+			if ex.Disabled {
+				continue
+			}
 			if !identRe.MatchString(ex.Name) {
 				c.fail(stepWhere(i, st.ID, fmt.Sprintf("extract[%d].name", j)), "变量名 %q 无效，只能包含字母、数字、下划线和连字符，且不能以数字开头", ex.Name)
 				continue
@@ -381,7 +393,7 @@ func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 		c.fail(w("request.url"), "不能为空")
 	} else {
 		parts := []*Template{c.template(w("request.url"), rawURL, escapeNone)}
-		if len(req.Query) > 0 {
+		if len(req.Query) > 0 || len(req.QueryList) > 0 {
 			sep := "?"
 			if strings.Contains(rawURL, "?") {
 				sep = "&"
@@ -391,25 +403,33 @@ func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 				parts = append(parts, c.template(w("request.query."+k), string(req.Query[k]), escapeQuery))
 				sep = "&"
 			}
+			for _, q := range req.QueryList {
+				parts = append(parts, StaticTemplate(sep+queryEscape(q.Name)+"="))
+				parts = append(parts, c.template(w("request.query."+q.Name), string(q.Value), escapeQuery))
+				sep = "&"
+			}
 		}
 		s.URL = c.compileURL(w("request.url"), concatTemplates(parts...))
 	}
 
 	// Headers in a stable order.
 	hasContentType := false
-	for _, k := range sortedKeys(req.Headers) {
-		name := strings.TrimSpace(k)
+	hasAuthorization := false
+	addHeader := func(rawName, val string) {
+		name := strings.TrimSpace(rawName)
 		if !tokenRe.MatchString(name) {
-			c.fail(w("request.headers"), "请求头名称 %q 无效", k)
-			continue
+			c.fail(w("request.headers"), "请求头名称 %q 无效", rawName)
+			return
 		}
 		canon := textproto.CanonicalMIMEHeaderKey(name)
 		switch canon {
 		case "Content-Length", "Transfer-Encoding":
 			c.fail(w("request.headers."+name), "由引擎根据请求体自动生成，不能手动设置")
-			continue
+			return
 		case "Content-Type":
 			hasContentType = true
+		case "Authorization":
+			hasAuthorization = true
 		case "User-Agent":
 			s.HasUserAgent = true
 		case "Accept-Encoding":
@@ -419,12 +439,32 @@ func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 		case "Host":
 			s.HasHost = true
 		}
-		val := req.Headers[k]
 		if strings.ContainsAny(val, "\r\n") {
 			c.fail(w("request.headers."+name), "值不能包含换行")
-			continue
+			return
 		}
 		s.Headers = append(s.Headers, HeaderTemplate{Name: name, Canonical: canon, Value: c.template(w("request.headers."+name), val, escapeNone)})
+	}
+	for _, k := range sortedKeys(req.Headers) {
+		addHeader(k, req.Headers[k])
+	}
+	for _, h := range req.HeaderList {
+		addHeader(h.Name, string(h.Value))
+	}
+	if req.BasicAuth != nil && !hasAuthorization {
+		if strings.TrimSpace(req.BasicAuth.Username) == "" {
+			c.fail(w("request.basic_auth.username"), "basic 鉴权需要用户名")
+		} else {
+			ut := c.template(w("request.basic_auth.username"), req.BasicAuth.Username, escapeNone)
+			pt := c.template(w("request.basic_auth.password"), req.BasicAuth.Password, escapeNone)
+			if ut.Static() && pt.Static() {
+				cred := base64.StdEncoding.EncodeToString([]byte(ut.Literal() + ":" + pt.Literal()))
+				s.Headers = append(s.Headers, HeaderTemplate{Name: "Authorization", Canonical: "Authorization", Value: StaticTemplate("Basic " + cred)})
+			} else {
+				s.BasicUser = ut
+				s.BasicPass = pt
+			}
+		}
 	}
 
 	if req.Body != nil {
@@ -435,6 +475,9 @@ func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 	}
 
 	for j, ex := range st.Extract {
+		if ex.Disabled {
+			continue
+		}
 		if e, ok := c.compileExtract(w(fmt.Sprintf("extract[%d]", j)), ex); ok {
 			if e.Source != ExtractHeader {
 				s.NeedBody = true
@@ -443,6 +486,9 @@ func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 		}
 	}
 	for j, as := range st.Assert {
+		if as.Disabled {
+			continue
+		}
 		if a, ok := c.compileAssert(w(fmt.Sprintf("assert[%d]", j)), as); ok {
 			switch a.Kind {
 			case AssertBodyContains, AssertJSONPath:
@@ -508,8 +554,8 @@ func (c *compiler) compileURL(where string, t *Template) URLTemplate {
 func (c *compiler) compileBody(w func(string) string, b *Body) (*Template, string) {
 	switch b.Type {
 	case "", "none":
-		if b.Content != "" || len(b.Fields) > 0 || len(b.Files) > 0 {
-			c.fail(w("request.body.type"), "type 为 none 时不能设置 content、fields 或 files")
+		if b.Content != "" || len(b.Fields) > 0 || len(b.FieldList) > 0 || len(b.Files) > 0 || b.File != "" {
+			c.fail(w("request.body.type"), "type 为 none 时不能设置 content、fields、files 或 file")
 		}
 		return nil, ""
 	case "json":
@@ -522,40 +568,75 @@ func (c *compiler) compileBody(w func(string) string, b *Body) (*Template, strin
 	case "raw":
 		c.noFields(w, b)
 		return c.template(w("request.body.content"), b.Content, escapeNone), ""
-	case "form":
-		if len(b.Files) > 0 {
-			c.fail(w("request.body.files"), "form 类型不支持文件，请改用 multipart")
+	case "binary":
+		if b.Content != "" || len(b.Fields) > 0 || len(b.FieldList) > 0 || len(b.Files) > 0 {
+			c.fail(w("request.body"), "binary 类型只使用 file，不能设置 content、fields 或 files")
 		}
-		if len(b.Fields) == 0 {
+		if strings.TrimSpace(b.File) == "" {
+			c.fail(w("request.body.file"), "binary 类型需要指定文件路径")
+			return nil, ""
+		}
+		data, err := os.ReadFile(resolvePath(c.opts.BaseDir, b.File))
+		if err != nil {
+			c.fail(w("request.body.file"), "读取文件失败：%v", err)
+			return nil, ""
+		}
+		ct := strings.TrimSpace(b.ContentType)
+		if ct == "" {
+			ct = "application/octet-stream"
+		}
+		return StaticTemplate(string(data)), ct
+	case "form":
+		if len(b.Files) > 0 || b.File != "" {
+			c.fail(w("request.body.files"), "form 类型不支持文件，请改用 multipart 或 binary")
+		}
+		if len(b.Fields) == 0 && len(b.FieldList) == 0 {
 			return c.template(w("request.body.content"), b.Content, escapeNone), "application/x-www-form-urlencoded"
 		}
 		if b.Content != "" {
 			c.fail(w("request.body"), "form 类型的 content 和 fields 只能二选一")
 		}
 		var parts []*Template
-		for i, k := range sortedKeys(b.Fields) {
+		first := true
+		addField := func(k string, val Scalar) {
 			sep := "&"
-			if i == 0 {
+			if first {
 				sep = ""
+				first = false
 			}
 			parts = append(parts, StaticTemplate(sep+queryEscape(k)+"="))
-			parts = append(parts, c.template(w("request.body.fields."+k), string(b.Fields[k]), escapeQuery))
+			parts = append(parts, c.template(w("request.body.fields."+k), string(val), escapeQuery))
+		}
+		for _, k := range sortedKeys(b.Fields) {
+			addField(k, b.Fields[k])
+		}
+		for _, f := range b.FieldList {
+			addField(f.Name, f.Value)
 		}
 		return concatTemplates(parts...), "application/x-www-form-urlencoded"
 	case "multipart":
-		if b.Content != "" {
+		if b.Content != "" || b.File != "" {
 			c.fail(w("request.body.content"), "multipart 类型请用 fields 和 files")
 		}
 		var rnd [12]byte
 		_, _ = rand.Read(rnd[:])
 		boundary := "TidegateBoundary" + hex.EncodeToString(rnd[:])
 		var parts []*Template
-		for _, k := range sortedKeys(b.Fields) {
+		addPart := func(k string, val Scalar) {
 			parts = append(parts, StaticTemplate("--"+boundary+"\r\nContent-Disposition: form-data; name=\""+escapeQuotes(k)+"\"\r\n\r\n"))
-			parts = append(parts, c.template(w("request.body.fields."+k), string(b.Fields[k]), escapeNone))
+			parts = append(parts, c.template(w("request.body.fields."+k), string(val), escapeNone))
 			parts = append(parts, StaticTemplate("\r\n"))
 		}
+		for _, k := range sortedKeys(b.Fields) {
+			addPart(k, b.Fields[k])
+		}
+		for _, f := range b.FieldList {
+			addPart(f.Name, f.Value)
+		}
 		for j, f := range b.Files {
+			if f.Disabled {
+				continue
+			}
 			fw := w(fmt.Sprintf("request.body.files[%d]", j))
 			if f.Field == "" || f.Path == "" {
 				c.fail(fw, "field 和 path 都不能为空")
@@ -580,13 +661,13 @@ func (c *compiler) compileBody(w func(string) string, b *Body) (*Template, strin
 		parts = append(parts, StaticTemplate("--"+boundary+"--\r\n"))
 		return concatTemplates(parts...), "multipart/form-data; boundary=" + boundary
 	}
-	c.fail(w("request.body.type"), "取值 %q 无效，只能是 none、json、form、raw 或 multipart", b.Type)
+	c.fail(w("request.body.type"), "取值 %q 无效，只能是 none、json、form、raw、multipart 或 binary", b.Type)
 	return nil, ""
 }
 
 func (c *compiler) noFields(w func(string) string, b *Body) {
-	if len(b.Fields) > 0 || len(b.Files) > 0 {
-		c.fail(w("request.body"), "%s 类型只使用 content，不能设置 fields 或 files", b.Type)
+	if len(b.Fields) > 0 || len(b.FieldList) > 0 || len(b.Files) > 0 || b.File != "" {
+		c.fail(w("request.body"), "%s 类型只使用 content，不能设置 fields、files 或 file", b.Type)
 	}
 }
 
@@ -604,7 +685,7 @@ func (c *compiler) compileExtract(where string, ex Extract) (Extractor, bool) {
 	if !ok {
 		return Extractor{}, false // invalid name, already reported
 	}
-	e := Extractor{Name: ex.Name, Slot: slot, Expr: ex.Expr}
+	e := Extractor{Name: ex.Name, Slot: slot, Expr: ex.Expr, Description: ex.Description}
 	if ex.Default != nil {
 		e.Default, e.HasDefault = *ex.Default, true
 	}
@@ -650,7 +731,7 @@ func (c *compiler) compileExtract(where string, ex Extract) (Extractor, bool) {
 }
 
 func (c *compiler) compileAssert(where string, as Assert) (Assertion, bool) {
-	a := Assertion{}
+	a := Assertion{Type: as.Type, Description: as.Description}
 	switch as.Type {
 	case "status":
 		a.Kind = AssertStatus

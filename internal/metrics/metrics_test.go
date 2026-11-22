@@ -201,7 +201,7 @@ func sampleSnapshot() *Snapshot {
 		Kind: SampleKind(ErrHTTP5xx), Step: 0, StepID: "login", Time: time.Unix(1700000000, 5),
 		Method: "POST", URL: "http://x/login", Status: 503, Error: "HTTP 503",
 		Duration: 12 * time.Millisecond, RequestHeaders: []Header{{"Authorization", "***"}},
-		ResponseHeaders: []Header{{"Content-Type", "text/plain"}}, Body: "busy", BodyTruncated: true,
+		ResponseHeaders: []Header{{"Content-Type", "text/plain"}}, RequestBody: `{"user":"a"}`, Body: "busy", BodyTruncated: true,
 	}}
 	s.ComputeTotal()
 	return s
@@ -241,7 +241,7 @@ func TestBinaryRoundTrip(t *testing.T) {
 	if got.Total.Requests != 501 || got.Total.Latency.Count() != 501 {
 		t.Fatalf("total not rebuilt: %d", got.Total.Requests)
 	}
-	if len(got.Samples) != 1 || got.Samples[0].Body != "busy" || !got.Samples[0].BodyTruncated || got.Samples[0].RequestHeaders[0].Value != "***" {
+	if len(got.Samples) != 1 || got.Samples[0].RequestBody != `{"user":"a"}` || got.Samples[0].Body != "busy" || !got.Samples[0].BodyTruncated || got.Samples[0].RequestHeaders[0].Value != "***" {
 		t.Fatalf("samples = %+v", got.Samples)
 	}
 	// The sparse encoding must be far smaller than the dense histograms.

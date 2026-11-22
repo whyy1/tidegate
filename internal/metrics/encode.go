@@ -139,6 +139,12 @@ func appendSample(b []byte, s *Sample) []byte {
 	b = binary.AppendVarint(b, int64(s.Duration))
 	b = appendHeaders(b, s.RequestHeaders)
 	b = appendHeaders(b, s.ResponseHeaders)
+	b = appendString(b, s.RequestBody)
+	if s.RequestBodyTruncated {
+		b = append(b, 1)
+	} else {
+		b = append(b, 0)
+	}
 	b = appendString(b, s.Body)
 	if s.BodyTruncated {
 		b = append(b, 1)
@@ -343,6 +349,8 @@ func (s *Snapshot) UnmarshalBinary(data []byte) error {
 		sm.Duration = time.Duration(d.varint())
 		sm.RequestHeaders = d.headers()
 		sm.ResponseHeaders = d.headers()
+		sm.RequestBody = d.string()
+		sm.RequestBodyTruncated = d.byte() == 1
 		sm.Body = d.string()
 		sm.BodyTruncated = d.byte() == 1
 		if int(sm.Kind) >= NumSampleKinds {

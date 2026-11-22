@@ -40,10 +40,12 @@ type SampleView struct {
 	Status          int       `json:"status,omitempty"`
 	Error           string    `json:"error,omitempty"`
 	DurationMs      float64   `json:"duration_ms"`
-	RequestHeaders  []Header  `json:"request_headers,omitempty"`
-	ResponseHeaders []Header  `json:"response_headers,omitempty"`
-	Body            string    `json:"body,omitempty"`
-	BodyTruncated   bool      `json:"body_truncated,omitempty"`
+	RequestHeaders       []Header  `json:"request_headers,omitempty"`
+	ResponseHeaders      []Header  `json:"response_headers,omitempty"`
+	RequestBody          string    `json:"request_body,omitempty"`
+	RequestBodyTruncated bool      `json:"request_body_truncated,omitempty"`
+	Body                 string    `json:"body,omitempty"`
+	BodyTruncated        bool      `json:"body_truncated,omitempty"`
 }
 
 // SnapshotView is the JSON form of a Snapshot: computed values only, no raw
@@ -147,10 +149,12 @@ func (s *Snapshot) View() *SnapshotView {
 			Status:          sm.Status,
 			Error:           sm.Error,
 			DurationMs:      round3(float64(sm.Duration) / 1e6),
-			RequestHeaders:  sm.RequestHeaders,
-			ResponseHeaders: sm.ResponseHeaders,
-			Body:            sm.Body,
-			BodyTruncated:   sm.BodyTruncated,
+			RequestHeaders:       sm.RequestHeaders,
+			ResponseHeaders:      sm.ResponseHeaders,
+			RequestBody:          sm.RequestBody,
+			RequestBodyTruncated: sm.RequestBodyTruncated,
+			Body:                 sm.Body,
+			BodyTruncated:        sm.BodyTruncated,
 		})
 	}
 	return v

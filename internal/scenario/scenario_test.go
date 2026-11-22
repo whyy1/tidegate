@@ -115,7 +115,8 @@ func TestCompileExample(t *testing.T) {
 		t.Fatalf("plan = %+v", p)
 	}
 	if p.HTTP.ConnectTimeout != 2*time.Second || p.HTTP.TotalTimeout != 10*time.Second ||
-		p.HTTP.FirstByteTimeout != 10*time.Second || p.HTTP.TLSTimeout != DefaultTLSTimeout || !p.HTTP.Cookies {
+		p.HTTP.FirstByteTimeout != 10*time.Second || p.HTTP.TLSTimeout != DefaultTLSTimeout ||
+		p.HTTP.ConnectBackoff != DefaultConnectBackoff || !p.HTTP.Cookies {
 		t.Fatalf("http config = %+v", p.HTTP)
 	}
 	if p.Load.Mode != LoadVUs || p.Load.MaxVUs != 100 || p.Load.TotalDuration != 70*time.Second || p.Load.GracefulStop != 3*time.Second {
@@ -637,6 +638,21 @@ load: LOAD`
 	if p.Load.MaxVUs != 500 || p.Load.PeakTarget != 100 {
 		t.Fatalf("auto max vus = %d", p.Load.MaxVUs)
 	}
+
+	// Explicit connect_backoff=0s disables backoff; negative fails.
+	p0, err := compileYAML(t, `
+http: {connect_backoff: 0s}
+steps: [{id: s, request: {url: "http://x/"}}]
+load: {stages: [{duration: 1s, target: 1}]}`, nil)
+	if err != nil || p0.HTTP.ConnectBackoff != 0 {
+		t.Fatalf("connect_backoff 0s: p=%v err=%v", p0, err)
+	}
+	if _, err := compileYAML(t, `
+http: {connect_backoff: -1s}
+steps: [{id: s, request: {url: "http://x/"}}]
+load: {stages: [{duration: 1s, target: 1}]}`, nil); err == nil || !strings.Contains(err.Error(), "http.connect_backoff") {
+		t.Fatalf("negative connect_backoff err = %v", err)
+	}
 }
 
 func BenchmarkTemplateAppend(b *testing.B) {
@@ -676,4 +692,81 @@ func BenchmarkJSONPathLookup(b *testing.B) {
 			b.Fatal("not found")
 		}
 	}
+}
+
+func TestOrderedListsDisabledBinaryAndDynamicBasicAuth(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "blob.bin", "\x00\x01bin")
+	def := &Definition{
+		Version: 1,
+		Name:    "ordered",
+		Variables: map[string]Scalar{
+			"k": "a b&c",
+		},
+		Steps: []Step{
+			{
+				ID: "s1",
+				Request: &Request{
+					Method: "POST",
+					URL:    "http://127.0.0.1:8080/items",
+					QueryList: []NameValue{
+						{Name: "tag", Value: "go"},
+						{Name: "tag", Value: "{{k}}"},
+					},
+					HeaderList: []NameValue{
+						{Name: "X-One", Value: "1"},
+						{Name: "X-One", Value: "2"},
+					},
+					Body: &Body{
+						Type:        "binary",
+						File:        "blob.bin",
+						ContentType: "application/custom",
+					},
+				},
+				Extract: []Extract{
+					{Name: "dyn", From: "header", Expr: "X-Dyn"},
+					{Name: "bad_disabled", From: "jsonpath", Expr: "$..bad", Disabled: true},
+				},
+				Assert: []Assert{
+					{Type: "status", Equals: ptrScalar("200")},
+					{Type: "status", Disabled: true}, // invalid if enabled, skipped when disabled
+				},
+			},
+			{
+				ID: "s2",
+				Request: &Request{
+					Method:    "GET",
+					URL:       "http://127.0.0.1:8080/me",
+					BasicAuth: &BasicAuth{Username: "{{dyn}}", Password: "pw"},
+				},
+			},
+		},
+		Load: Load{Stages: []Stage{{Duration: Duration(time.Second), Target: 1}}},
+	}
+	p, err := Compile(def, CompileOptions{BaseDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s1 := p.Steps[0].(*HTTPStep)
+	if s1.URL.Static == nil || s1.URL.Static.RequestURI != "/items?tag=go&tag=a+b%26c" {
+		t.Fatalf("ordered duplicate query URI = %+v", s1.URL.Static)
+	}
+	if len(s1.Headers) != 2 || s1.Headers[0].Name != "X-One" || s1.Headers[1].Value.Literal() != "2" {
+		t.Fatalf("headers = %+v", s1.Headers)
+	}
+	if s1.ContentType != "application/custom" || s1.Body.Literal() != "\x00\x01bin" {
+		t.Fatalf("binary body = ct:%q val:%q", s1.ContentType, s1.Body.Literal())
+	}
+	if len(s1.Extract) != 1 || len(s1.Assert) != 1 || len(p.Vars) != 1 {
+		t.Fatalf("disabled items not skipped: extract=%d assert=%d vars=%v", len(s1.Extract), len(s1.Assert), p.Vars)
+	}
+	s2 := p.Steps[1].(*HTTPStep)
+	if s2.BasicUser == nil || s2.BasicPass == nil {
+		t.Fatal("expected dynamic BasicUser/BasicPass")
+	}
+}
+
+func ptrScalar(s string) *Scalar {
+	v := Scalar(s)
+	return &v
 }
