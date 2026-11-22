@@ -347,3 +347,150 @@ load:
 		t.Fatal("expected canceled error")
 	}
 }
+
+func TestRunDebugControlFlowAndOAuth2(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/oauth/token":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"access_token":"dbg-token-123","expires_in":3600}`))
+		case "/step":
+			w.Header().Set("Content-Type", "application/xml")
+			_, _ = w.Write([]byte(`<res><ok>yes</ok></res>`))
+		case "/loop":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"loop":"ok"}`))
+		case "/branch":
+			if r.Header.Get("Authorization") != "Bearer dbg-token-123" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"branch":"then"}`))
+		case "/weighted":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"weighted":true}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	def := &scenario.Definition{
+		Version: 1,
+		Name:    "debug-control-flow",
+		Steps: []scenario.Step{
+			{
+				ID:   "grp",
+				Name: "事务组",
+				Group: &scenario.GroupStep{
+					Children: []scenario.Step{
+						{
+							ID: "s_xml",
+							Request: &scenario.Request{
+								Method: "GET",
+								URL:    srv.URL + "/step",
+							},
+							Extract: []scenario.Extract{
+								{Name: "okflag", From: "xpath", Expr: "/res/ok/text()"},
+							},
+							Assert: []scenario.Assert{
+								{Type: "status", Equals: ptrScalarScenario("200")},
+							},
+						},
+						{
+							ID: "s_loop",
+							Loop: &scenario.LoopStep{
+								Count: 50, // RunDebug caps single-pass dry-run loops at 20
+								Children: []scenario.Step{
+									{
+										ID: "loop_req",
+										Request: &scenario.Request{
+											Method: "GET",
+											URL:    srv.URL + "/loop",
+										},
+									},
+								},
+							},
+						},
+						{
+							ID: "s_if",
+							If: &scenario.IfStep{
+								Expr: `{{okflag}} == "yes"`,
+								Then: []scenario.Step{
+									{
+										ID: "then_oauth",
+										Request: &scenario.Request{
+											Method: "GET",
+											URL:    srv.URL + "/branch",
+											OAuth2: &scenario.OAuth2Auth{
+												TokenURL:     srv.URL + "/oauth/token",
+												ClientID:     "cid",
+												ClientSecret: "csec",
+											},
+										},
+										Assert: []scenario.Assert{
+											{Type: "json_schema", Value: `{"type":"object","required":["branch"]}`},
+										},
+									},
+								},
+								Else: []scenario.Step{
+									{
+										ID:      "else_noop",
+										Request: &scenario.Request{Method: "GET", URL: srv.URL + "/missing"},
+									},
+								},
+							},
+						},
+						{
+							ID: "s_weighted",
+							Weighted: &scenario.WeightedStep{
+								Branches: []scenario.WeightedBranch{
+									{Name: "only", Weight: 100, Steps: []scenario.Step{{ID: "w_req", Request: &scenario.Request{Method: "GET", URL: srv.URL + "/weighted"}}}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Load: scenario.Load{Stages: []scenario.Stage{{Duration: scenario.Duration(time.Second), Target: 1}}},
+	}
+
+	plan, err := scenario.Compile(def, scenario.CompileOptions{})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	res, err := RunDebug(context.Background(), plan, DebugOptions{SkipThink: true})
+	if err != nil {
+		t.Fatalf("RunDebug: %v", err)
+	}
+	if !res.Passed {
+		t.Fatalf("RunDebug expected Passed=true, steps=%+v", res.Steps)
+	}
+	// 1 (s_xml) + 20 (capped loop_req) + 1 (then_oauth) + 1 (w_req) = 23 executed HTTP steps.
+	if len(res.Steps) != 23 {
+		t.Fatalf("expected 23 debug steps (loop capped at 20), got %d", len(res.Steps))
+	}
+	if res.FinalVars["okflag"] != "yes" {
+		t.Fatalf("FinalVars = %+v", res.FinalVars)
+	}
+	var gotBearer bool
+	for _, st := range res.Steps {
+		if st.StepID == "then_oauth" {
+			for _, h := range st.ActualRequest.Headers {
+				if strings.EqualFold(h.Name, "Authorization") && h.Value == "Bearer dbg-token-123" {
+					gotBearer = true
+				}
+			}
+		}
+	}
+	if !gotBearer {
+		t.Fatal("expected OAuth2 Authorization Bearer header on then_oauth debug request")
+	}
+}
+
+func ptrScalarScenario(s string) *scenario.Scalar {
+	v := scenario.Scalar(s)
+	return &v
+}

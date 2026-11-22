@@ -1,13 +1,16 @@
 package scenario
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/csv"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
@@ -59,23 +62,159 @@ const maxDataFileSize = 512 << 20
 
 // LoadCSV reads a CSV file whose first record holds the column names.
 func LoadCSV(path string) (columns []string, rows [][]string, err error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		return nil, nil, err
-	}
-	if st.Size() > maxDataFileSize {
-		return nil, nil, fmt.Errorf("文件超过 %d MB", maxDataFileSize>>20)
-	}
-	data, err := io.ReadAll(f)
+	data, err := readBoundedDataFile(path)
 	if err != nil {
 		return nil, nil, err
 	}
 	return ParseCSV(data)
+}
+
+// IsSupportedDataExt reports whether a file extension is a supported parameterized data source.
+func IsSupportedDataExt(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".csv", ".json", ".jsonl", ".ndjson":
+		return true
+	}
+	return false
+}
+
+// LoadDataFile reads CSV, JSON array, or JSONL/NDJSON data files into named columns and rows.
+func LoadDataFile(path string) (columns []string, rows [][]string, err error) {
+	data, err := readBoundedDataFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	return ParseDataFile(path, data)
+}
+
+func readBoundedDataFile(path string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	st, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if st.Size() > maxDataFileSize {
+		return nil, fmt.Errorf("文件超过 %d MB", maxDataFileSize>>20)
+	}
+	return io.ReadAll(f)
+}
+
+// ParseDataFile parses CSV, JSON array-of-objects, or JSONL/NDJSON data.
+func ParseDataFile(filename string, data []byte) ([]string, [][]string, error) {
+	clean := bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
+	trimmed := bytes.TrimSpace(clean)
+	ext := strings.ToLower(pathExt(filename))
+	switch ext {
+	case ".jsonl", ".ndjson":
+		return parseJSONLines(trimmed)
+	case ".json":
+		return parseJSONArray(trimmed)
+	default:
+		if ext == "" && bytes.HasPrefix(trimmed, []byte("[")) {
+			return parseJSONArray(trimmed)
+		}
+		return ParseCSV(clean)
+	}
+}
+
+func parseJSONArray(data []byte) ([]string, [][]string, error) {
+	if len(data) == 0 {
+		return nil, nil, errors.New("JSON 数据文件为空")
+	}
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var objs []map[string]any
+	if err := dec.Decode(&objs); err != nil {
+		return nil, nil, fmt.Errorf("JSON 数据文件必须是对象数组：%v", err)
+	}
+	return parseJSONObjects(objs)
+}
+
+func parseJSONLines(data []byte) ([]string, [][]string, error) {
+	if len(data) == 0 {
+		return nil, nil, errors.New("JSONL 数据文件为空")
+	}
+	var objs []map[string]any
+	sc := bufio.NewScanner(bytes.NewReader(data))
+	sc.Buffer(make([]byte, 64*1024), 16<<20)
+	lineNo := 0
+	for sc.Scan() {
+		lineNo++
+		line := bytes.TrimSpace(sc.Bytes())
+		if len(line) == 0 {
+			continue
+		}
+		dec := json.NewDecoder(bytes.NewReader(line))
+		dec.UseNumber()
+		var obj map[string]any
+		if err := dec.Decode(&obj); err != nil || obj == nil {
+			return nil, nil, fmt.Errorf("第 %d 行不是有效的 JSON 对象", lineNo)
+		}
+		objs = append(objs, obj)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, nil, err
+	}
+	return parseJSONObjects(objs)
+}
+
+func parseJSONObjects(objs []map[string]any) ([]string, [][]string, error) {
+	if len(objs) == 0 {
+		return nil, nil, errors.New("数据文件至少需要 1 行数据对象")
+	}
+	colSet := map[string]bool{}
+	var cols []string
+	for _, obj := range objs {
+		for k := range obj {
+			if k == "" {
+				continue
+			}
+			if !colSet[k] {
+				colSet[k] = true
+				cols = append(cols, k)
+			}
+		}
+	}
+	sort.Strings(cols)
+	if len(cols) == 0 {
+		return nil, nil, errors.New("数据对象缺少有效字段名")
+	}
+	rows := make([][]string, len(objs))
+	for i, obj := range objs {
+		row := make([]string, len(cols))
+		for j, col := range cols {
+			row[j] = stringifyJSONCell(obj[col])
+		}
+		rows[i] = row
+	}
+	return cols, rows, nil
+}
+
+func stringifyJSONCell(v any) string {
+	if v == nil {
+		return ""
+	}
+	switch x := v.(type) {
+	case string:
+		return x
+	case json.Number:
+		return x.String()
+	case bool:
+		if x {
+			return "true"
+		}
+		return "false"
+	default:
+		b, err := json.Marshal(x)
+		if err != nil {
+			return fmt.Sprint(x)
+		}
+		return string(b)
+	}
 }
 
 // ParseCSV parses CSV data whose first record holds the column names.

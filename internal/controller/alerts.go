@@ -269,7 +269,38 @@ func inspectTargetEgress(ctx context.Context, def *scenario.Definition) targetEg
 	}
 	var res targetEgress
 	seen := map[string]bool{}
-	for _, st := range def.Steps {
+	inspectStepsEgress(ctx, def.Steps, seen, &res)
+	return res
+}
+
+func inspectStepsEgress(ctx context.Context, steps []scenario.Step, seen map[string]bool, res *targetEgress) bool {
+	for _, st := range steps {
+		if st.Group != nil {
+			if inspectStepsEgress(ctx, st.Group.Children, seen, res) {
+				return true
+			}
+			continue
+		}
+		if st.Loop != nil {
+			if inspectStepsEgress(ctx, st.Loop.Children, seen, res) {
+				return true
+			}
+			continue
+		}
+		if st.If != nil {
+			if inspectStepsEgress(ctx, st.If.Then, seen, res) || inspectStepsEgress(ctx, st.If.Else, seen, res) {
+				return true
+			}
+			continue
+		}
+		if st.Weighted != nil {
+			for _, br := range st.Weighted.Branches {
+				if inspectStepsEgress(ctx, br.Steps, seen, res) {
+					return true
+				}
+			}
+			continue
+		}
 		if st.Request == nil {
 			continue
 		}
@@ -300,14 +331,14 @@ func inspectTargetEgress(ctx context.Context, def *scenario.Definition) targetEg
 		if err != nil {
 			// Remote address lookup failed or remote agent may use a non-loopback path.
 			res.hasNonLoopback = true
-			return res
+			return true
 		}
 		if !eg.Loopback {
 			res.hasNonLoopback = true
 			res.egressIndex = eg.Index
 			res.egressName = eg.Interface
-			return res
+			return true
 		}
 	}
-	return res
+	return false
 }

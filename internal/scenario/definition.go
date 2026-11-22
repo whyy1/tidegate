@@ -27,17 +27,20 @@ type Definition struct {
 
 // HTTPOptions are connection options. Every field has a default.
 type HTTPOptions struct {
-	ConnMode           string   `yaml:"conn_mode,omitempty" json:"conn_mode,omitempty"`
-	KeepAlive          *bool    `yaml:"keep_alive,omitempty" json:"keep_alive,omitempty"`
-	MaxRequestsPerConn int      `yaml:"max_requests_per_conn,omitempty" json:"max_requests_per_conn,omitempty"`
-	FollowRedirects    *bool    `yaml:"follow_redirects,omitempty" json:"follow_redirects,omitempty"`
-	MaxRedirects       *int     `yaml:"max_redirects,omitempty" json:"max_redirects,omitempty"`
-	InsecureSkipVerify bool     `yaml:"insecure_skip_verify,omitempty" json:"insecure_skip_verify,omitempty"`
-	Cookies            *bool    `yaml:"cookies,omitempty" json:"cookies,omitempty"`
-	Timeout            Timeouts `yaml:"timeout,omitempty" json:"timeout,omitempty"`
-	MaxBodyRead        int64     `yaml:"max_body_read,omitempty" json:"max_body_read,omitempty"`
-	DNSRefresh         Duration  `yaml:"dns_refresh,omitempty" json:"dns_refresh,omitempty"`
-	ConnectBackoff     *Duration `yaml:"connect_backoff,omitempty" json:"connect_backoff,omitempty"`
+	ConnMode           string            `yaml:"conn_mode,omitempty" json:"conn_mode,omitempty"`
+	HTTPVersion        string            `yaml:"http_version,omitempty" json:"http_version,omitempty"`
+	KeepAlive          *bool             `yaml:"keep_alive,omitempty" json:"keep_alive,omitempty"`
+	MaxRequestsPerConn int               `yaml:"max_requests_per_conn,omitempty" json:"max_requests_per_conn,omitempty"`
+	FollowRedirects    *bool             `yaml:"follow_redirects,omitempty" json:"follow_redirects,omitempty"`
+	MaxRedirects       *int              `yaml:"max_redirects,omitempty" json:"max_redirects,omitempty"`
+	InsecureSkipVerify bool              `yaml:"insecure_skip_verify,omitempty" json:"insecure_skip_verify,omitempty"`
+	Cookies            *bool             `yaml:"cookies,omitempty" json:"cookies,omitempty"`
+	Timeout            Timeouts          `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+	MaxBodyRead        int64             `yaml:"max_body_read,omitempty" json:"max_body_read,omitempty"`
+	DNSRefresh         Duration          `yaml:"dns_refresh,omitempty" json:"dns_refresh,omitempty"`
+	DNSOverrides       map[string]string `yaml:"dns_overrides,omitempty" json:"dns_overrides,omitempty"`
+	ProxyURL           string            `yaml:"proxy_url,omitempty" json:"proxy_url,omitempty"`
+	ConnectBackoff     *Duration         `yaml:"connect_backoff,omitempty" json:"connect_backoff,omitempty"`
 }
 
 // Timeouts are the four request timeouts. Zero means the default.
@@ -56,16 +59,51 @@ type DataSource struct {
 	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`
 }
 
-// Step is one scenario step. Today every step is an HTTP request; later
-// versions add other node types (loops, conditions, groups, protocols) as
-// sibling fields, so exactly one of them must be set.
+// Step is one scenario step. Each step sets exactly one execution node:
+// Request, Group, Loop, If, or Weighted.
 type Step struct {
-	ID      string    `yaml:"id" json:"id"`
-	Name    string    `yaml:"name,omitempty" json:"name,omitempty"`
-	Request *Request  `yaml:"request,omitempty" json:"request,omitempty"`
-	Extract []Extract `yaml:"extract,omitempty" json:"extract,omitempty"`
-	Assert  []Assert  `yaml:"assert,omitempty" json:"assert,omitempty"`
-	Think   *Think    `yaml:"think,omitempty" json:"think,omitempty"`
+	ID       string        `yaml:"id" json:"id"`
+	Name     string        `yaml:"name,omitempty" json:"name,omitempty"`
+	Request  *Request      `yaml:"request,omitempty" json:"request,omitempty"`
+	Extract  []Extract     `yaml:"extract,omitempty" json:"extract,omitempty"`
+	Assert   []Assert      `yaml:"assert,omitempty" json:"assert,omitempty"`
+	Think    *Think        `yaml:"think,omitempty" json:"think,omitempty"`
+	Group    *GroupStep    `yaml:"group,omitempty" json:"group,omitempty"`
+	Loop     *LoopStep     `yaml:"loop,omitempty" json:"loop,omitempty"`
+	If       *IfStep       `yaml:"if,omitempty" json:"if,omitempty"`
+	Weighted *WeightedStep `yaml:"weighted,omitempty" json:"weighted,omitempty"`
+}
+
+// GroupStep wraps child steps as a measured transaction unit.
+type GroupStep struct {
+	Children []Step `yaml:"children,omitempty" json:"children,omitempty"`
+}
+
+// LoopStep repeats child steps by fixed count and/or while condition.
+type LoopStep struct {
+	Count         int    `yaml:"count,omitempty" json:"count,omitempty"`
+	While         string `yaml:"while,omitempty" json:"while,omitempty"`
+	MaxIterations int    `yaml:"max_iterations,omitempty" json:"max_iterations,omitempty"`
+	Children      []Step `yaml:"children,omitempty" json:"children,omitempty"`
+}
+
+// IfStep branches execution based on runtime variable condition Expr.
+type IfStep struct {
+	Expr string `yaml:"expr" json:"expr"`
+	Then []Step `yaml:"then,omitempty" json:"then,omitempty"`
+	Else []Step `yaml:"else,omitempty" json:"else,omitempty"`
+}
+
+// WeightedBranch is one weighted branch of a WeightedStep.
+type WeightedBranch struct {
+	Name   string  `yaml:"name,omitempty" json:"name,omitempty"`
+	Weight float64 `yaml:"weight" json:"weight"`
+	Steps  []Step  `yaml:"steps,omitempty" json:"steps,omitempty"`
+}
+
+// WeightedStep selects one branch per execution according to relative weights.
+type WeightedStep struct {
+	Branches []WeightedBranch `yaml:"branches" json:"branches"`
 }
 
 // NameValue is an ordered key-value entry, used where order or duplicate
@@ -81,6 +119,15 @@ type BasicAuth struct {
 	Password string `yaml:"password,omitempty" json:"password,omitempty"`
 }
 
+// OAuth2Auth configures OAuth 2.0 Client Credentials token retrieval.
+type OAuth2Auth struct {
+	TokenURL     string `yaml:"token_url" json:"token_url"`
+	ClientID     string `yaml:"client_id" json:"client_id"`
+	ClientSecret string `yaml:"client_secret,omitempty" json:"client_secret,omitempty"`
+	Scope        string `yaml:"scope,omitempty" json:"scope,omitempty"`
+	ClientAuth   string `yaml:"client_auth,omitempty" json:"client_auth,omitempty"` // "basic" (default) or "body"
+}
+
 // Request is an HTTP request.
 type Request struct {
 	Method     string            `yaml:"method,omitempty" json:"method,omitempty"`
@@ -90,6 +137,7 @@ type Request struct {
 	Query      map[string]Scalar `yaml:"query,omitempty" json:"query,omitempty"`
 	QueryList  []NameValue       `yaml:"query_list,omitempty" json:"query_list,omitempty"`
 	BasicAuth  *BasicAuth        `yaml:"basic_auth,omitempty" json:"basic_auth,omitempty"`
+	OAuth2     *OAuth2Auth       `yaml:"oauth2,omitempty" json:"oauth2,omitempty"`
 	Body       *Body             `yaml:"body,omitempty" json:"body,omitempty"`
 }
 
@@ -140,9 +188,11 @@ type Assert struct {
 
 // Think is the pause after a step.
 type Think struct {
-	Type string   `yaml:"type" json:"type"`
-	Min  Duration `yaml:"min,omitempty" json:"min,omitempty"`
-	Max  Duration `yaml:"max,omitempty" json:"max,omitempty"`
+	Type   string   `yaml:"type" json:"type"`
+	Min    Duration `yaml:"min,omitempty" json:"min,omitempty"`
+	Max    Duration `yaml:"max,omitempty" json:"max,omitempty"`
+	Mean   Duration `yaml:"mean,omitempty" json:"mean,omitempty"`
+	Stddev Duration `yaml:"stddev,omitempty" json:"stddev,omitempty"`
 }
 
 // Load describes the load model.

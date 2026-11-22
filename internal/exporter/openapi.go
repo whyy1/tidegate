@@ -4,6 +4,8 @@ package exporter
 
 import (
 	"encoding/json"
+	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -108,10 +110,8 @@ func ExportOpenAPI(st *store.Store, projectID string, asYAML bool) ([]byte, erro
 			}
 
 			op := map[string]any{
-				"summary": a.Name,
-				"responses": map[string]any{
-					"200": map[string]any{"description": "成功"},
-				},
+				"summary":   a.Name,
+				"responses": openAPIResponses(a),
 			}
 			if a.Description != "" {
 				op["description"] = a.Description
@@ -373,8 +373,187 @@ func registerSecurityScheme(schemes map[string]any, a *store.Auth) string {
 		name := "apiKey_" + in + "_" + sanitizeSchemeID(key)
 		schemes[name] = map[string]any{"type": "apiKey", "in": in, "name": key}
 		return name
+	case store.AuthOAuth2:
+		scopes := map[string]any{}
+		for _, sc := range strings.Fields(a.Scope) {
+			scopes[sc] = sc
+		}
+		tokURL := a.TokenURL
+		if tokURL == "" {
+			tokURL = "https://example.com/oauth/token"
+		}
+		schemes["oauth2ClientCredentials"] = map[string]any{
+			"type": "oauth2",
+			"flows": map[string]any{
+				"clientCredentials": map[string]any{
+					"tokenUrl": tokURL,
+					"scopes":   scopes,
+				},
+			},
+		}
+		return "oauth2ClientCredentials"
 	}
 	return ""
+}
+
+func openAPIResponses(a *store.API) map[string]any {
+	if a == nil || (len(a.Examples) == 0 && len(a.ResponseFields) == 0) {
+		return map[string]any{
+			"200": map[string]any{"description": "成功"},
+		}
+	}
+	schema := buildSchemaFromResponseFields(a.ResponseFields)
+	if len(a.Examples) == 0 {
+		return map[string]any{
+			"200": map[string]any{
+				"description": "成功",
+				"content": map[string]any{
+					"application/json": map[string]any{
+						"schema": schema,
+					},
+				},
+			},
+		}
+	}
+
+	byStatus := map[string][]store.APIResponseExample{}
+	for _, ex := range a.Examples {
+		code := "200"
+		if ex.Status > 0 {
+			code = strconv.Itoa(ex.Status)
+		}
+		byStatus[code] = append(byStatus[code], ex)
+	}
+	out := map[string]any{}
+	codes := make([]string, 0, len(byStatus))
+	for code := range byStatus {
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+
+	for idx, code := range codes {
+		list := byStatus[code]
+		content := map[string]any{}
+		byMedia := map[string][]store.APIResponseExample{}
+		for _, ex := range list {
+			ct := strings.TrimSpace(ex.ContentType)
+			if ct == "" {
+				ct = "application/json"
+			}
+			byMedia[ct] = append(byMedia[ct], ex)
+		}
+		for ct, mList := range byMedia {
+			media := map[string]any{}
+			if len(schema) > 0 && (strings.HasPrefix(code, "2") || idx == 0) {
+				media["schema"] = schema
+			}
+			if len(mList) == 1 {
+				media["example"] = parseExampleValue(mList[0].Body)
+			} else {
+				exMap := map[string]any{}
+				for j, ex := range mList {
+					key := strings.TrimSpace(ex.Name)
+					if key == "" {
+						key = "example_" + strconv.Itoa(j+1)
+					}
+					exMap[key] = map[string]any{
+						"summary": ex.Name,
+						"value":   parseExampleValue(ex.Body),
+					}
+				}
+				media["examples"] = exMap
+			}
+			content[ct] = media
+		}
+		respObj := map[string]any{
+			"description": "响应示例 (" + code + ")",
+			"content":     content,
+		}
+		if len(list[0].Headers) > 0 {
+			hdrs := map[string]any{}
+			for _, h := range list[0].Headers {
+				if h.Disabled || strings.TrimSpace(h.Name) == "" || isSensitiveHeaderName(h.Name) {
+					continue
+				}
+				hEntry := map[string]any{"schema": map[string]any{"type": "string"}}
+				if h.Description != "" {
+					hEntry["description"] = h.Description
+				}
+				hdrs[strings.TrimSpace(h.Name)] = hEntry
+			}
+			if len(hdrs) > 0 {
+				respObj["headers"] = hdrs
+			}
+		}
+		out[code] = respObj
+	}
+	return out
+}
+
+func parseExampleValue(body string) any {
+	trimmed := strings.TrimSpace(body)
+	if trimmed == "" {
+		return ""
+	}
+	var parsed any
+	if json.Unmarshal([]byte(trimmed), &parsed) == nil {
+		return parsed
+	}
+	return body
+}
+
+func buildSchemaFromResponseFields(fields []store.APIFieldDoc) map[string]any {
+	if len(fields) == 0 {
+		return nil
+	}
+	root := map[string]any{
+		"type":       "object",
+		"properties": map[string]any{},
+	}
+	for _, f := range fields {
+		path := strings.TrimSpace(strings.TrimPrefix(strings.TrimPrefix(f.Path, "$."), "$"))
+		if path == "" {
+			continue
+		}
+		segs := strings.Split(path, ".")
+		insertFieldSchema(root, segs, f)
+	}
+	return root
+}
+
+func insertFieldSchema(obj map[string]any, segs []string, doc store.APIFieldDoc) {
+	props, _ := obj["properties"].(map[string]any)
+	if props == nil {
+		props = map[string]any{}
+		obj["properties"] = props
+	}
+	key := segs[0]
+	if len(segs) == 1 {
+		ftype := strings.ToLower(strings.TrimSpace(doc.Type))
+		if ftype == "" {
+			ftype = "string"
+		}
+		leaf := map[string]any{"type": ftype}
+		if doc.Description != "" {
+			leaf["description"] = doc.Description
+		}
+		props[key] = leaf
+		if doc.Required {
+			req, _ := obj["required"].([]string)
+			req = append(req, key)
+			obj["required"] = req
+		}
+		return
+	}
+	child, _ := props[key].(map[string]any)
+	if child == nil {
+		child = map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		}
+		props[key] = child
+	}
+	insertFieldSchema(child, segs[1:], doc)
 }
 
 func normalizeOpenAPIPath(rawURL string) string {

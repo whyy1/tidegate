@@ -239,6 +239,19 @@ func mergeNameValues(dst []scenario.NameValue, src KeyValueList, caseFold bool) 
 	return append(kept, active...)
 }
 
+func removeNameValue(dst []scenario.NameValue, target string) []scenario.NameValue {
+	if len(dst) == 0 {
+		return dst
+	}
+	kept := dst[:0]
+	for _, item := range dst {
+		if !strings.EqualFold(item.Name, target) {
+			kept = append(kept, item)
+		}
+	}
+	return kept
+}
+
 func mergeKeyValues(dst, src KeyValueList) KeyValueList {
 	if len(src) == 0 {
 		return dst
@@ -460,12 +473,14 @@ func (r *resolver) step(id string, src *stepSource) (scenario.Step, error) {
 	query = mergeNameValues(query, a.Request.Query, false)
 
 	var basicAuth *scenario.BasicAuth
+	var oauth2Auth *scenario.OAuth2Auth
 	if auth != nil && auth.Type != AuthNone {
-		ba, err := r.applyAuth(joinField(src.field, "auth"), a.Name, auth, &headers, &query)
+		ba, oa, err := r.applyAuth(joinField(src.field, "auth"), a.Name, auth, &headers, &query)
 		if err != nil {
 			return scenario.Step{}, err
 		}
 		basicAuth = ba
+		oauth2Auth = oa
 	}
 	headers = mergeNameValues(headers, a.Request.Headers, true)
 
@@ -522,6 +537,7 @@ func (r *resolver) step(id string, src *stepSource) (scenario.Step, error) {
 		HeaderList: headers,
 		QueryList:  query,
 		BasicAuth:  basicAuth,
+		OAuth2:     oauth2Auth,
 		Body:       body,
 	}
 	return scenario.Step{
@@ -534,39 +550,59 @@ func (r *resolver) step(id string, src *stepSource) (scenario.Step, error) {
 	}, nil
 }
 
-func (r *resolver) applyAuth(field, apiName string, auth *Auth, headers *[]scenario.NameValue, query *[]scenario.NameValue) (*scenario.BasicAuth, error) {
+func (r *resolver) applyAuth(field, apiName string, auth *Auth, headers *[]scenario.NameValue, query *[]scenario.NameValue) (*scenario.BasicAuth, *scenario.OAuth2Auth, error) {
 	switch auth.Type {
 	case AuthBearer:
 		if strings.TrimSpace(auth.Token) == "" {
-			return nil, invalid(field+".token", "接口 %q 的 bearer 鉴权缺少 token", apiName)
+			return nil, nil, invalid(field+".token", "接口 %q 的 bearer 鉴权缺少 token", apiName)
 		}
 		*headers = mergeNameValues(*headers, KeyValueList{{Name: "Authorization", Value: scenario.Scalar("Bearer " + auth.Token)}}, true)
 	case AuthBasic:
 		if auth.Username == "" {
-			return nil, invalid(field+".username", "接口 %q 的 basic 鉴权缺少用户名", apiName)
+			return nil, nil, invalid(field+".username", "接口 %q 的 basic 鉴权缺少用户名", apiName)
 		}
 		user, ok1 := r.expandConst(auth.Username, 0)
 		pass, ok2 := r.expandConst(auth.Password, 0)
 		if ok1 && ok2 {
 			cred := base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
 			*headers = mergeNameValues(*headers, KeyValueList{{Name: "Authorization", Value: scenario.Scalar("Basic " + cred)}}, true)
-			return nil, nil
+			return nil, nil, nil
 		}
-		return &scenario.BasicAuth{Username: auth.Username, Password: auth.Password}, nil
+		*headers = removeNameValue(*headers, "Authorization")
+		return &scenario.BasicAuth{Username: auth.Username, Password: auth.Password}, nil, nil
 	case AuthAPIKey:
 		if !tokenRe.MatchString(auth.Key) {
-			return nil, invalid(field+".key", "接口 %q 的 api_key 参数名 %q 无效", apiName, auth.Key)
+			return nil, nil, invalid(field+".key", "接口 %q 的 api_key 参数名 %q 无效", apiName, auth.Key)
 		}
 		if auth.In != "" && auth.In != "header" && auth.In != "query" {
-			return nil, invalid(field+".in", "取值 %q 无效，只能是 header 或 query", auth.In)
+			return nil, nil, invalid(field+".in", "取值 %q 无效，只能是 header 或 query", auth.In)
 		}
 		if auth.In == "query" {
 			*query = mergeNameValues(*query, KeyValueList{{Name: auth.Key, Value: scenario.Scalar(auth.Value)}}, false)
 		} else {
 			*headers = mergeNameValues(*headers, KeyValueList{{Name: auth.Key, Value: scenario.Scalar(auth.Value)}}, true)
 		}
+	case AuthOAuth2:
+		if strings.TrimSpace(auth.TokenURL) == "" {
+			return nil, nil, invalid(field+".token_url", "接口 %q 的 OAuth 2.0 鉴权缺少 token_url", apiName)
+		}
+		if strings.TrimSpace(auth.ClientID) == "" {
+			return nil, nil, invalid(field+".client_id", "接口 %q 的 OAuth 2.0 鉴权缺少 client_id", apiName)
+		}
+		tokURL, err := r.joinBase(field+".token_url", apiName, auth.TokenURL)
+		if err != nil {
+			return nil, nil, err
+		}
+		*headers = removeNameValue(*headers, "Authorization")
+		return nil, &scenario.OAuth2Auth{
+			TokenURL:     tokURL,
+			ClientID:     auth.ClientID,
+			ClientSecret: auth.ClientSecret,
+			Scope:        auth.Scope,
+			ClientAuth:   auth.ClientAuth,
+		}, nil
 	}
-	return nil, nil
+	return nil, nil, nil
 }
 
 // expandConst substitutes {{name}} references to constant variables. It
@@ -637,6 +673,185 @@ func singleIteration(steps int) scenario.Load {
 	}
 }
 
+type resolvedStepTree struct {
+	step     *ScenarioStep
+	src      *stepSource
+	children []*resolvedStepTree
+	els      []*resolvedStepTree
+	branches []resolvedBranchTree
+}
+
+type resolvedBranchTree struct {
+	name   string
+	weight float64
+	steps  []*resolvedStepTree
+}
+
+func (p *project) collectStepTrees(r *resolver, prefix string, steps []ScenarioStep) ([]*resolvedStepTree, error) {
+	var out []*resolvedStepTree
+	for i := range steps {
+		st := &steps[i]
+		if st.Disabled {
+			continue
+		}
+		field := fmt.Sprintf("%s[%d]", prefix, i)
+		stType := strings.ToLower(strings.TrimSpace(st.Type))
+		node := &resolvedStepTree{step: st}
+		switch stType {
+		case "", "http":
+			a, e, err := p.loadAPI(st.APIID)
+			if err != nil {
+				if errors.Is(err, ErrNotFound) {
+					return nil, invalid(field+".api_id", "引用的接口 %s 不存在", st.APIID)
+				}
+				return nil, err
+			}
+			src := &stepSource{field: field, api: a, folderRel: dirOf(e.rel), step: st}
+			for _, ex := range src.extractors() {
+				if !ex.Disabled {
+					r.mutable[ex.Name] = true
+				}
+			}
+			node.src = src
+		case "group":
+			ch, err := p.collectStepTrees(r, field+".children", st.Children)
+			if err != nil {
+				return nil, err
+			}
+			if len(ch) == 0 {
+				return nil, invalid(field+".children", "事务分组至少需要一个启用的子步骤")
+			}
+			node.children = ch
+		case "loop":
+			ch, err := p.collectStepTrees(r, field+".children", st.Children)
+			if err != nil {
+				return nil, err
+			}
+			if len(ch) == 0 {
+				return nil, invalid(field+".children", "循环步骤至少需要一个启用的子步骤")
+			}
+			node.children = ch
+		case "if":
+			ch, err := p.collectStepTrees(r, field+".children", st.Children)
+			if err != nil {
+				return nil, err
+			}
+			if len(ch) == 0 {
+				return nil, invalid(field+".children", "条件分支至少需要一个启用的子步骤")
+			}
+			els, err := p.collectStepTrees(r, field+".else", st.Else)
+			if err != nil {
+				return nil, err
+			}
+			node.children = ch
+			node.els = els
+		case "weighted":
+			for bIdx := range st.Branches {
+				br := &st.Branches[bIdx]
+				bSteps, err := p.collectStepTrees(r, fmt.Sprintf("%s.branches[%d].steps", field, bIdx), br.Steps)
+				if err != nil {
+					return nil, err
+				}
+				if len(bSteps) == 0 {
+					return nil, invalid(fmt.Sprintf("%s.branches[%d].steps", field, bIdx), "权重分支至少需要一个启用的步骤")
+				}
+				node.branches = append(node.branches, resolvedBranchTree{
+					name:   br.Name,
+					weight: br.Weight,
+					steps:  bSteps,
+				})
+			}
+		}
+		out = append(out, node)
+	}
+	return out, nil
+}
+
+func (r *resolver) buildScenarioSteps(trees []*resolvedStepTree) ([]scenario.Step, error) {
+	out := make([]scenario.Step, 0, len(trees))
+	for _, tn := range trees {
+		st := tn.step
+		stType := strings.ToLower(strings.TrimSpace(st.Type))
+		switch stType {
+		case "", "http":
+			step, err := r.step(st.ID, tn.src)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, step)
+		case "group":
+			ch, err := r.buildScenarioSteps(tn.children)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, scenario.Step{
+				ID:    st.ID,
+				Name:  st.Name,
+				Think: st.Think,
+				Group: &scenario.GroupStep{Children: ch},
+			})
+		case "loop":
+			ch, err := r.buildScenarioSteps(tn.children)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, scenario.Step{
+				ID:    st.ID,
+				Name:  st.Name,
+				Think: st.Think,
+				Loop: &scenario.LoopStep{
+					Count:         st.LoopCount,
+					While:         st.While,
+					MaxIterations: st.MaxIterations,
+					Children:      ch,
+				},
+			})
+		case "if":
+			thenSteps, err := r.buildScenarioSteps(tn.children)
+			if err != nil {
+				return nil, err
+			}
+			var elseSteps []scenario.Step
+			if len(tn.els) > 0 {
+				elseSteps, err = r.buildScenarioSteps(tn.els)
+				if err != nil {
+					return nil, err
+				}
+			}
+			out = append(out, scenario.Step{
+				ID:    st.ID,
+				Name:  st.Name,
+				Think: st.Think,
+				If: &scenario.IfStep{
+					Expr: st.Expr,
+					Then: thenSteps,
+					Else: elseSteps,
+				},
+			})
+		case "weighted":
+			var brs []scenario.WeightedBranch
+			for _, br := range tn.branches {
+				bSteps, err := r.buildScenarioSteps(br.steps)
+				if err != nil {
+					return nil, err
+				}
+				brs = append(brs, scenario.WeightedBranch{
+					Name:   br.name,
+					Weight: br.weight,
+					Steps:  bSteps,
+				})
+			}
+			out = append(out, scenario.Step{
+				ID:       st.ID,
+				Name:     st.Name,
+				Think:    st.Think,
+				Weighted: &scenario.WeightedStep{Branches: brs},
+			})
+		}
+	}
+	return out, nil
+}
+
 func (p *project) resolveScenario(sc *Scenario, opts ResolveOptions) (*Resolved, error) {
 	envID := opts.EnvironmentID
 	if envID == "" {
@@ -653,38 +868,16 @@ func (p *project) resolveScenario(sc *Scenario, opts ResolveOptions) (*Resolved,
 		}
 		def.Data = append(def.Data, d)
 	}
-	var srcs []*stepSource
-	for i := range sc.Steps {
-		st := &sc.Steps[i]
-		if st.Disabled {
-			continue
-		}
-		field := fmt.Sprintf("steps[%d]", i)
-		a, e, err := p.loadAPI(st.APIID)
-		if err != nil {
-			if errors.Is(err, ErrNotFound) {
-				return nil, invalid(field+".api_id", "第 %d 步引用的接口 %s 不存在", i+1, st.APIID)
-			}
-			return nil, err
-		}
-		srcs = append(srcs, &stepSource{field: field, api: a, folderRel: dirOf(e.rel), step: st})
+	trees, err := p.collectStepTrees(r, "steps", sc.Steps)
+	if err != nil {
+		return nil, err
 	}
-	if len(srcs) == 0 {
+	if len(trees) == 0 {
 		return nil, invalid("steps", "场景没有启用的步骤")
 	}
-	for _, src := range srcs {
-		for _, ex := range src.extractors() {
-			if !ex.Disabled {
-				r.mutable[ex.Name] = true
-			}
-		}
-	}
-	for _, src := range srcs {
-		step, err := r.step(src.step.ID, src)
-		if err != nil {
-			return nil, err
-		}
-		def.Steps = append(def.Steps, step)
+	def.Steps, err = r.buildScenarioSteps(trees)
+	if err != nil {
+		return nil, err
 	}
 	def.Variables = r.definitionVars()
 	return r.result(def), nil
@@ -905,7 +1098,7 @@ func (s *Store) PreviewEffectiveAPI(projectID string, in *API, opts ResolveOptio
 				}
 			}
 		}
-		if effAuth.Auth != nil && (effAuth.Auth.Type == AuthBearer || effAuth.Auth.Type == AuthBasic) {
+		if effAuth.Auth != nil && (effAuth.Auth.Type == AuthBearer || effAuth.Auth.Type == AuthBasic || effAuth.Auth.Type == AuthOAuth2) {
 			markOverridden("Authorization")
 		} else if effAuth.Auth != nil && effAuth.Auth.Type == AuthAPIKey && effAuth.Auth.In != "query" && effAuth.Auth.Key != "" {
 			markOverridden(effAuth.Auth.Key)

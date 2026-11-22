@@ -146,6 +146,7 @@ func RunDebug(ctx context.Context, plan *scenario.Plan, opts DebugOptions) (*Deb
 			e.vusMu.Unlock()
 		}
 		e.client.close()
+		e.oauth2.close()
 		e.hardCancel()
 		e.queue.close()
 	}()
@@ -163,7 +164,7 @@ func RunDebug(ctx context.Context, plan *scenario.Plan, opts DebugOptions) (*Deb
 
 	out := &DebugRunResult{
 		Passed: true,
-		Steps:  make([]DebugStepResult, 0, len(e.steps)),
+		Steps:  make([]DebugStepResult, 0, max(1, len(e.stepByIndex))),
 	}
 	if len(e.data) > 0 {
 		dataRows := make(map[string]map[string]string)
@@ -184,27 +185,9 @@ func RunDebug(ctx context.Context, plan *scenario.Plan, opts DebugOptions) (*Deb
 		}
 	}
 
-	for idx, rt := range e.steps {
-		if err := ctx.Err(); err != nil {
-			out.Passed = false
-			return nil, err
-		}
-		stepRes := v.runStepDebug(rt, maxBody)
-		out.Steps = append(out.Steps, stepRes)
-		if !stepRes.Passed {
-			out.Passed = false
-			if opts.StopOnError {
-				break
-			}
-		}
-		if !opts.SkipThink && idx < len(e.steps)-1 && rt.s.Think.Kind != scenario.ThinkNone {
-			if d := rt.s.Think.Duration(v.rng); d > 0 {
-				if !sleepContext(ctx, d) {
-					out.Passed = false
-					return nil, ctx.Err()
-				}
-			}
-		}
+	if _, err := runDebugNodes(ctx, e, v, e.plan.Steps, maxBody, opts, out); err != nil {
+		out.Passed = false
+		return nil, err
 	}
 
 	out.DurationMs = nanosToMs(nanotime() - runStart)
@@ -220,6 +203,88 @@ func RunDebug(ctx context.Context, plan *scenario.Plan, opts DebugOptions) (*Deb
 	return out, nil
 }
 
+func runDebugNodes(
+	ctx context.Context,
+	e *Engine,
+	v *vu,
+	nodes []scenario.Node,
+	maxBody int64,
+	opts DebugOptions,
+	out *DebugRunResult,
+) (bool, error) {
+	for idx, n := range nodes {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		var think scenario.ThinkTime
+		switch st := n.(type) {
+		case *scenario.HTTPStep:
+			rt := e.stepByIndex[st.Index]
+			stepRes := v.runStepDebug(rt, maxBody)
+			out.Steps = append(out.Steps, stepRes)
+			if !stepRes.Passed {
+				out.Passed = false
+				if opts.StopOnError {
+					return false, nil
+				}
+			}
+			think = st.Think
+		case *scenario.GroupNode:
+			cont, err := runDebugNodes(ctx, e, v, st.Children, maxBody, opts, out)
+			if err != nil || !cont {
+				return cont, err
+			}
+			think = st.Think
+		case *scenario.LoopNode:
+			limit := st.MaxIterations
+			if st.Count > 0 && st.Count < limit {
+				limit = st.Count
+			}
+			if limit > 20 {
+				limit = 20
+			}
+			for iter := 0; iter < limit; iter++ {
+				if st.While != nil && !st.While.Eval(&v.env) {
+					break
+				}
+				cont, err := runDebugNodes(ctx, e, v, st.Children, maxBody, opts, out)
+				if err != nil || !cont {
+					return cont, err
+				}
+			}
+			think = st.Think
+		case *scenario.IfNode:
+			branch := st.Else
+			if st.Cond.Eval(&v.env) {
+				branch = st.Then
+			}
+			if len(branch) > 0 {
+				cont, err := runDebugNodes(ctx, e, v, branch, maxBody, opts, out)
+				if err != nil || !cont {
+					return cont, err
+				}
+			}
+			think = st.Think
+		case *scenario.WeightedNode:
+			if br := pickWeightedBranch(st, v.rng); br != nil && len(br.Steps) > 0 {
+				cont, err := runDebugNodes(ctx, e, v, br.Steps, maxBody, opts, out)
+				if err != nil || !cont {
+					return cont, err
+				}
+			}
+			think = st.Think
+		}
+		if !opts.SkipThink && idx < len(nodes)-1 && think.Kind != scenario.ThinkNone {
+			if d := think.Duration(v.rng); d > 0 {
+				if !sleepContext(ctx, d) {
+					return false, ctx.Err()
+				}
+			}
+		}
+	}
+	return true, nil
+}
+
 func (v *vu) runStepDebug(rt *stepRT, maxBody int64) DebugStepResult {
 	s := rt.s
 	cfg := &v.eng.plan.HTTP
@@ -230,7 +295,11 @@ func (v *vu) runStepDebug(rt *stepRT, maxBody int64) DebugStepResult {
 
 	if !v.buildRequest(rt) {
 		res.ErrorKind = metrics.ErrOther.String()
-		res.Error = "URL 无效：" + string(v.urlBuf)
+		if v.buildErr != "" {
+			res.Error = v.buildErr
+		} else {
+			res.Error = "URL 无效：" + string(v.urlBuf)
+		}
 		res.ActualRequest = DebugActualRequest{
 			Method: s.Method,
 			URL:    string(v.urlBuf),

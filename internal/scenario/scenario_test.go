@@ -770,3 +770,192 @@ func ptrScalar(s string) *Scalar {
 	v := Scalar(s)
 	return &v
 }
+
+func TestXPathJSONSchemaNormalThinkJSONDataAndControlFlow(t *testing.T) {
+	// 1. XPath extraction on XML and HTML-like payloads.
+	xmlDoc := []byte(`<root><token>tok-abc</token><item id="first">1</item><item id="second">2</item><form><input name="other" value="x"/><input name="csrf" value="csrf-999"/></form></root>`)
+	xp1, err := CompileXPath("//item[2]/@id")
+	if err != nil {
+		t.Fatalf("CompileXPath item: %v", err)
+	}
+	if got, ok := xp1.Eval(xmlDoc); !ok || got != "second" {
+		t.Fatalf("xpath //item[2]/@id = (%q, %v), want (second, true)", got, ok)
+	}
+	xp2, err := CompileXPath("/root/token/text()")
+	if err != nil {
+		t.Fatalf("CompileXPath token: %v", err)
+	}
+	if got, ok := xp2.Eval(xmlDoc); !ok || got != "tok-abc" {
+		t.Fatalf("xpath /root/token/text() = (%q, %v), want (tok-abc, true)", got, ok)
+	}
+	xp3, err := CompileXPath("//input[@name='csrf']/@value")
+	if err != nil {
+		t.Fatalf("CompileXPath csrf: %v", err)
+	}
+	if got, ok := xp3.Eval(xmlDoc); !ok || got != "csrf-999" {
+		t.Fatalf("xpath csrf = (%q, %v), want (csrf-999, true)", got, ok)
+	}
+
+	// 2. JSON Schema validation pass and fail cases.
+	sc, err := CompileJSONSchema(`{
+		"type": "object",
+		"required": ["id", "score", "code"],
+		"properties": {
+			"id": {"type": "integer", "minimum": 1},
+			"score": {"type": "number", "minimum": 0, "maximum": 100},
+			"code": {"type": "string", "pattern": "^[A-Z]{3}-[0-9]+$"}
+		}
+	}`)
+	if err != nil {
+		t.Fatalf("CompileJSONSchema: %v", err)
+	}
+	if ok, reason := sc.Validate([]byte(`{"id": 7, "score": 92.5, "code": "ORD-42"}`)); !ok {
+		t.Fatalf("expected valid payload, got %q", reason)
+	}
+	if ok, reason := sc.Validate([]byte(`{"id": 0, "score": 92.5, "code": "bad"}`)); ok || reason == "" {
+		t.Fatalf("expected validation failure with message, got (%v, %q)", ok, reason)
+	}
+
+	// 3. Normal think time sampling, .json / .jsonl datasets, and nested control flow compilation.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "items.json"), []byte(`[{"sku":"A1","qty":3},{"sku":"B2","qty":7}]`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "events.jsonl"), []byte("{\"action\":\"view\"}\n{\"action\":\"buy\"}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	def := &Definition{
+		Version: 1,
+		Name:    "m2a-compile",
+		HTTP: HTTPOptions{
+			HTTPVersion:  "http2",
+			ProxyURL:     "http://127.0.0.1:8888",
+			DNSOverrides: map[string]string{"api.local": "127.0.0.1"},
+		},
+		Data: []DataSource{
+			{Name: "items", File: "items.json", Mode: "sequential"},
+			{Name: "events", File: "events.jsonl", Mode: "random"},
+		},
+		Steps: []Step{
+			{
+				ID:   "tx",
+				Name: "下单事务",
+				Group: &GroupStep{
+					Children: []Step{
+						{
+							ID: "fetch_xml",
+							Request: &Request{
+								Method: "GET",
+								URL:    "https://api.local/token",
+							},
+							Extract: []Extract{
+								{Name: "tok", From: "xpath", Expr: "/root/token/text()"},
+							},
+						},
+						{
+							ID: "repeat",
+							Loop: &LoopStep{
+								Count:         2,
+								While:         `{{tok}} != "stop"`,
+								MaxIterations: 5,
+								Children: []Step{
+									{
+										ID: "item_req",
+										Request: &Request{
+											Method: "POST",
+											URL:    "https://api.local/orders",
+											Body: &Body{
+												Type:    "json",
+												Content: `{"sku":"{{items.sku}}","qty":"{{items.qty}}","act":"{{events.action}}"}`,
+											},
+										},
+										Assert: []Assert{
+											{Type: "json_schema", Value: `{"type":"object","required":["ok"]}`},
+										},
+										Think: &Think{
+											Type:   "normal",
+											Min:    Duration(50 * time.Millisecond),
+											Max:    Duration(150 * time.Millisecond),
+											Mean:   Duration(100 * time.Millisecond),
+											Stddev: Duration(20 * time.Millisecond),
+										},
+									},
+								},
+							},
+						},
+						{
+							ID: "branch",
+							If: &IfStep{
+								Expr: "{{tok}} not_empty",
+								Then: []Step{{ID: "then_step", Request: &Request{Method: "GET", URL: "https://api.local/then"}}},
+								Else: []Step{{ID: "else_step", Request: &Request{Method: "GET", URL: "https://api.local/else"}}},
+							},
+						},
+						{
+							ID: "ab",
+							Weighted: &WeightedStep{
+								Branches: []WeightedBranch{
+									{Name: "fast", Weight: 70, Steps: []Step{{ID: "b1_step", Request: &Request{Method: "GET", URL: "https://api.local/b1"}}}},
+									{Name: "slow", Weight: 30, Steps: []Step{{ID: "b2_step", Request: &Request{Method: "GET", URL: "https://api.local/b2"}}}},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		Load: Load{
+			Stages: []Stage{{Duration: Duration(time.Second), Target: 1}},
+			Thresholds: []Threshold{
+				{Metric: "p95_ms", Value: 500, Step: "tx"},
+				{Metric: "error_rate", Value: 0.1, Step: "item_req"},
+			},
+		},
+	}
+
+	p, err := Compile(def, CompileOptions{BaseDir: dir})
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if p.HTTP.HTTPVersion != "http2" || p.HTTP.ProxyURL == nil || p.HTTP.ProxyURL.Host != "127.0.0.1:8888" {
+		t.Fatalf("HTTP options mismatch: %+v", p.HTTP)
+	}
+	if p.HTTP.DNSOverrides["api.local"] != "127.0.0.1" {
+		t.Fatalf("DNSOverrides mismatch: %+v", p.HTTP.DNSOverrides)
+	}
+	if len(p.Data) != 2 || len(p.Data[0].Rows) != 2 || len(p.Data[1].Rows) != 2 {
+		t.Fatalf("JSON/JSONL datasets mismatch: %+v", p.Data)
+	}
+	if len(p.FlatSteps) != 7 || !p.FlatSteps[0].IsGroup || p.FlatSteps[0].ID != "tx" {
+		t.Fatalf("FlatSteps = %+v", p.FlatSteps)
+	}
+	if len(p.MetricsSteps()) != len(p.FlatSteps) {
+		t.Fatalf("MetricsSteps length mismatch: %d vs %d", len(p.MetricsSteps()), len(p.FlatSteps))
+	}
+
+	// Verify normal think time draws stay within [50ms, 150ms] with variance.
+	gn := p.Steps[0].(*GroupNode)
+	ln := gn.Children[1].(*LoopNode)
+	itemStep := ln.Children[0].(*HTTPStep)
+	if itemStep.Think.Kind != ThinkNormal {
+		t.Fatalf("Think kind = %v, want ThinkNormal", itemStep.Think.Kind)
+	}
+	rng := rand.New(rand.NewPCG(1, 2))
+	var firstD time.Duration
+	varied := false
+	for i := 0; i < 100; i++ {
+		d := itemStep.Think.Duration(rng)
+		if d < 50*time.Millisecond || d > 150*time.Millisecond {
+			t.Fatalf("normal think duration out of bounds: %v", d)
+		}
+		if i == 0 {
+			firstD = d
+		} else if d != firstD {
+			varied = true
+		}
+	}
+	if !varied {
+		t.Fatal("normal think durations had zero variance")
+	}
+}

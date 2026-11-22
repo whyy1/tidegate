@@ -7,7 +7,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"net/netip"
 	"net/textproto"
+	"net/url"
 	"os"
 	"regexp"
 	"sort"
@@ -151,6 +153,36 @@ func (c *compiler) compileHTTP() {
 	default:
 		c.fail("http.conn_mode", "取值 %q 无效，只能是 per_vu 或 shared", o.ConnMode)
 	}
+	switch strings.ToLower(strings.TrimSpace(o.HTTPVersion)) {
+	case "", "http1", "http/1.1", "1.1":
+		h.HTTPVersion = "http1"
+	case "http2", "h2", "2":
+		h.HTTPVersion = "http2"
+	case "auto":
+		h.HTTPVersion = "auto"
+	default:
+		c.fail("http.http_version", "取值 %q 无效，支持 http1、http2 或 auto", o.HTTPVersion)
+	}
+	if rawProxy := strings.TrimSpace(o.ProxyURL); rawProxy != "" {
+		pu, err := url.Parse(rawProxy)
+		if err != nil || (pu.Scheme != "http" && pu.Scheme != "https") || pu.Host == "" {
+			c.fail("http.proxy_url", "代理地址 %q 无效，必须是 http:// 或 https:// 地址", rawProxy)
+		} else {
+			h.ProxyURL = pu
+		}
+	}
+	if len(o.DNSOverrides) > 0 {
+		h.DNSOverrides = make(map[string]string, len(o.DNSOverrides))
+		for rawHost, rawIP := range o.DNSOverrides {
+			host := strings.ToLower(strings.TrimSpace(rawHost))
+			addr, err := netip.ParseAddr(strings.TrimSpace(rawIP))
+			if host == "" || err != nil {
+				c.fail("http.dns_overrides."+rawHost, "必须映射有效域名到合法 IP 地址")
+				continue
+			}
+			h.DNSOverrides[host] = addr.String()
+		}
+	}
 	if o.MaxRedirects != nil {
 		h.MaxRedirects = *o.MaxRedirects
 		if h.MaxRedirects < 0 {
@@ -228,11 +260,11 @@ func (c *compiler) compileData() {
 			continue
 		}
 		path := resolvePath(c.opts.BaseDir, src.File)
-		if !strings.EqualFold(pathExt(path), ".csv") {
-			c.fail(where+" 的 file", "目前只支持 CSV 文件")
+		if !IsSupportedDataExt(pathExt(path)) {
+			c.fail(where+" 的 file", "目前只支持 CSV、JSON、JSONL 数据文件")
 			continue
 		}
-		cols, rows, err := LoadCSV(path)
+		cols, rows, err := LoadDataFile(path)
 		if err != nil {
 			c.fail(where+" 的 file", "读取 %s 失败：%v", src.File, err)
 			continue
@@ -265,13 +297,18 @@ func (c *compiler) collectVars() {
 		}
 		c.consts[name] = string(c.def.Variables[name])
 	}
-	for i, st := range c.def.Steps {
+	c.collectExtractVars("", c.def.Steps)
+}
+
+func (c *compiler) collectExtractVars(prefix string, steps []Step) {
+	for i := range steps {
+		st := &steps[i]
 		for j, ex := range st.Extract {
 			if ex.Disabled {
 				continue
 			}
 			if !identRe.MatchString(ex.Name) {
-				c.fail(stepWhere(i, st.ID, fmt.Sprintf("extract[%d].name", j)), "变量名 %q 无效，只能包含字母、数字、下划线和连字符，且不能以数字开头", ex.Name)
+				c.fail(stepWhere(i, st.ID, fmt.Sprintf("%sextract[%d].name", prefix, j)), "变量名 %q 无效，只能包含字母、数字、下划线和连字符，且不能以数字开头", ex.Name)
 				continue
 			}
 			if _, ok := c.slots[ex.Name]; ok {
@@ -288,6 +325,21 @@ func (c *compiler) collectVars() {
 				delete(c.consts, ex.Name)
 			}
 			c.plan.VarInit = append(c.plan.VarInit, init)
+		}
+		if st.Group != nil {
+			c.collectExtractVars(prefix+"group.", st.Group.Children)
+		}
+		if st.Loop != nil {
+			c.collectExtractVars(prefix+"loop.", st.Loop.Children)
+		}
+		if st.If != nil {
+			c.collectExtractVars(prefix+"if.then.", st.If.Then)
+			c.collectExtractVars(prefix+"if.else.", st.If.Else)
+		}
+		if st.Weighted != nil {
+			for bIdx := range st.Weighted.Branches {
+				c.collectExtractVars(fmt.Sprintf("%sweighted[%d].", prefix, bIdx), st.Weighted.Branches[bIdx].Steps)
+			}
 		}
 	}
 }
@@ -350,24 +402,183 @@ func (c *compiler) compileSteps() {
 		c.fail("steps", "至少需要一个步骤")
 		return
 	}
-	ids := map[string]int{}
-	for i := range c.def.Steps {
-		st := &c.def.Steps[i]
+	ids := map[string]string{}
+	c.plan.Steps = c.compileStepList("", c.def.Steps, ids)
+}
+
+func (c *compiler) compileStepList(prefix string, steps []Step, ids map[string]string) []Node {
+	nodes := make([]Node, 0, len(steps))
+	for i := range steps {
+		st := &steps[i]
 		if st.ID == "" {
-			st.ID = fmt.Sprintf("step%d", i+1)
+			st.ID = fmt.Sprintf("%sstep%d", prefix, i+1)
 		} else if !stepIDRe.MatchString(st.ID) {
 			c.fail(stepWhere(i, st.ID, "id"), "只能包含字母、数字、下划线、连字符和点")
 		}
 		if prev, dup := ids[st.ID]; dup {
-			c.fail(stepWhere(i, st.ID, "id"), "和第 %d 步重复", prev+1)
+			c.fail(stepWhere(i, st.ID, "id"), "和%s重复", prev)
 		}
-		ids[st.ID] = i
-		if st.Request == nil {
-			c.fail(stepWhere(i, st.ID, "request"), "缺少 request")
+		ids[st.ID] = fmt.Sprintf("第 %d 步", i+1)
+		if prefix != "" {
+			ids[st.ID] = fmt.Sprintf("%s 第 %d 步", strings.TrimSuffix(prefix, "_"), i+1)
+		}
+
+		kindCount := 0
+		if st.Request != nil {
+			kindCount++
+		}
+		if st.Group != nil {
+			kindCount++
+		}
+		if st.Loop != nil {
+			kindCount++
+		}
+		if st.If != nil {
+			kindCount++
+		}
+		if st.Weighted != nil {
+			kindCount++
+		}
+		switch {
+		case kindCount == 0:
+			c.fail(stepWhere(i, st.ID, "request"), "缺少 request 或控制流配置")
 			continue
+		case kindCount > 1:
+			c.fail(stepWhere(i, st.ID, ""), "同一时间只能设置 request、group、loop、if、weighted 中的一个")
+			continue
+		case st.Request != nil:
+			nodes = append(nodes, c.compileHTTPStep(i, st))
+		case st.Group != nil:
+			nodes = append(nodes, c.compileGroupStep(i, st, ids))
+		case st.Loop != nil:
+			nodes = append(nodes, c.compileLoopStep(i, st, ids))
+		case st.If != nil:
+			nodes = append(nodes, c.compileIfStep(i, st, ids))
+		case st.Weighted != nil:
+			nodes = append(nodes, c.compileWeightedStep(i, st, ids))
 		}
-		c.plan.Steps = append(c.plan.Steps, c.compileHTTPStep(i, st))
 	}
+	return nodes
+}
+
+func (c *compiler) compileGroupStep(i int, st *Step, ids map[string]string) *GroupNode {
+	w := func(field string) string { return stepWhere(i, st.ID, field) }
+	name := st.Name
+	if name == "" {
+		name = st.ID
+	}
+	info := StepInfo{Index: len(c.plan.FlatSteps), ID: st.ID, Name: name, IsGroup: true}
+	c.plan.FlatSteps = append(c.plan.FlatSteps, info)
+	if len(st.Group.Children) == 0 {
+		c.fail(w("group.children"), "事务分组至少需要一个子步骤")
+	}
+	gn := &GroupNode{
+		StepInfo: info,
+		Children: c.compileStepList(st.ID+"_", st.Group.Children, ids),
+	}
+	if st.Think != nil {
+		gn.Think = c.compileThink(w("think"), st.Think)
+		c.plan.ThinkMax += thinkMaxBound(gn.Think)
+	}
+	return gn
+}
+
+func (c *compiler) compileLoopStep(i int, st *Step, ids map[string]string) *LoopNode {
+	w := func(field string) string { return stepWhere(i, st.ID, field) }
+	name := st.Name
+	if name == "" {
+		name = st.ID
+	}
+	ln := &LoopNode{
+		StepInfo:      StepInfo{ID: st.ID, Name: name},
+		Count:         st.Loop.Count,
+		MaxIterations: st.Loop.MaxIterations,
+	}
+	if ln.Count < 0 {
+		c.fail(w("loop.count"), "循环次数不能为负数")
+	}
+	if ln.MaxIterations < 0 {
+		c.fail(w("loop.max_iterations"), "最大循环上限不能为负数")
+	}
+	if strings.TrimSpace(st.Loop.While) != "" {
+		ln.While = c.compileCondition(w("loop.while"), st.Loop.While)
+	}
+	if ln.Count == 0 && ln.While == nil {
+		c.fail(w("loop"), "至少需要设置 count 或 while 条件")
+	}
+	if ln.MaxIterations == 0 {
+		if ln.Count > 0 {
+			ln.MaxIterations = ln.Count
+		} else {
+			ln.MaxIterations = 1000
+		}
+	}
+	if len(st.Loop.Children) == 0 {
+		c.fail(w("loop.children"), "循环步骤至少需要一个子步骤")
+	}
+	ln.Children = c.compileStepList(st.ID+"_", st.Loop.Children, ids)
+	if st.Think != nil {
+		ln.Think = c.compileThink(w("think"), st.Think)
+		c.plan.ThinkMax += thinkMaxBound(ln.Think)
+	}
+	return ln
+}
+
+func (c *compiler) compileIfStep(i int, st *Step, ids map[string]string) *IfNode {
+	w := func(field string) string { return stepWhere(i, st.ID, field) }
+	name := st.Name
+	if name == "" {
+		name = st.ID
+	}
+	cond := c.compileCondition(w("if.expr"), st.If.Expr)
+	if len(st.If.Then) == 0 {
+		c.fail(w("if.then"), "条件分支至少需要一个 then 子步骤")
+	}
+	in := &IfNode{
+		StepInfo: StepInfo{ID: st.ID, Name: name},
+		Cond:     cond,
+		Then:     c.compileStepList(st.ID+"_then_", st.If.Then, ids),
+	}
+	if len(st.If.Else) > 0 {
+		in.Else = c.compileStepList(st.ID+"_else_", st.If.Else, ids)
+	}
+	if st.Think != nil {
+		in.Think = c.compileThink(w("think"), st.Think)
+		c.plan.ThinkMax += thinkMaxBound(in.Think)
+	}
+	return in
+}
+
+func (c *compiler) compileWeightedStep(i int, st *Step, ids map[string]string) *WeightedNode {
+	w := func(field string) string { return stepWhere(i, st.ID, field) }
+	name := st.Name
+	if name == "" {
+		name = st.ID
+	}
+	if len(st.Weighted.Branches) == 0 {
+		c.fail(w("weighted.branches"), "按权重分支至少需要一个分支")
+	}
+	wn := &WeightedNode{StepInfo: StepInfo{ID: st.ID, Name: name}}
+	for bIdx, br := range st.Weighted.Branches {
+		bw := w(fmt.Sprintf("weighted.branches[%d]", bIdx))
+		if math.IsNaN(br.Weight) || math.IsInf(br.Weight, 0) || br.Weight <= 0 {
+			c.fail(bw+".weight", "分支权重必须大于 0")
+		}
+		if len(br.Steps) == 0 {
+			c.fail(bw+".steps", "分支至少需要一个步骤")
+		}
+		wn.TotalWeight += br.Weight
+		wn.Branches = append(wn.Branches, WeightedBranchNode{
+			Name:   br.Name,
+			Weight: br.Weight,
+			Steps:  c.compileStepList(fmt.Sprintf("%s_b%d_", st.ID, bIdx+1), br.Steps, ids),
+		})
+	}
+	if st.Think != nil {
+		wn.Think = c.compileThink(w("think"), st.Think)
+		c.plan.ThinkMax += thinkMaxBound(wn.Think)
+	}
+	return wn
 }
 
 func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
@@ -377,7 +588,9 @@ func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 	if name == "" {
 		name = st.ID
 	}
-	s := &HTTPStep{StepInfo: StepInfo{Index: len(c.plan.Steps), ID: st.ID, Name: name}}
+	info := StepInfo{Index: len(c.plan.FlatSteps), ID: st.ID, Name: name}
+	c.plan.FlatSteps = append(c.plan.FlatSteps, info)
+	s := &HTTPStep{StepInfo: info}
 
 	s.Method = strings.ToUpper(strings.TrimSpace(req.Method))
 	if s.Method == "" {
@@ -466,6 +679,27 @@ func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 			}
 		}
 	}
+	if req.OAuth2 != nil && !hasAuthorization {
+		if strings.TrimSpace(req.OAuth2.TokenURL) == "" {
+			c.fail(w("request.oauth2.token_url"), "OAuth 2.0 鉴权需要 token_url")
+		}
+		if strings.TrimSpace(req.OAuth2.ClientID) == "" {
+			c.fail(w("request.oauth2.client_id"), "OAuth 2.0 鉴权需要 client_id")
+		}
+		ca := strings.ToLower(strings.TrimSpace(req.OAuth2.ClientAuth))
+		if ca == "" {
+			ca = "basic"
+		} else if ca != "basic" && ca != "body" {
+			c.fail(w("request.oauth2.client_auth"), "取值 %q 无效，只能是 basic 或 body", req.OAuth2.ClientAuth)
+		}
+		s.OAuth2 = &OAuth2Plan{
+			TokenURL:     c.template(w("request.oauth2.token_url"), req.OAuth2.TokenURL, escapeNone),
+			ClientID:     c.template(w("request.oauth2.client_id"), req.OAuth2.ClientID, escapeNone),
+			ClientSecret: c.template(w("request.oauth2.client_secret"), req.OAuth2.ClientSecret, escapeNone),
+			Scope:        c.template(w("request.oauth2.scope"), req.OAuth2.Scope, escapeNone),
+			ClientAuth:   ca,
+		}
+	}
 
 	if req.Body != nil {
 		s.Body, s.ContentType = c.compileBody(w, req.Body)
@@ -491,7 +725,7 @@ func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 		}
 		if a, ok := c.compileAssert(w(fmt.Sprintf("assert[%d]", j)), as); ok {
 			switch a.Kind {
-			case AssertBodyContains, AssertJSONPath:
+			case AssertBodyContains, AssertJSONPath, AssertJSONSchema:
 				s.NeedBody = true
 			case AssertStatus:
 				s.HasStatusAssert = true
@@ -501,7 +735,7 @@ func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 	}
 	if st.Think != nil {
 		s.Think = c.compileThink(w("think"), st.Think)
-		c.plan.ThinkMax += s.Think.Max
+		c.plan.ThinkMax += thinkMaxBound(s.Think)
 	}
 	return s
 }
@@ -720,8 +954,15 @@ func (c *compiler) compileExtract(where string, ex Extract) (Extractor, bool) {
 		}
 	case "header":
 		e.Source, e.Header = ExtractHeader, textproto.CanonicalMIMEHeaderKey(strings.TrimSpace(ex.Expr))
+	case "xpath":
+		xp, err := CompileXPath(ex.Expr)
+		if err != nil {
+			c.fail(where+".expr", "%v", err)
+			return e, false
+		}
+		e.Source, e.XPath = ExtractXPath, xp
 	default:
-		c.fail(where+".from", "取值 %q 无效，只能是 jsonpath、regex 或 header", ex.From)
+		c.fail(where+".from", "取值 %q 无效，只能是 jsonpath、regex、xpath 或 header", ex.From)
 		return e, false
 	}
 	if ex.Group != nil && ex.From != "regex" {
@@ -807,16 +1048,33 @@ func (c *compiler) compileAssert(where string, as Assert) (Assertion, bool) {
 			c.fail(where, "jsonpath 断言需要且只能设置 equals、exists、contains 中的一个")
 			return a, false
 		}
+	case "json_schema":
+		a.Kind = AssertJSONSchema
+		schemaRaw := strings.TrimSpace(as.Value)
+		if schemaRaw == "" {
+			schemaRaw = strings.TrimSpace(as.Expr)
+		}
+		if schemaRaw == "" {
+			c.fail(where+".value", "json_schema 断言需要提供 Schema JSON（value）")
+			return a, false
+		}
+		sc, err := CompileJSONSchema(schemaRaw)
+		if err != nil {
+			c.fail(where+".value", "%v", err)
+			return a, false
+		}
+		a.Schema = sc
+		a.Desc = "响应体应符合 JSON Schema"
 	default:
-		c.fail(where+".type", "取值 %q 无效，只能是 status、duration、body_contains 或 jsonpath", as.Type)
+		c.fail(where+".type", "取值 %q 无效，只能是 status、duration、body_contains、jsonpath 或 json_schema", as.Type)
 		return a, false
 	}
 	return a, true
 }
 
 func (c *compiler) compileThink(where string, t *Think) ThinkTime {
-	th := ThinkTime{Min: t.Min.D(), Max: t.Max.D()}
-	if th.Min < 0 || th.Max < 0 {
+	th := ThinkTime{Min: t.Min.D(), Max: t.Max.D(), Mean: t.Mean.D(), Stddev: t.Stddev.D()}
+	if th.Min < 0 || th.Max < 0 || th.Mean < 0 || th.Stddev < 0 {
 		c.fail(where, "思考时间不能是负数")
 	}
 	switch t.Type {
@@ -831,13 +1089,38 @@ func (c *compiler) compileThink(where string, t *Think) ThinkTime {
 		if th.Max < th.Min {
 			c.fail(where+".max", "uniform 的 max 不能小于 min")
 		}
+	case "normal":
+		th.Kind = ThinkNormal
+		if th.Max > 0 && th.Max < th.Min {
+			c.fail(where+".max", "normal 的 max 不能小于 min")
+		}
+		if th.Mean == 0 && th.Max > 0 {
+			th.Mean = (th.Min + th.Max) / 2
+		}
+		if th.Mean <= 0 {
+			c.fail(where+".mean", "normal 思考时间需要大于 0 的 mean（或 max）")
+		}
+		if th.Stddev == 0 {
+			if th.Max > th.Min {
+				th.Stddev = (th.Max - th.Min) / 4
+			} else {
+				th.Stddev = th.Mean / 4
+			}
+		}
 	default:
-		c.fail(where+".type", "取值 %q 无效，只能是 fixed 或 uniform", t.Type)
+		c.fail(where+".type", "取值 %q 无效，只能是 fixed、uniform 或 normal", t.Type)
 	}
-	if th.Max == 0 {
+	if th.Kind != ThinkNormal && th.Max == 0 {
 		th.Kind = ThinkNone
 	}
 	return th
+}
+
+func thinkMaxBound(th ThinkTime) time.Duration {
+	if th.Kind == ThinkNormal && th.Max == 0 {
+		return th.Mean + 3*th.Stddev
+	}
+	return th.Max
 }
 
 func (c *compiler) compileLoad() {
@@ -929,8 +1212,7 @@ func (c *compiler) compileLoad() {
 		stepRef := strings.TrimSpace(raw.Step)
 		if stepRef != "" {
 			matched := false
-			for _, node := range c.plan.Steps {
-				info := node.Info()
+			for _, info := range c.plan.MetricsSteps() {
 				if info.ID == stepRef || info.Name == stepRef {
 					matched = true
 					break

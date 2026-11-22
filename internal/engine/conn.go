@@ -29,8 +29,10 @@ type countConn struct {
 	// Set once when dialing; read by the connection's user.
 	dns, connect, tlsDur time.Duration
 	tls                  bool
-	// requests counts requests sent on this connection (owner only).
+	// requests counts requests sent on this connection (owner only in fastClient).
 	requests int
+	// stdReqs safely counts requests in stdClient across shared HTTP/2 pools.
+	stdReqs atomic.Int64
 }
 
 func (c *countConn) Read(p []byte) (int, error) {
@@ -94,14 +96,15 @@ type dnsEntry struct {
 // dnsCache resolves each host once (or every refresh interval) and hands
 // out its addresses round robin. Lookups are lock free after the first.
 type dnsCache struct {
-	refresh time.Duration
-	timeout time.Duration
-	mu      sync.Mutex
-	entries atomic.Pointer[map[string]*dnsEntry]
+	refresh   time.Duration
+	timeout   time.Duration
+	overrides map[string]string
+	mu        sync.Mutex
+	entries   atomic.Pointer[map[string]*dnsEntry]
 }
 
-func newDNSCache(refresh, timeout time.Duration) *dnsCache {
-	c := &dnsCache{refresh: refresh, timeout: timeout}
+func newDNSCache(refresh, timeout time.Duration, overrides map[string]string) *dnsCache {
+	c := &dnsCache{refresh: refresh, timeout: timeout, overrides: overrides}
 	m := map[string]*dnsEntry{}
 	c.entries.Store(&m)
 	return c
@@ -165,6 +168,12 @@ func (c *dnsCache) resolve(ctx context.Context, o *scenario.Origin, e *dnsEntry)
 		e.err = &net.DNSError{Err: "no such host", Name: o.HostName, IsNotFound: true}
 		return true
 	}
+	if ov, ok := c.overrides[strings.ToLower(o.HostName)]; ok {
+		if ip, err := netip.ParseAddr(ov); err == nil {
+			e.addrs = []string{netip.AddrPortFrom(ip.Unmap(), mustPort(o.Port)).String()}
+			return false
+		}
+	}
 	if c.timeout > 0 {
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, c.timeout)
@@ -222,7 +231,7 @@ func newDialer(e *Engine, cfg *scenario.HTTPConfig) *dialer {
 	return &dialer{
 		eng: e,
 		nd:  net.Dialer{Timeout: cfg.ConnectTimeout, KeepAlive: 30 * time.Second},
-		dns: newDNSCache(cfg.DNSRefresh, cfg.ConnectTimeout),
+		dns: newDNSCache(cfg.DNSRefresh, cfg.ConnectTimeout, cfg.DNSOverrides),
 		tlsBase: &tls.Config{
 			InsecureSkipVerify: cfg.InsecureSkipVerify,
 			NextProtos:         []string{"http/1.1"}, // never negotiate HTTP/2

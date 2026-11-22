@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -477,6 +478,137 @@ func TestStopRunAbort(t *testing.T) {
 			}
 		case <-deadline:
 			t.Fatal("timed out waiting for aborted run to end")
+		}
+	}
+}
+
+func TestControllerMixAndEstimate(t *testing.T) {
+	var buyHits, sellHits atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/buy":
+			buyHits.Add(1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":"buy"}`))
+		case "/sell":
+			sellHits.Add(1)
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":"sell"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, st, rdb := newTestController(t, nil)
+	waitForAgents(t, c, 1)
+
+	proj, err := c.EnsureDefaultProject()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Two files using the SAME dataset alias "users" across two mixed scenarios.
+	if _, err := st.SaveFile(proj.ID, "buyers.csv", strings.NewReader("uid\nb1\nb2\n"), ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveFile(proj.ID, "sellers.json", strings.NewReader(`[{"uid":"s1"},{"uid":"s2"}]`), ""); err != nil {
+		t.Fatal(err)
+	}
+
+	buyAPI, err := st.CreateAPI(proj.ID, &store.API{
+		Name: "buy",
+		Request: store.APIRequest{
+			Method: "GET",
+			URL:    srv.URL + "/buy?u={{users.uid}}",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sellAPI, err := st.CreateAPI(proj.ID, &store.API{
+		Name: "sell",
+		Request: store.APIRequest{
+			Method: "GET",
+			URL:    srv.URL + "/sell?u={{users.uid}}",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scenBuy, err := st.CreateScenario(proj.ID, &store.Scenario{
+		Name: "buy-flow",
+		Data: []scenario.DataSource{{Name: "users", File: "buyers.csv", Mode: "sequential"}},
+		// Colliding step ID "step1" across both scenarios tests mix ID rewriting.
+		Steps: []store.ScenarioStep{{ID: "step1", APIID: buyAPI.ID}},
+		Load: scenario.Load{
+			Mode:   "vus",
+			Stages: []scenario.Stage{{Duration: scenario.Duration(400 * time.Millisecond), Target: 2}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scenSell, err := st.CreateScenario(proj.ID, &store.Scenario{
+		Name:  "sell-flow",
+		Data:  []scenario.DataSource{{Name: "users", File: "sellers.json", Mode: "sequential"}},
+		Steps: []store.ScenarioStep{{ID: "step1", APIID: sellAPI.ID}},
+		Load: scenario.Load{
+			Mode:   "vus",
+			Stages: []scenario.Stage{{Duration: scenario.Duration(400 * time.Millisecond), Target: 2}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	mixReq := StartRunRequest{
+		Mix: []ScenarioMixItem{
+			{ScenarioID: scenBuy.ID, Weight: 70},
+			{ScenarioID: scenSell.ID, Weight: 30},
+		},
+		Load: &scenario.Load{
+			Mode:   "vus",
+			Stages: []scenario.Stage{{Duration: scenario.Duration(500 * time.Millisecond), Target: 4}},
+		},
+	}
+
+	est, err := c.EstimateRun(context.Background(), proj.ID, mixReq)
+	if err != nil {
+		t.Fatalf("EstimateRun(mix): %v", err)
+	}
+	if est.StepCount < 2 || est.EstimatedPeakRPS <= 0 || est.OnlineAgents < 1 {
+		t.Fatalf("unexpected mix EstimateRun: %+v", est)
+	}
+
+	sub := c.Subscribe()
+	defer sub.Close()
+	sub.SubscribeRun("*")
+
+	run, err := c.StartRun(context.Background(), proj.ID, mixReq)
+	if err != nil {
+		t.Fatalf("StartRun(mix): %v", err)
+	}
+
+	deadline := time.After(8 * time.Second)
+	for {
+		select {
+		case ev := <-sub.C():
+			if ev.RunID == run.ID && ev.Type == EventRunStatus && !ev.Status.Active() {
+				if ev.Status != store.RunFinished {
+					t.Fatalf("mix run ended with status %s (%s)", ev.Status, ev.Error)
+				}
+				if buyHits.Load() == 0 || sellHits.Load() == 0 {
+					t.Fatalf("expected both weighted scenarios hit, buy=%d sell=%d", buyHits.Load(), sellHits.Load())
+				}
+				saved, err := rdb.GetRun(context.Background(), run.ID)
+				if err != nil || saved.Status != store.RunFinished {
+					t.Fatalf("GetRun(%s) = %+v, err=%v", run.ID, saved, err)
+				}
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for mix run completion")
 		}
 	}
 }

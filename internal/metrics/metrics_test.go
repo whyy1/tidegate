@@ -374,3 +374,49 @@ func BenchmarkCollect(b *testing.B) {
 		c.Collect(s, 5)
 	}
 }
+
+func TestGroupStepExcludedFromTotalAndBinaryV2(t *testing.T) {
+	steps := []StepInfo{
+		{ID: "tx", Name: "事务组", IsGroup: true},
+		{ID: "login", Name: "登录"},
+		{ID: "query", Name: "查询"},
+	}
+	s := NewSnapshot(steps, false)
+	s.Duration = time.Second
+	s.Steps[0].Requests = 10
+	s.Steps[0].Latency.Record(25 * time.Millisecond)
+	s.Steps[1].Requests = 10
+	s.Steps[1].BytesSent = 500
+	s.Steps[1].Latency.Record(10 * time.Millisecond)
+	s.Steps[2].Requests = 10
+	s.Steps[2].BytesSent = 700
+	s.Steps[2].Latency.Record(12 * time.Millisecond)
+	s.ComputeTotal()
+
+	if s.Total.Requests != 20 {
+		t.Fatalf("Total.Requests = %d, want 20 (group must not double-count)", s.Total.Requests)
+	}
+	if s.Total.BytesSent != 1200 {
+		t.Fatalf("Total.BytesSent = %d, want 1200", s.Total.BytesSent)
+	}
+
+	b, err := s.MarshalBinary()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got Snapshot
+	if err := got.UnmarshalBinary(b); err != nil {
+		t.Fatal(err)
+	}
+	if !got.Steps[0].IsGroup || got.Steps[1].IsGroup {
+		t.Fatalf("IsGroup round-trip failed: %+v", got.Steps)
+	}
+	if got.Total.Requests != 20 {
+		t.Fatalf("decoded Total.Requests = %d, want 20", got.Total.Requests)
+	}
+
+	v := got.View()
+	if v.IsGroup || !v.Steps[0].IsGroup || v.Steps[1].IsGroup || v.Requests != 20 {
+		t.Fatalf("view IsGroup mismatch: %+v", v)
+	}
+}

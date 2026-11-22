@@ -136,6 +136,7 @@ type DebugScenarioRequest struct {
 // StartRunRequest starts a distributed or local load test run.
 type StartRunRequest struct {
 	ScenarioID    string                     `json:"scenario_id,omitempty"`
+	Mix           []ScenarioMixItem          `json:"mix,omitempty"`
 	APIID         string                     `json:"api_id,omitempty"`
 	API           *store.API                 `json:"api,omitempty"`
 	EnvironmentID string                     `json:"environment_id,omitempty"`
@@ -574,6 +575,9 @@ func (c *Controller) resolveRunDefinition(projectID string, req StartRunRequest)
 			EnvironmentID: req.EnvironmentID,
 		}
 	)
+	if len(req.Mix) > 0 {
+		return c.resolveMixRun(projectID, req)
+	}
 	if req.ScenarioID == "" && req.APIID == "" && req.API == nil {
 		return nil, runMeta, userErr(ErrInvalidInput, "请指定压测场景或接口", nil)
 	}

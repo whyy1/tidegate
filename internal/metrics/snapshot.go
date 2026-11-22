@@ -8,8 +8,9 @@ import (
 
 // StepInfo identifies one step of a plan.
 type StepInfo struct {
-	ID   string
-	Name string
+	ID      string
+	Name    string
+	IsGroup bool
 }
 
 // StepStats are the aggregated measurements of one step (or of all steps
@@ -17,6 +18,7 @@ type StepInfo struct {
 type StepStats struct {
 	ID            string
 	Name          string
+	IsGroup       bool
 	Requests      int64
 	Status        map[int]int64 // response status code -> count
 	Errors        [NumErrorKinds]int64
@@ -107,6 +109,7 @@ func NewSnapshot(steps []StepInfo, schedDelay bool) *Snapshot {
 	s := &Snapshot{Total: newStepStats("", "total"), Steps: make([]StepStats, len(steps))}
 	for i, st := range steps {
 		s.Steps[i] = newStepStats(st.ID, st.Name)
+		s.Steps[i].IsGroup = st.IsGroup
 	}
 	if schedDelay {
 		s.SchedDelay = NewHistogram()
@@ -114,10 +117,14 @@ func NewSnapshot(steps []StepInfo, schedDelay bool) *Snapshot {
 	return s
 }
 
-// ComputeTotal rebuilds Total from the per-step stats.
+// ComputeTotal rebuilds Total from the per-step stats. Group steps wrap
+// child requests and are excluded so Total never double-counts.
 func (s *Snapshot) ComputeTotal() {
 	s.Total = newStepStats("", "total")
 	for i := range s.Steps {
+		if s.Steps[i].IsGroup {
+			continue
+		}
 		s.Total.merge(&s.Steps[i])
 	}
 }
@@ -181,6 +188,7 @@ func (s *Snapshot) Merge(o *Snapshot, mode MergeMode) error {
 	s.OverheadReceived += o.OverheadReceived
 	s.Total.merge(&o.Total)
 	for i := range s.Steps {
+		s.Steps[i].IsGroup = s.Steps[i].IsGroup || o.Steps[i].IsGroup
 		s.Steps[i].merge(&o.Steps[i])
 	}
 	s.Samples = append(s.Samples, o.Samples...)

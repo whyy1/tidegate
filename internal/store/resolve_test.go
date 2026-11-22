@@ -270,3 +270,167 @@ func ptrScalar(s string) *scenario.Scalar {
 	v := scenario.Scalar(s)
 	return &v
 }
+
+func TestStoreM2AControlFlowOAuth2AndDataPreview(t *testing.T) {
+	s := openTestStore(t)
+	pr, err := s.CreateProject(&Project{
+		Name: "m2a-store",
+		Variables: KeyValueList{
+			{Name: "oauth_secret", Value: "sec-123", Secret: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := s.CreateEnvironment(pr.ID, &Environment{
+		Name:    "test",
+		BaseURL: "https://api.example.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// JSON array and JSONL data file preview.
+	if _, err := s.SaveFile(pr.ID, "items.json", strings.NewReader(`[{"sku":"A1","qty":3},{"sku":"B2","qty":7}]`), ""); err != nil {
+		t.Fatal(err)
+	}
+	pvJSON, err := s.PreviewFile(pr.ID, "items.json", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pvJSON.IsCSV || len(pvJSON.Columns) != 2 || len(pvJSON.Rows) != 2 {
+		t.Fatalf("items.json preview mismatch: %+v", pvJSON)
+	}
+
+	if _, err := s.SaveFile(pr.ID, "events.jsonl", strings.NewReader("{\"action\":\"view\",\"id\":1}\n{\"action\":\"buy\",\"id\":2}\n"), ""); err != nil {
+		t.Fatal(err)
+	}
+	pvJSONL, err := s.PreviewFile(pr.ID, "events.jsonl", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !pvJSONL.IsCSV || len(pvJSONL.Columns) != 2 || len(pvJSONL.Rows) != 2 {
+		t.Fatalf("events.jsonl preview mismatch: %+v", pvJSONL)
+	}
+
+	// OAuth2 inheritance + PreviewEffectiveAPI.
+	folder, err := s.CreateFolder(pr.ID, &Folder{
+		Name: "AuthGroup",
+		Headers: KeyValueList{
+			{Name: "Authorization", Value: "stale-header"},
+		},
+		Auth: &Auth{
+			Type:         AuthOAuth2,
+			TokenURL:     "https://auth.example.com/oauth/token",
+			ClientID:     "app-1",
+			ClientSecret: "{{oauth_secret}}",
+			Scope:        "read write",
+			ClientAuth:   "body",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiItem, err := s.CreateAPI(pr.ID, &API{
+		Name:     "protected",
+		FolderID: folder.ID,
+		Request: APIRequest{
+			Method: "POST",
+			URL:    "/items",
+			Body: &APIBody{
+				Type:    "json",
+				Content: `{"sku":"{{items.sku}}","act":"{{events.action}}"}`,
+			},
+		},
+		Extract: []scenario.Extract{
+			{Name: "flag", From: "jsonpath", Expr: "$.flag"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pvEff, err := s.PreviewEffectiveAPI(pr.ID, apiItem, ResolveOptions{EnvironmentID: env.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pvEff.EffectiveAuth.Auth == nil || pvEff.EffectiveAuth.Auth.Type != AuthOAuth2 || pvEff.EffectiveAuth.Source != "folder" {
+		t.Fatalf("EffectiveAuth mismatch: %+v", pvEff.EffectiveAuth)
+	}
+	if len(pvEff.InheritedHeaders) != 1 || !pvEff.InheritedHeaders[0].Overridden {
+		t.Fatalf("expected inherited Authorization header marked Overridden by OAuth2, got %+v", pvEff.InheritedHeaders)
+	}
+
+	// Nested Scenario control-flow persistence & resolution.
+	scen, err := s.CreateScenario(pr.ID, &Scenario{
+		Name:          "flow-scenario",
+		EnvironmentID: env.ID,
+		Data: []scenario.DataSource{
+			{Name: "items", File: "items.json", Mode: "sequential"},
+			{Name: "events", File: "events.jsonl", Mode: "random"},
+		},
+		Steps: []ScenarioStep{
+			{
+				ID:   "tx",
+				Type: "group",
+				Name: "交易事务",
+				Children: []ScenarioStep{
+					{ID: "call_main", APIID: apiItem.ID},
+					{
+						ID:        "lp",
+						Type:      "loop",
+						LoopCount: 2,
+						Children: []ScenarioStep{
+							{ID: "loop_call", APIID: apiItem.ID},
+						},
+					},
+					{
+						ID:   "cond",
+						Type: "if",
+						Expr: `{{flag}} == "1"`,
+						Children: []ScenarioStep{
+							{ID: "then_call", APIID: apiItem.ID},
+						},
+						Else: []ScenarioStep{
+							{ID: "else_call", APIID: apiItem.ID},
+						},
+					},
+					{
+						ID:   "wt",
+						Type: "weighted",
+						Branches: []ScenarioWeightedBranch{
+							{Name: "A", Weight: 60, Steps: []ScenarioStep{{ID: "wa", APIID: apiItem.ID}}},
+							{Name: "B", Weight: 40, Steps: []ScenarioStep{{ID: "wb", APIID: apiItem.ID}}},
+						},
+					},
+				},
+			},
+		},
+		Load: scenario.Load{
+			Mode:   "vus",
+			Stages: []scenario.Stage{{Duration: scenario.Duration(time.Second), Target: 1}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CreateScenario: %v", err)
+	}
+
+	res, err := s.ResolveScenario(pr.ID, scen.ID, ResolveOptions{})
+	if err != nil {
+		t.Fatalf("ResolveScenario: %v", err)
+	}
+	if len(res.Files) != 2 {
+		t.Fatalf("expected 2 resolved data files, got %+v", res.Files)
+	}
+	plan, err := res.Compile()
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	if len(plan.FlatSteps) != 7 || !plan.FlatSteps[0].IsGroup || plan.FlatSteps[0].ID != "tx" {
+		t.Fatalf("FlatSteps = %+v", plan.FlatSteps)
+	}
+	gn := plan.Steps[0].(*scenario.GroupNode)
+	hs := gn.Children[0].(*scenario.HTTPStep)
+	if hs.OAuth2 == nil || hs.OAuth2.ClientSecret.Literal() != "sec-123" || hs.OAuth2.ClientAuth != "body" {
+		t.Fatalf("OAuth2 resolution mismatch: %+v", hs.OAuth2)
+	}
+}

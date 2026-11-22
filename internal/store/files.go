@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"tidegate/internal/scenario"
 )
 
 // MaxFileSize bounds uploaded data files.
@@ -242,7 +244,8 @@ func (s *Store) PreviewFile(projectID, name string, maxRows int) (*FilePreview, 
 		defer f.Close()
 
 		pv := &FilePreview{Name: df.Name, Size: df.Size}
-		if strings.EqualFold(filepath.Ext(name), ".csv") {
+		ext := strings.ToLower(filepath.Ext(name))
+		if ext == ".csv" {
 			pv.IsCSV = true
 			// Strip optional UTF-8 BOM without loading the whole file into memory.
 			var bom [3]byte
@@ -282,6 +285,23 @@ func (s *Store) PreviewFile(projectID, name string, maxRows int) (*FilePreview, 
 			}
 			out = pv
 			return nil
+		}
+		if ext == ".json" || ext == ".jsonl" || ext == ".ndjson" {
+			if cols, rows, lerr := scenario.LoadDataFile(path); lerr == nil {
+				pv.IsCSV = true
+				pv.Columns = cols
+				pv.TotalRows = len(rows)
+				if len(rows) > maxRows {
+					pv.Rows = rows[:maxRows]
+				} else {
+					pv.Rows = rows
+				}
+				out = pv
+				return nil
+			} else if ext != ".json" {
+				return invalid("file", "解析数据文件失败：%v", lerr)
+			}
+			// Single JSON object or arbitrary JSON text falls through to text snippet preview.
 		}
 
 		const maxSnippet = 4096

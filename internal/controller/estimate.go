@@ -36,15 +36,22 @@ func (c *Controller) EstimateRun(ctx context.Context, projectID string, req Star
 		return nil, userErr(ErrInvalidInput, err.Error(), err)
 	}
 
-	stepCount := len(plan.Steps)
-	avgReqBytes := estimatePlanAvgRequestBytes(plan)
+	expectedReqs, leafSteps := estimateNodesProfile(plan.Steps)
+	stepCount := len(leafSteps)
+	if stepCount == 0 {
+		stepCount = len(plan.Steps)
+	}
+	if expectedReqs < 1 {
+		expectedReqs = float64(max(1, stepCount))
+	}
+	avgReqBytes := estimateLeafAvgRequestBytes(leafSteps)
 
 	var estPeakRPS float64
 	if plan.Load.Mode == scenario.LoadRate {
-		estPeakRPS = plan.Load.PeakTarget * float64(stepCount)
+		estPeakRPS = plan.Load.PeakTarget * expectedReqs
 	} else {
 		cycleSec := math.Max(plan.ThinkMax.Seconds()+0.05, 0.05)
-		estPeakRPS = plan.Load.PeakTarget * float64(stepCount) / cycleSec
+		estPeakRPS = plan.Load.PeakTarget * expectedReqs / cycleSec
 	}
 	estUplinkBps := estPeakRPS * float64(avgReqBytes) * 8
 
@@ -98,17 +105,53 @@ func (c *Controller) EstimateRun(ctx context.Context, projectID string, req Star
 	}, nil
 }
 
-func estimatePlanAvgRequestBytes(plan *scenario.Plan) int64 {
-	if plan == nil || len(plan.Steps) == 0 {
+func estimateNodesProfile(nodes []scenario.Node) (float64, []*scenario.HTTPStep) {
+	var expectedReqs float64
+	var leaves []*scenario.HTTPStep
+	for _, node := range nodes {
+		switch st := node.(type) {
+		case *scenario.HTTPStep:
+			expectedReqs += 1
+			leaves = append(leaves, st)
+		case *scenario.GroupNode:
+			r, sub := estimateNodesProfile(st.Children)
+			expectedReqs += r
+			leaves = append(leaves, sub...)
+		case *scenario.LoopNode:
+			r, sub := estimateNodesProfile(st.Children)
+			mult := 1
+			if st.Count > 0 {
+				mult = min(st.Count, 100)
+			}
+			expectedReqs += r * float64(mult)
+			leaves = append(leaves, sub...)
+		case *scenario.IfNode:
+			rt, stThen := estimateNodesProfile(st.Then)
+			re, stElse := estimateNodesProfile(st.Else)
+			leaves = append(leaves, stThen...)
+			leaves = append(leaves, stElse...)
+			expectedReqs += (rt + re) / 2
+		case *scenario.WeightedNode:
+			totalW := st.TotalWeight
+			if totalW <= 0 {
+				totalW = 1
+			}
+			for _, br := range st.Branches {
+				rb, sub := estimateNodesProfile(br.Steps)
+				expectedReqs += rb * (br.Weight / totalW)
+				leaves = append(leaves, sub...)
+			}
+		}
+	}
+	return expectedReqs, leaves
+}
+
+func estimateLeafAvgRequestBytes(leaves []*scenario.HTTPStep) int64 {
+	if len(leaves) == 0 {
 		return 1
 	}
 	var total int64
-	for _, node := range plan.Steps {
-		hs, ok := node.(*scenario.HTTPStep)
-		if !ok {
-			total += 128
-			continue
-		}
+	for _, hs := range leaves {
 		methodLen := int64(len(hs.Method))
 		if methodLen == 0 {
 			methodLen = 3
@@ -135,7 +178,7 @@ func estimatePlanAvgRequestBytes(plan *scenario.Plan) int64 {
 		for _, h := range hs.Headers {
 			stepBytes += int64(len(h.Name) + 2 + templateEstLen(h.Value) + 2)
 		}
-		if hs.BasicUser != nil || hs.BasicPass != nil {
+		if hs.BasicUser != nil || hs.BasicPass != nil || hs.OAuth2 != nil {
 			stepBytes += 48
 		}
 		if hs.Body != nil {
@@ -143,7 +186,7 @@ func estimatePlanAvgRequestBytes(plan *scenario.Plan) int64 {
 		}
 		total += stepBytes
 	}
-	avg := total / int64(len(plan.Steps))
+	avg := total / int64(len(leaves))
 	if avg < 1 {
 		return 1
 	}

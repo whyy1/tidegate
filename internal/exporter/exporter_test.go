@@ -539,3 +539,108 @@ func TestExportPostmanAndHARRoundTrip(t *testing.T) {
 		t.Fatalf("unexpected HAR preview: %+v", harPrev.Report)
 	}
 }
+
+func TestExportOpenAPIOAuth2ExamplesAndResponseFields(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := st.CreateProject(&store.Project{Name: "OAuth2 Docs"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPI(pr.ID, &store.API{
+		Name: "GetProfile",
+		Auth: &store.Auth{
+			Type:         store.AuthOAuth2,
+			TokenURL:     "https://auth.example.com/oauth/token",
+			ClientID:     "client-pub",
+			ClientSecret: "super-oauth-client-secret",
+			Scope:        "profile email",
+		},
+		Request: store.APIRequest{
+			Method: "GET",
+			URL:    "https://api.example.com/v1/profile",
+		},
+		Examples: []store.APIResponseExample{
+			{
+				Name:        "ok_json",
+				Status:      200,
+				ContentType: "application/json",
+				Headers: store.KeyValueList{
+					{Name: "X-RateLimit", Value: "100", Description: "剩余配额"},
+					{Name: "Set-Cookie", Value: "sid=secret-cookie"},
+				},
+				Body: `{"user":{"id":"u1","age":30}}`,
+			},
+			{
+				Name:        "cached_json",
+				Status:      200,
+				ContentType: "application/json",
+				Body:        `{"user":{"id":"u2","age":25}}`,
+			},
+			{
+				Name:   "not_found",
+				Status: 404,
+				Body:   `{"error":"missing"}`,
+			},
+		},
+		ResponseFields: []store.APIFieldDoc{
+			{Path: "$.user.id", Type: "string", Required: true, Description: "用户 ID"},
+			{Path: "$.user.age", Type: "integer", Description: "年龄"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := ExportOpenAPI(st, pr.ID, false)
+	if err != nil {
+		t.Fatalf("ExportOpenAPI: %v", err)
+	}
+	if strings.Contains(string(raw), "super-oauth-client-secret") || strings.Contains(string(raw), "secret-cookie") {
+		t.Fatalf("exported OpenAPI leaked OAuth2 client secret or sensitive response header: %s", raw)
+	}
+
+	var doc map[string]any
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		t.Fatal(err)
+	}
+	comps, _ := doc["components"].(map[string]any)
+	schemes, _ := comps["securitySchemes"].(map[string]any)
+	oauthScheme, _ := schemes["oauth2ClientCredentials"].(map[string]any)
+	if oauthScheme == nil || oauthScheme["type"] != "oauth2" {
+		t.Fatalf("missing oauth2ClientCredentials scheme: %+v", schemes)
+	}
+	flows, _ := oauthScheme["flows"].(map[string]any)
+	cc, _ := flows["clientCredentials"].(map[string]any)
+	if cc["tokenUrl"] != "https://auth.example.com/oauth/token" {
+		t.Fatalf("unexpected clientCredentials flow: %+v", cc)
+	}
+
+	paths, _ := doc["paths"].(map[string]any)
+	pathItem, _ := paths["/v1/profile"].(map[string]any)
+	op, _ := pathItem["get"].(map[string]any)
+	resps, _ := op["responses"].(map[string]any)
+	r200, _ := resps["200"].(map[string]any)
+	if r200 == nil || resps["404"] == nil {
+		t.Fatalf("expected 200 and 404 responses, got %+v", resps)
+	}
+	hdrs, _ := r200["headers"].(map[string]any)
+	if hdrs["X-RateLimit"] == nil || hdrs["Set-Cookie"] != nil {
+		t.Fatalf("unexpected response headers export: %+v", hdrs)
+	}
+	content, _ := r200["content"].(map[string]any)
+	appJSON, _ := content["application/json"].(map[string]any)
+	examples, _ := appJSON["examples"].(map[string]any)
+	if examples["ok_json"] == nil || examples["cached_json"] == nil {
+		t.Fatalf("expected named response examples, got %+v", appJSON)
+	}
+	schema, _ := appJSON["schema"].(map[string]any)
+	props, _ := schema["properties"].(map[string]any)
+	userObj, _ := props["user"].(map[string]any)
+	userProps, _ := userObj["properties"].(map[string]any)
+	reqList, _ := userObj["required"].([]any)
+	if userProps["id"] == nil || userProps["age"] == nil || len(reqList) != 1 || reqList[0] != "id" {
+		t.Fatalf("unexpected ResponseFields schema: %+v", schema)
+	}
+}

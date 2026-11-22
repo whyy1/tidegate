@@ -86,6 +86,7 @@ type vu struct {
 	gzSrc     bytes.Reader
 	gzBuf     []byte
 	headerFn  func(string) ([]byte, bool)
+	buildErr  string
 }
 
 func newVU(e *Engine, id int) *vu {
@@ -195,21 +196,124 @@ func (v *vu) iteration(planned int64) {
 		v.rec.RecordSchedDelay(time.Duration(nanotime() - planned))
 	}
 	v.pickRows()
-	for _, st := range v.eng.steps {
-		if v.stopped() {
-			return
-		}
-		if !v.runHTTP(st, planned) {
-			return
-		}
-		planned = 0
-		if th := st.s.Think; th.Kind != scenario.ThinkNone {
-			if !v.sleep(th.Duration(v.rng)) {
+	if v.eng.flatHTTPOnly {
+		for _, st := range v.eng.steps {
+			if v.stopped() {
 				return
+			}
+			ok, _ := v.runHTTP(st, planned)
+			if !ok {
+				return
+			}
+			planned = 0
+			if th := st.s.Think; th.Kind != scenario.ThinkNone {
+				if !v.sleep(th.Duration(v.rng)) {
+					return
+				}
+			}
+		}
+		v.rec.RecordIteration()
+		return
+	}
+	var iterErr metrics.ErrorKind = metrics.ErrNone
+	if !v.execNodes(v.eng.plan.Steps, &planned, &iterErr) {
+		return
+	}
+	v.rec.RecordIteration()
+}
+
+func (v *vu) execNodes(nodes []scenario.Node, planned *int64, stepErr *metrics.ErrorKind) bool {
+	for _, n := range nodes {
+		if v.stopped() {
+			return false
+		}
+		var think scenario.ThinkTime
+		switch st := n.(type) {
+		case *scenario.HTTPStep:
+			rt := v.eng.stepByIndex[st.Index]
+			ok, k := v.runHTTP(rt, *planned)
+			*planned = 0
+			if k != metrics.ErrNone && *stepErr == metrics.ErrNone {
+				*stepErr = k
+			}
+			if !ok {
+				return false
+			}
+			think = st.Think
+		case *scenario.GroupNode:
+			t0 := nanotime()
+			childErr := metrics.ErrNone
+			if !v.execNodes(st.Children, planned, &childErr) {
+				return false
+			}
+			mrec := metrics.RequestRecord{
+				Step:    st.Index,
+				Error:   childErr,
+				Latency: time.Duration(nanotime() - t0),
+			}
+			v.rec.RecordRequest(&mrec)
+			if childErr != metrics.ErrNone && *stepErr == metrics.ErrNone {
+				*stepErr = childErr
+			}
+			think = st.Think
+		case *scenario.LoopNode:
+			for iter := 0; iter < st.MaxIterations; iter++ {
+				if st.Count > 0 && iter >= st.Count {
+					break
+				}
+				if st.While != nil && !st.While.Eval(&v.env) {
+					break
+				}
+				if v.stopped() || v.eng.requestsExhausted() {
+					return false
+				}
+				if !v.execNodes(st.Children, planned, stepErr) {
+					return false
+				}
+			}
+			think = st.Think
+		case *scenario.IfNode:
+			branch := st.Else
+			if st.Cond.Eval(&v.env) {
+				branch = st.Then
+			}
+			if len(branch) > 0 && !v.execNodes(branch, planned, stepErr) {
+				return false
+			}
+			think = st.Think
+		case *scenario.WeightedNode:
+			if br := pickWeightedBranch(st, v.rng); br != nil && len(br.Steps) > 0 {
+				if !v.execNodes(br.Steps, planned, stepErr) {
+					return false
+				}
+			}
+			think = st.Think
+		}
+		if think.Kind != scenario.ThinkNone {
+			if !v.sleep(think.Duration(v.rng)) {
+				return false
 			}
 		}
 	}
-	v.rec.RecordIteration()
+	return true
+}
+
+func pickWeightedBranch(wn *scenario.WeightedNode, rng *rand.Rand) *scenario.WeightedBranchNode {
+	if wn == nil || len(wn.Branches) == 0 {
+		return nil
+	}
+	if len(wn.Branches) == 1 || wn.TotalWeight <= 0 {
+		return &wn.Branches[0]
+	}
+	target := rng.Float64() * wn.TotalWeight
+	var acc float64
+	for i := range wn.Branches {
+		acc += wn.Branches[i].Weight
+		if target < acc {
+			return &wn.Branches[i]
+		}
+	}
+	return &wn.Branches[len(wn.Branches)-1]
 }
 
 // takeRequestSlot enforces load.max_requests. It returns false when all
@@ -242,6 +346,7 @@ func isConnectPhaseErr(err error) bool {
 
 // buildRequest renders the step's request into the VU's buffers.
 func (v *vu) buildRequest(rt *stepRT) bool {
+	v.buildErr = ""
 	s := rt.s
 	q := &v.req
 	env := &v.env
@@ -315,6 +420,20 @@ func (v *vu) buildRequest(rt *stepRT) bool {
 		v.authBuf = v.authBuf[:need]
 		copy(v.authBuf, "Basic ")
 		base64.StdEncoding.Encode(v.authBuf[len("Basic "):], v.rawAuth)
+		q.headers = append(q.headers, reqHeader{name: "Authorization", canon: "Authorization", value: v.authBuf})
+	} else if s.OAuth2 != nil {
+		tok, err := v.eng.oauth2.token(v.eng.hardCtx, s.OAuth2, env)
+		if err != nil {
+			v.buildErr = "获取 OAuth 2.0 访问令牌失败：" + err.Error()
+			return false
+		}
+		need := len("Bearer ") + len(tok)
+		if cap(v.authBuf) < need {
+			v.authBuf = make([]byte, need)
+		}
+		v.authBuf = v.authBuf[:need]
+		copy(v.authBuf, "Bearer ")
+		copy(v.authBuf[len("Bearer "):], tok)
 		q.headers = append(q.headers, reqHeader{name: "Authorization", canon: "Authorization", value: v.authBuf})
 	}
 
@@ -457,19 +576,24 @@ func (v *vu) followRedirect() bool {
 }
 
 // runHTTP executes one step, including redirects, extraction, assertions
-// and recording. It returns false when the iteration must end.
-func (v *vu) runHTTP(rt *stepRT, planned int64) bool {
+// and recording. It returns false when the iteration must end, plus the step's
+// error classification.
+func (v *vu) runHTTP(rt *stepRT, planned int64) (bool, metrics.ErrorKind) {
 	e := v.eng
 	s := rt.s
 	cfg := &e.plan.HTTP
 	if !v.buildRequest(rt) {
-		v.recordFailure(rt, planned, metrics.ErrOther, "URL 无效："+string(v.urlBuf))
-		return true
+		msg := v.buildErr
+		if msg == "" {
+			msg = "URL 无效：" + string(v.urlBuf)
+		}
+		v.recordFailure(rt, planned, metrics.ErrOther, msg)
+		return true, metrics.ErrOther
 	}
 	stepStart := planned
 	for hop := 0; ; hop++ {
 		if !v.takeRequestSlot() {
-			return false
+			return false, metrics.ErrNone
 		}
 		if cfg.Cookies {
 			v.addCookies(rt)
@@ -479,7 +603,7 @@ func (v *vu) runHTTP(rt *stepRT, planned int64) bool {
 		err := v.client.do(&v.req, r)
 		if e.aborted.Load() {
 			v.finishRequestSlot()
-			return false // interrupted by a hard stop: not recorded
+			return false, metrics.ErrNone // interrupted by a hard stop: not recorded
 		}
 		start := r.start
 		if hop == 0 && planned != 0 {
@@ -496,7 +620,7 @@ func (v *vu) runHTTP(rt *stepRT, planned int64) bool {
 			if e.plan.Load.Mode == scenario.LoadVUs && cfg.ConnectBackoff > 0 && isConnectPhaseErr(err) && !v.stopped() {
 				v.sleep(cfg.ConnectBackoff)
 			}
-			return true
+			return true, kind
 		}
 		if cfg.Cookies {
 			v.storeCookies()
@@ -506,7 +630,7 @@ func (v *vu) runHTTP(rt *stepRT, planned int64) bool {
 				v.record(s.Index, start, metrics.ErrNone)
 				v.finishRequestSlot()
 				if v.stopped() {
-					return false // stopping: do not start the next hop
+					return false, metrics.ErrNone // stopping: do not start the next hop
 				}
 				continue
 			}
@@ -515,7 +639,7 @@ func (v *vu) runHTTP(rt *stepRT, planned int64) bool {
 		v.record(s.Index, start, kind)
 		v.maybeSample(rt, kind, msg, start)
 		v.finishRequestSlot()
-		return true
+		return true, kind
 	}
 }
 

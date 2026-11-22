@@ -16,6 +16,7 @@ type PhaseView struct {
 type StepView struct {
 	ID            string               `json:"id,omitempty"`
 	Name          string               `json:"name,omitempty"`
+	IsGroup       bool                 `json:"is_group,omitempty"`
 	Requests      int64                `json:"requests"`
 	RPS           float64              `json:"rps"`
 	Errors        int64                `json:"errors"`
@@ -78,6 +79,7 @@ func (s *StepStats) view(d time.Duration) StepView {
 	v := StepView{
 		ID:            s.ID,
 		Name:          s.Name,
+		IsGroup:       s.IsGroup,
 		Requests:      s.Requests,
 		RPS:           round2(perSecond(s.Requests, d)),
 		Errors:        s.ErrorCount(),

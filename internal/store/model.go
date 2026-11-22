@@ -111,6 +111,8 @@ const (
 	AuthBasic = "basic"
 	// AuthAPIKey sends a key in a header or a query parameter.
 	AuthAPIKey = "api_key"
+	// AuthOAuth2 obtains and caches tokens via OAuth 2.0 Client Credentials.
+	AuthOAuth2 = "oauth2"
 )
 
 // Auth describes request credentials. Values may contain {{variables}}.
@@ -124,6 +126,12 @@ type Auth struct {
 	Value string `yaml:"value,omitempty" json:"value,omitempty"`
 	// In is "header" (default) or "query" for api_key auth.
 	In string `yaml:"in,omitempty" json:"in,omitempty"`
+	// OAuth 2.0 Client Credentials settings.
+	TokenURL     string `yaml:"token_url,omitempty" json:"token_url,omitempty"`
+	ClientID     string `yaml:"client_id,omitempty" json:"client_id,omitempty"`
+	ClientSecret string `yaml:"client_secret,omitempty" json:"client_secret,omitempty"`
+	Scope        string `yaml:"scope,omitempty" json:"scope,omitempty"`
+	ClientAuth   string `yaml:"client_auth,omitempty" json:"client_auth,omitempty"`
 }
 
 // inherits reports whether the auth defers to the parent folder.
@@ -166,18 +174,37 @@ type APIBody struct {
 	ContentType string              `yaml:"content_type,omitempty" json:"content_type,omitempty"`
 }
 
+// APIResponseExample documents a concrete example response on an API.
+type APIResponseExample struct {
+	Name        string       `yaml:"name" json:"name"`
+	Status      int          `yaml:"status" json:"status"`
+	ContentType string       `yaml:"content_type,omitempty" json:"content_type,omitempty"`
+	Headers     KeyValueList `yaml:"headers,omitempty" json:"headers,omitempty"`
+	Body        string       `yaml:"body,omitempty" json:"body,omitempty"`
+}
+
+// APIFieldDoc documents a response field path for OpenAPI documentation export.
+type APIFieldDoc struct {
+	Path        string `yaml:"path" json:"path"`
+	Type        string `yaml:"type,omitempty" json:"type,omitempty"`
+	Required    bool   `yaml:"required,omitempty" json:"required,omitempty"`
+	Description string `yaml:"description,omitempty" json:"description,omitempty"`
+}
+
 // API is one request definition, stored as <name>.api.yaml. Templates
 // ({{variables}}) are kept as written; they are resolved when a scenario is
 // built.
 type API struct {
-	ID          string             `yaml:"id" json:"id"`
-	Name        string             `yaml:"name" json:"name"`
-	Order       int64              `yaml:"order" json:"order"`
-	Description string             `yaml:"description,omitempty" json:"description,omitempty"`
-	Request     APIRequest         `yaml:"request" json:"request"`
-	Auth        *Auth              `yaml:"auth,omitempty" json:"auth,omitempty"`
-	Extract     []scenario.Extract `yaml:"extract,omitempty" json:"extract,omitempty"`
-	Assert      []scenario.Assert  `yaml:"assert,omitempty" json:"assert,omitempty"`
+	ID             string               `yaml:"id" json:"id"`
+	Name           string               `yaml:"name" json:"name"`
+	Order          int64                `yaml:"order" json:"order"`
+	Description    string               `yaml:"description,omitempty" json:"description,omitempty"`
+	Request        APIRequest           `yaml:"request" json:"request"`
+	Auth           *Auth                `yaml:"auth,omitempty" json:"auth,omitempty"`
+	Extract        []scenario.Extract   `yaml:"extract,omitempty" json:"extract,omitempty"`
+	Assert         []scenario.Assert    `yaml:"assert,omitempty" json:"assert,omitempty"`
+	Examples       []APIResponseExample `yaml:"examples,omitempty" json:"examples,omitempty"`
+	ResponseFields []APIFieldDoc        `yaml:"response_fields,omitempty" json:"response_fields,omitempty"`
 	// FolderID is the containing folder, empty for the top level. It is
 	// derived from the location and changed only by Move.
 	FolderID string `yaml:"-" json:"folder_id"`
@@ -211,17 +238,33 @@ type Scenario struct {
 	Version string                `yaml:"-" json:"version"`
 }
 
-// ScenarioStep runs one API, optionally with overridden request parts.
+// ScenarioWeightedBranch is a weighted choice in a "weighted" ScenarioStep.
+type ScenarioWeightedBranch struct {
+	Name   string         `yaml:"name,omitempty" json:"name,omitempty"`
+	Weight float64        `yaml:"weight" json:"weight"`
+	Steps  []ScenarioStep `yaml:"steps,omitempty" json:"steps,omitempty"`
+}
+
+// ScenarioStep runs one API or control-flow construct ("http", "group", "loop",
+// "if", or "weighted").
 type ScenarioStep struct {
 	// ID is the step ID in the resolved scenario; one is assigned on save
 	// when empty.
 	ID string `yaml:"id" json:"id"`
 	// Name overrides the API name as the step name.
-	Name     string          `yaml:"name,omitempty" json:"name,omitempty"`
-	APIID    string          `yaml:"api_id" json:"api_id"`
-	Disabled bool            `yaml:"disabled,omitempty" json:"disabled,omitempty"`
-	Override *StepOverride   `yaml:"override,omitempty" json:"override,omitempty"`
-	Think    *scenario.Think `yaml:"think,omitempty" json:"think,omitempty"`
+	Name          string                   `yaml:"name,omitempty" json:"name,omitempty"`
+	Type          string                   `yaml:"type,omitempty" json:"type,omitempty"`
+	APIID         string                   `yaml:"api_id,omitempty" json:"api_id,omitempty"`
+	Disabled      bool                     `yaml:"disabled,omitempty" json:"disabled,omitempty"`
+	Override      *StepOverride            `yaml:"override,omitempty" json:"override,omitempty"`
+	Think         *scenario.Think          `yaml:"think,omitempty" json:"think,omitempty"`
+	LoopCount     int                      `yaml:"loop_count,omitempty" json:"loop_count,omitempty"`
+	While         string                   `yaml:"while,omitempty" json:"while,omitempty"`
+	MaxIterations int                      `yaml:"max_iterations,omitempty" json:"max_iterations,omitempty"`
+	Expr          string                   `yaml:"expr,omitempty" json:"expr,omitempty"`
+	Children      []ScenarioStep           `yaml:"children,omitempty" json:"children,omitempty"`
+	Else          []ScenarioStep           `yaml:"else,omitempty" json:"else,omitempty"`
+	Branches      []ScenarioWeightedBranch `yaml:"branches,omitempty" json:"branches,omitempty"`
 }
 
 // StepOverride changes parts of the referenced API for one step. Empty
@@ -325,10 +368,24 @@ func validateAuthDraft(field string, a *Auth) error {
 		if a.In != "" && a.In != "header" && a.In != "query" {
 			return invalid(field+".in", "取值 %q 无效，只能是 header 或 query", a.In)
 		}
+	case AuthOAuth2:
+		ca := strings.ToLower(strings.TrimSpace(a.ClientAuth))
+		if ca != "" && ca != "basic" && ca != "body" {
+			return invalid(field+".client_auth", "取值 %q 无效，只能是 basic 或 body", a.ClientAuth)
+		}
 	default:
-		return invalid(field+".type", "取值 %q 无效，只能是 inherit、none、bearer、basic 或 api_key", a.Type)
+		return invalid(field+".type", "取值 %q 无效，只能是 inherit、none、bearer、basic、api_key 或 oauth2", a.Type)
 	}
-	for name, v := range map[string]string{"token": a.Token, "username": a.Username, "password": a.Password, "value": a.Value} {
+	for name, v := range map[string]string{
+		"token":         a.Token,
+		"username":      a.Username,
+		"password":      a.Password,
+		"value":         a.Value,
+		"token_url":     a.TokenURL,
+		"client_id":     a.ClientID,
+		"client_secret": a.ClientSecret,
+		"scope":         a.Scope,
+	} {
 		if strings.ContainsAny(v, "\r\n") {
 			return invalid(field+"."+name, "值不能包含换行")
 		}
@@ -420,27 +477,60 @@ func (s *Scenario) normalize() error {
 		}
 	}
 	used := map[string]bool{}
-	for _, st := range s.Steps {
+	collectUsedStepIDs(s.Steps, used)
+	seen := map[string]bool{}
+	next := 1
+	return normalizeScenarioSteps("steps", s.Steps, used, seen, &next)
+}
+
+func cloneScenarioSteps(in []ScenarioStep) []ScenarioStep {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]ScenarioStep, len(in))
+	for i, st := range in {
+		cp := st
+		cp.Children = cloneScenarioSteps(st.Children)
+		cp.Else = cloneScenarioSteps(st.Else)
+		if len(st.Branches) > 0 {
+			cp.Branches = make([]ScenarioWeightedBranch, len(st.Branches))
+			for j, br := range st.Branches {
+				cp.Branches[j] = ScenarioWeightedBranch{
+					Name:   br.Name,
+					Weight: br.Weight,
+					Steps:  cloneScenarioSteps(br.Steps),
+				}
+			}
+		}
+		out[i] = cp
+	}
+	return out
+}
+
+func collectUsedStepIDs(steps []ScenarioStep, used map[string]bool) {
+	for _, st := range steps {
 		if st.ID != "" {
 			used[st.ID] = true
 		}
-	}
-	seen := map[string]bool{}
-	next := 1
-	for i := range s.Steps {
-		st := &s.Steps[i]
-		field := fmt.Sprintf("steps[%d]", i)
-		id, ok := normalizeID(st.APIID)
-		if !ok {
-			return invalid(field+".api_id", "接口 ID %q 无效", st.APIID)
+		collectUsedStepIDs(st.Children, used)
+		collectUsedStepIDs(st.Else, used)
+		for _, br := range st.Branches {
+			collectUsedStepIDs(br.Steps, used)
 		}
-		st.APIID = id
+	}
+}
+
+func normalizeScenarioSteps(prefix string, steps []ScenarioStep, used, seen map[string]bool, next *int) error {
+	for i := range steps {
+		st := &steps[i]
+		field := fmt.Sprintf("%s[%d]", prefix, i)
 		st.Name = strings.TrimSpace(st.Name)
+		st.Type = strings.ToLower(strings.TrimSpace(st.Type))
 		if st.ID == "" {
-			for used[fmt.Sprintf("step%d", next)] {
-				next++
+			for used[fmt.Sprintf("step%d", *next)] {
+				*next++
 			}
-			st.ID = fmt.Sprintf("step%d", next)
+			st.ID = fmt.Sprintf("step%d", *next)
 			used[st.ID] = true
 		}
 		if !stepIDRe.MatchString(st.ID) {
@@ -450,16 +540,64 @@ func (s *Scenario) normalize() error {
 			return invalid(field+".id", "步骤 ID %q 重复", st.ID)
 		}
 		seen[st.ID] = true
-		if o := st.Override; o != nil {
-			if m := strings.TrimSpace(o.Method); m != "" && !tokenRe.MatchString(m) {
-				return invalid(field+".override.method", "请求方法 %q 无效", o.Method)
+
+		switch st.Type {
+		case "", "http":
+			id, ok := normalizeID(st.APIID)
+			if !ok {
+				return invalid(field+".api_id", "接口 ID %q 无效", st.APIID)
 			}
-			if err := validateHeadersList(field+".override.headers", o.Headers); err != nil {
+			st.APIID = id
+			if o := st.Override; o != nil {
+				if m := strings.TrimSpace(o.Method); m != "" && !tokenRe.MatchString(m) {
+					return invalid(field+".override.method", "请求方法 %q 无效", o.Method)
+				}
+				if err := validateHeadersList(field+".override.headers", o.Headers); err != nil {
+					return err
+				}
+				if err := validateAuthDraft(field+".override.auth", o.Auth); err != nil {
+					return err
+				}
+			}
+		case "group":
+			if err := normalizeScenarioSteps(field+".children", st.Children, used, seen, next); err != nil {
 				return err
 			}
-			if err := validateAuthDraft(field+".override.auth", o.Auth); err != nil {
+		case "loop":
+			if st.LoopCount < 0 {
+				return invalid(field+".loop_count", "循环次数不能为负数")
+			}
+			if st.MaxIterations < 0 {
+				return invalid(field+".max_iterations", "最大循环次数不能为负数")
+			}
+			if err := normalizeScenarioSteps(field+".children", st.Children, used, seen, next); err != nil {
 				return err
 			}
+		case "if":
+			if strings.TrimSpace(st.Expr) == "" {
+				return invalid(field+".expr", "条件分支表达式不能为空")
+			}
+			if err := normalizeScenarioSteps(field+".children", st.Children, used, seen, next); err != nil {
+				return err
+			}
+			if err := normalizeScenarioSteps(field+".else", st.Else, used, seen, next); err != nil {
+				return err
+			}
+		case "weighted":
+			if len(st.Branches) == 0 {
+				return invalid(field+".branches", "权重分支至少需要一个分支")
+			}
+			for bIdx := range st.Branches {
+				bf := fmt.Sprintf("%s.branches[%d]", field, bIdx)
+				if st.Branches[bIdx].Weight <= 0 {
+					return invalid(bf+".weight", "分支权重必须大于 0")
+				}
+				if err := normalizeScenarioSteps(bf+".steps", st.Branches[bIdx].Steps, used, seen, next); err != nil {
+					return err
+				}
+			}
+		default:
+			return invalid(field+".type", "步骤类型 %q 无效，只能是 http、group、loop、if 或 weighted", st.Type)
 		}
 	}
 	return nil

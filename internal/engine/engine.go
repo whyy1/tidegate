@@ -65,15 +65,18 @@ type Options struct {
 
 // Engine runs one plan once.
 type Engine struct {
-	plan      *scenario.Plan
-	opts      Options
-	steps     []*stepRT
-	collector *metrics.Collector
-	shards    int
-	dialer    *dialer
-	client    clientFactory
-	data      []*dataState
-	seed      uint64
+	plan         *scenario.Plan
+	opts         Options
+	steps        []*stepRT
+	stepByIndex  []*stepRT
+	flatHTTPOnly bool
+	collector    *metrics.Collector
+	shards       int
+	dialer       *dialer
+	client       clientFactory
+	oauth2       *oauth2Cache
+	data         []*dataState
+	seed         uint64
 
 	prof     atomic.Pointer[profile]
 	target   atomic.Uint64 // float64 bits of the current target
@@ -141,6 +144,9 @@ func New(plan *scenario.Plan, opts Options) (*Engine, error) {
 	if opts.Client != ClientFast && opts.Client != ClientStd {
 		return nil, fmt.Errorf("未知的 HTTP 客户端 %q，可选 fast 或 std", opts.Client)
 	}
+	if plan.HTTP.HTTPVersion == "http2" || plan.HTTP.HTTPVersion == "auto" || plan.HTTP.ProxyURL != nil {
+		opts.Client = ClientStd
+	}
 	if opts.SlowThreshold == 0 {
 		opts.SlowThreshold = time.Second
 	}
@@ -182,15 +188,26 @@ func New(plan *scenario.Plan, opts Options) (*Engine, error) {
 	_, _ = crand.Read(seed[:])
 	e.seed = binary.LittleEndian.Uint64(seed[:])
 
-	infos := make([]metrics.StepInfo, len(plan.Steps))
-	for i, n := range plan.Steps {
-		st, ok := n.(*scenario.HTTPStep)
-		if !ok {
-			return nil, fmt.Errorf("engine: step %d has unsupported kind %d", i, n.Kind())
-		}
-		e.steps = append(e.steps, newStepRT(st))
-		infos[i] = metrics.StepInfo{ID: st.ID, Name: st.Name}
+	flatInfos := plan.MetricsSteps()
+	infos := make([]metrics.StepInfo, len(flatInfos))
+	for i, st := range flatInfos {
+		infos[i] = metrics.StepInfo{ID: st.ID, Name: st.Name, IsGroup: st.IsGroup}
 	}
+	e.stepByIndex = make([]*stepRT, len(flatInfos))
+	if err := e.initStepRTs(plan.Steps); err != nil {
+		return nil, err
+	}
+	e.flatHTTPOnly = len(plan.Steps) == len(flatInfos)
+	for _, n := range plan.Steps {
+		if n.Kind() != scenario.NodeHTTP {
+			e.flatHTTPOnly = false
+			break
+		}
+	}
+	if e.flatHTTPOnly {
+		e.steps = e.stepByIndex
+	}
+
 	open := plan.Load.Mode == scenario.LoadRate
 	e.collector = metrics.NewCollector(e.shards, infos, open, opts.SamplesPerSecond)
 	e.summary = e.collector.NewSnapshot()
@@ -223,6 +240,7 @@ func New(plan *scenario.Plan, opts Options) (*Engine, error) {
 	}
 
 	e.dialer = newDialer(e, &plan.HTTP)
+	e.oauth2 = newOAuth2Cache(&plan.HTTP, e.dialer)
 	switch opts.Client {
 	case ClientStd:
 		e.client = newStdClient(e, e.dialer)
@@ -232,6 +250,42 @@ func New(plan *scenario.Plan, opts Options) (*Engine, error) {
 	e.queue.notify = make(chan struct{}, 1)
 	go e.queue.forward(e.out)
 	return e, nil
+}
+
+func (e *Engine) initStepRTs(nodes []scenario.Node) error {
+	for i, n := range nodes {
+		switch st := n.(type) {
+		case *scenario.HTTPStep:
+			if st.Index < 0 || st.Index >= len(e.stepByIndex) {
+				return fmt.Errorf("engine: step %d has invalid flat index %d", i, st.Index)
+			}
+			e.stepByIndex[st.Index] = newStepRT(st)
+		case *scenario.GroupNode:
+			if err := e.initStepRTs(st.Children); err != nil {
+				return err
+			}
+		case *scenario.LoopNode:
+			if err := e.initStepRTs(st.Children); err != nil {
+				return err
+			}
+		case *scenario.IfNode:
+			if err := e.initStepRTs(st.Then); err != nil {
+				return err
+			}
+			if err := e.initStepRTs(st.Else); err != nil {
+				return err
+			}
+		case *scenario.WeightedNode:
+			for _, br := range st.Branches {
+				if err := e.initStepRTs(br.Steps); err != nil {
+					return err
+				}
+			}
+		default:
+			return fmt.Errorf("engine: step %d has unsupported kind %d", i, n.Kind())
+		}
+	}
+	return nil
 }
 
 // Snapshots delivers one snapshot per second (the last one covers the
@@ -319,6 +373,7 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 	stopWatch()
 	e.client.close()
+	e.oauth2.close()
 	close(e.aggStop)
 	<-aggDone
 	e.hardCancel()

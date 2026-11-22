@@ -15,6 +15,9 @@ import (
 type Plan struct {
 	Name  string
 	Steps []Node
+	// FlatSteps lists every transaction Group (IsGroup=true) and leaf HTTP step
+	// in deterministic DFS order so metrics.Snapshot slots never double-count.
+	FlatSteps []StepInfo
 	// Vars are the names of mutable variables (targets of extractors);
 	// VarInit holds their initial values. Constant variables are inlined
 	// into templates and do not appear here.
@@ -27,20 +30,40 @@ type Plan struct {
 	ThinkMax time.Duration
 }
 
+// MetricsSteps returns the ordered flat step metadata for metrics snapshots.
+func (p *Plan) MetricsSteps() []StepInfo {
+	if len(p.FlatSteps) > 0 {
+		return p.FlatSteps
+	}
+	out := make([]StepInfo, len(p.Steps))
+	for i, st := range p.Steps {
+		out[i] = st.Info()
+	}
+	return out
+}
+
 // NodeKind is the type of a step node.
 type NodeKind uint8
 
 const (
-	// NodeHTTP is an HTTP request step. Future kinds (groups, loops,
-	// conditions, other protocols) are added here.
+	// NodeHTTP is an HTTP request step.
 	NodeHTTP NodeKind = iota + 1
+	// NodeGroup wraps a sequence of steps as a measured transaction group.
+	NodeGroup
+	// NodeLoop repeats child steps by fixed count or while condition.
+	NodeLoop
+	// NodeIf branches execution based on a runtime condition.
+	NodeIf
+	// NodeWeighted randomly selects one weighted branch per execution.
+	NodeWeighted
 )
 
 // StepInfo identifies a step.
 type StepInfo struct {
-	Index int // position in Plan.Steps, also the metrics step index
-	ID    string
-	Name  string
+	Index   int // position in Plan.FlatSteps, also the metrics step index
+	ID      string
+	Name    string
+	IsGroup bool
 }
 
 // Node is an executable element of a scenario.
@@ -67,6 +90,7 @@ func (m ConnMode) String() string {
 // HTTPConfig are the resolved connection options.
 type HTTPConfig struct {
 	ConnMode           ConnMode
+	HTTPVersion        string
 	KeepAlive          bool
 	MaxRequestsPerConn int
 	FollowRedirects    bool
@@ -82,6 +106,8 @@ type HTTPConfig struct {
 	// connection stays reusable. 0 keeps the whole body when needed.
 	MaxBodyRead    int64
 	DNSRefresh     time.Duration
+	DNSOverrides   map[string]string
+	ProxyURL       *url.URL
 	ConnectBackoff time.Duration
 }
 
@@ -253,6 +279,15 @@ type HeaderTemplate struct {
 	Value     *Template
 }
 
+// OAuth2Plan configures compiled OAuth 2.0 Client Credentials evaluation.
+type OAuth2Plan struct {
+	TokenURL     *Template
+	ClientID     *Template
+	ClientSecret *Template
+	Scope        *Template
+	ClientAuth   string
+}
+
 // HTTPStep is a compiled HTTP request step.
 type HTTPStep struct {
 	StepInfo
@@ -261,6 +296,7 @@ type HTTPStep struct {
 	Headers     []HeaderTemplate
 	BasicUser   *Template // non-nil when BasicAuth needs runtime evaluation
 	BasicPass   *Template
+	OAuth2      *OAuth2Plan
 	Body        *Template // nil when there is no body
 	ContentType string    // default Content-Type when the user set none
 	Extract     []Extractor
@@ -284,6 +320,71 @@ func (s *HTTPStep) Kind() NodeKind { return NodeHTTP }
 // Info implements Node.
 func (s *HTTPStep) Info() StepInfo { return s.StepInfo }
 
+// GroupNode executes its children in sequence and records aggregate transaction metrics.
+type GroupNode struct {
+	StepInfo
+	Children []Node
+	Think    ThinkTime
+}
+
+// Kind implements Node.
+func (g *GroupNode) Kind() NodeKind { return NodeGroup }
+
+// Info implements Node.
+func (g *GroupNode) Info() StepInfo { return g.StepInfo }
+
+// LoopNode repeats its children for a fixed count or while a condition holds.
+type LoopNode struct {
+	StepInfo
+	Count         int
+	While         *Condition
+	MaxIterations int
+	Children      []Node
+	Think         ThinkTime
+}
+
+// Kind implements Node.
+func (l *LoopNode) Kind() NodeKind { return NodeLoop }
+
+// Info implements Node.
+func (l *LoopNode) Info() StepInfo { return l.StepInfo }
+
+// IfNode conditionally executes Then or Else steps.
+type IfNode struct {
+	StepInfo
+	Cond  *Condition
+	Then  []Node
+	Else  []Node
+	Think ThinkTime
+}
+
+// Kind implements Node.
+func (n *IfNode) Kind() NodeKind { return NodeIf }
+
+// Info implements Node.
+func (n *IfNode) Info() StepInfo { return n.StepInfo }
+
+// WeightedBranchNode is one branch in a WeightedNode.
+type WeightedBranchNode struct {
+	Name   string
+	Weight float64
+	Steps  []Node
+}
+
+// WeightedNode picks one weighted branch per execution.
+type WeightedNode struct {
+	StepInfo
+	Branches    []WeightedBranchNode
+	TotalWeight float64
+	Think       ThinkTime
+}
+
+// Kind implements Node.
+func (w *WeightedNode) Kind() NodeKind { return NodeWeighted }
+
+// Info implements Node.
+func (w *WeightedNode) Info() StepInfo { return w.StepInfo }
+
 // ThinkKind is the think time distribution.
 type ThinkKind uint8
 
@@ -291,13 +392,16 @@ const (
 	ThinkNone ThinkKind = iota
 	ThinkFixed
 	ThinkUniform
+	ThinkNormal
 )
 
 // ThinkTime is a compiled think time.
 type ThinkTime struct {
-	Kind ThinkKind
-	Min  time.Duration
-	Max  time.Duration
+	Kind   ThinkKind
+	Min    time.Duration
+	Max    time.Duration
+	Mean   time.Duration
+	Stddev time.Duration
 }
 
 // Duration draws one think time.
@@ -310,6 +414,18 @@ func (t ThinkTime) Duration(r *rand.Rand) time.Duration {
 			return t.Min
 		}
 		return t.Min + time.Duration(r.Int64N(int64(t.Max-t.Min)+1))
+	case ThinkNormal:
+		d := time.Duration(float64(t.Mean) + r.NormFloat64()*float64(t.Stddev))
+		if d < t.Min {
+			d = t.Min
+		}
+		if t.Max > 0 && d > t.Max {
+			d = t.Max
+		}
+		if d < 0 {
+			return 0
+		}
+		return d
 	}
 	return 0
 }
@@ -321,6 +437,7 @@ const (
 	ExtractJSONPath ExtractSource = iota
 	ExtractRegex
 	ExtractHeader
+	ExtractXPath
 )
 
 // Extractor stores part of a response in a mutable variable.
@@ -331,6 +448,7 @@ type Extractor struct {
 	Expr       string
 	Path       *JSONPath
 	Regex      *regexp.Regexp
+	XPath      *XPath
 	Group       int
 	Header      string
 	Default     string
@@ -368,6 +486,10 @@ func (e *Extractor) Extract(dst []byte, r *ResponseView) ([]byte, bool) {
 				return append(dst, v...), true
 			}
 		}
+	case ExtractXPath:
+		if val, ok := e.XPath.Eval(r.Body); ok {
+			return append(dst, val...), true
+		}
 	}
 	if e.HasDefault {
 		return append(dst, e.Default...), true
@@ -383,6 +505,7 @@ const (
 	AssertDuration
 	AssertBodyContains
 	AssertJSONPath
+	AssertJSONSchema
 )
 
 // Assertion is a compiled response check.
@@ -393,6 +516,7 @@ type Assertion struct {
 	MaxDuration time.Duration
 	Contains    []byte
 	Path        *JSONPath
+	Schema      *JSONSchema
 	Equals      string
 	HasEquals   bool
 	Exists      bool
@@ -448,6 +572,11 @@ func (a *Assertion) Check(r *ResponseView) (ok bool, msg string) {
 			}
 			return false, fmt.Sprintf("断言失败：%s，实际值 %s", a.Desc, truncate(string(text), 64))
 		}
+	case AssertJSONSchema:
+		if valid, reason := a.Schema.Validate(r.Body); !valid {
+			return false, fmt.Sprintf("断言失败：%s（%s）", a.Desc, reason)
+		}
+		return true, ""
 	}
 	return true, ""
 }

@@ -20,7 +20,7 @@ import (
 // Snapshot.Total is not encoded; it is rebuilt from the steps on decode.
 // Histograms are stored as (index delta, count) pairs of non-zero buckets.
 
-const encodingVersion = 1
+const encodingVersion = 2
 
 var magic = [3]byte{'T', 'G', 'S'}
 
@@ -97,6 +97,11 @@ func appendHist(b []byte, h *Histogram) []byte {
 func appendStep(b []byte, s *StepStats) []byte {
 	b = appendString(b, s.ID)
 	b = appendString(b, s.Name)
+	if s.IsGroup {
+		b = append(b, 1)
+	} else {
+		b = append(b, 0)
+	}
 	b = binary.AppendVarint(b, s.Requests)
 	b = binary.AppendUvarint(b, uint64(len(s.Status)))
 	for code, n := range s.Status {
@@ -280,8 +285,9 @@ func (s *Snapshot) UnmarshalBinary(data []byte) error {
 	if len(data) < 4 || [3]byte(data[:3]) != magic {
 		return ErrBadEncoding
 	}
-	if data[3] != encodingVersion {
-		return fmt.Errorf("metrics: unsupported snapshot encoding version %d", data[3])
+	ver := data[3]
+	if ver != 1 && ver != encodingVersion {
+		return fmt.Errorf("metrics: unsupported snapshot encoding version %d", ver)
 	}
 	d := &decoder{b: data[4:]}
 	out := Snapshot{}
@@ -306,6 +312,9 @@ func (s *Snapshot) UnmarshalBinary(data []byte) error {
 	out.Steps = make([]StepStats, 0, nsteps)
 	for i := 0; i < nsteps && d.err == nil; i++ {
 		st := newStepStats(d.string(), d.string())
+		if ver >= 2 {
+			st.IsGroup = d.byte() == 1
+		}
 		st.Requests = d.varint()
 		ns := d.count(2)
 		for j := 0; j < ns && d.err == nil; j++ {

@@ -53,8 +53,7 @@ func (c *stdClient) origin(scheme, addr string) (*scenario.Origin, error) {
 }
 
 func (c *stdClient) newTransport(maxIdle int) *http.Transport {
-	return &http.Transport{
-		Proxy: nil,
+	tr := &http.Transport{
 		// Dials use the engine's hard-stop context: net/http may finish a
 		// dial in the background after the request that started it gave up.
 		DialContext: func(_ context.Context, _, addr string) (net.Conn, error) {
@@ -65,7 +64,36 @@ func (c *stdClient) newTransport(maxIdle int) *http.Transport {
 			var t dialTiming
 			return c.dial.dialTCP(c.eng.hardCtx, o, &t)
 		},
-		DialTLSContext: func(_ context.Context, _, addr string) (net.Conn, error) {
+		MaxIdleConns:          0,
+		MaxIdleConnsPerHost:   maxIdle,
+		IdleConnTimeout:       90 * time.Second,
+		DisableCompression:    true, // Accept-Encoding is added by the engine
+		DisableKeepAlives:     !c.cfg.KeepAlive,
+		ResponseHeaderTimeout: c.cfg.FirstByteTimeout,
+		ExpectContinueTimeout: 0,
+	}
+	if c.cfg.ProxyURL != nil {
+		tr.Proxy = http.ProxyURL(c.cfg.ProxyURL)
+	}
+	switch c.cfg.HTTPVersion {
+	case "http2":
+		tr.ForceAttemptHTTP2 = true
+		tr.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: c.cfg.InsecureSkipVerify,
+			NextProtos:         []string{"h2"},
+			ClientSessionCache: tls.NewLRUClientSessionCache(1024),
+		}
+	case "auto":
+		tr.ForceAttemptHTTP2 = true
+		tr.TLSClientConfig = &tls.Config{
+			InsecureSkipVerify: c.cfg.InsecureSkipVerify,
+			NextProtos:         []string{"h2", "http/1.1"},
+			ClientSessionCache: tls.NewLRUClientSessionCache(1024),
+		}
+	default:
+		tr.TLSNextProto = map[string]func(string, *tls.Conn) http.RoundTripper{} // no HTTP/2
+		tr.ForceAttemptHTTP2 = false
+		tr.DialTLSContext = func(_ context.Context, _, addr string) (net.Conn, error) {
 			o, err := c.origin("https", addr)
 			if err != nil {
 				return nil, err
@@ -80,17 +108,9 @@ func (c *stdClient) newTransport(maxIdle int) *http.Transport {
 				return nil, err
 			}
 			return tc, nil
-		},
-		TLSNextProto:          map[string]func(string, *tls.Conn) http.RoundTripper{}, // no HTTP/2
-		ForceAttemptHTTP2:     false,
-		MaxIdleConns:          0,
-		MaxIdleConnsPerHost:   maxIdle,
-		IdleConnTimeout:       90 * time.Second,
-		DisableCompression:    true, // Accept-Encoding is added by the engine
-		DisableKeepAlives:     !c.cfg.KeepAlive,
-		ResponseHeaderTimeout: c.cfg.FirstByteTimeout,
-		ExpectContinueTimeout: 0,
+		}
 	}
+	return tr
 }
 
 func (c *stdClient) newVU(v *vu) vuClient {
@@ -112,8 +132,8 @@ func (c *stdClient) newVU(v *vu) vuClient {
 			// Bytes moved before this request (TLS handshake, leftovers)
 			// are overhead; the request is written after GotConn returns.
 			s.preSent, s.preRecv = s.conn.take()
-			s.conn.requests++
-			if m := c.cfg.MaxRequestsPerConn; m > 0 && s.conn.requests >= m && s.cur != nil {
+			reqs := s.conn.stdReqs.Add(1)
+			if m := c.cfg.MaxRequestsPerConn; m > 0 && int(reqs) >= m && s.cur != nil {
 				s.cur.Close = true
 			}
 		},

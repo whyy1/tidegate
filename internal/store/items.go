@@ -189,20 +189,12 @@ func (p *project) readScenario(id string) (*Scenario, error) {
 // that the APIs of enabled steps and the default environment exist.
 func (p *project) prepareScenario(in *Scenario) (*Scenario, error) {
 	sc := *in
-	sc.Steps = append([]ScenarioStep(nil), in.Steps...)
+	sc.Steps = cloneScenarioSteps(in.Steps)
 	if err := sc.normalize(); err != nil {
 		return nil, err
 	}
-	for i, st := range sc.Steps {
-		if st.Disabled {
-			continue
-		}
-		if _, _, err := p.loadAPI(st.APIID); err != nil {
-			if errors.Is(err, ErrNotFound) {
-				return nil, invalid(fmt.Sprintf("steps[%d].api_id", i), "引用的接口 %s 不存在", st.APIID)
-			}
-			return nil, err
-		}
+	if err := p.validateScenarioAPIs("steps", sc.Steps); err != nil {
+		return nil, err
 	}
 	if sc.EnvironmentID != "" {
 		if _, err := p.readEnvironment(sc.EnvironmentID); err != nil {
@@ -213,6 +205,44 @@ func (p *project) prepareScenario(in *Scenario) (*Scenario, error) {
 		}
 	}
 	return &sc, nil
+}
+
+func (p *project) validateScenarioAPIs(prefix string, steps []ScenarioStep) error {
+	for i := range steps {
+		st := &steps[i]
+		if st.Disabled {
+			continue
+		}
+		field := fmt.Sprintf("%s[%d]", prefix, i)
+		stType := strings.ToLower(strings.TrimSpace(st.Type))
+		switch stType {
+		case "", "http":
+			if _, _, err := p.loadAPI(st.APIID); err != nil {
+				if errors.Is(err, ErrNotFound) {
+					return invalid(field+".api_id", "引用的接口 %s 不存在", st.APIID)
+				}
+				return err
+			}
+		case "group", "loop":
+			if err := p.validateScenarioAPIs(field+".children", st.Children); err != nil {
+				return err
+			}
+		case "if":
+			if err := p.validateScenarioAPIs(field+".children", st.Children); err != nil {
+				return err
+			}
+			if err := p.validateScenarioAPIs(field+".else", st.Else); err != nil {
+				return err
+			}
+		case "weighted":
+			for bIdx := range st.Branches {
+				if err := p.validateScenarioAPIs(fmt.Sprintf("%s.branches[%d].steps", field, bIdx), st.Branches[bIdx].Steps); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // ListScenarios returns the scenarios of a project in creation order.
