@@ -4,10 +4,12 @@ export interface SetupStatus {
   tls: boolean
 }
 
+export type UserRole = 'admin' | 'member' | 'viewer'
+
 export interface User {
   id: number
   username: string
-  role: string
+  role: UserRole
   created_at: string
   password_changed_at: string
 }
@@ -30,7 +32,7 @@ export interface KeyValue {
   secret?: boolean
 }
 
-export type AuthType = 'inherit' | 'none' | 'bearer' | 'basic' | 'api_key'
+export type AuthType = 'inherit' | 'none' | 'bearer' | 'basic' | 'api_key' | 'oauth2'
 
 export interface AuthConfig {
   type: AuthType | ''
@@ -40,6 +42,11 @@ export interface AuthConfig {
   key?: string
   value?: string
   in?: 'header' | 'query' | ''
+  token_url?: string
+  client_id?: string
+  client_secret?: string
+  scope?: string
+  client_auth?: 'basic' | 'body' | ''
 }
 
 export interface Project {
@@ -77,18 +84,67 @@ export interface APIBody {
   content_type?: string
 }
 
+export type APIProtocol = 'http' | 'ws' | 'grpc' | 'sse'
+
+export interface WSMessage {
+  type?: 'text' | 'binary' | ''
+  data: string
+}
+
+export interface APIWebSocket {
+  subprotocols?: string[]
+  messages?: WSMessage[]
+  recv_count?: number
+  idle_timeout?: string
+}
+
+export interface APIGRPC {
+  service: string
+  method: string
+  tls?: boolean
+  payload_encoding?: string
+  response_encoding?: string
+  expected_status?: number
+  timeout?: string
+}
+
+export interface APISSE {
+  max_events?: number
+  stop_contains?: string
+  timeout?: string
+}
+
+export interface APIResponseExample {
+  name: string
+  status: number
+  content_type?: string
+  headers?: KeyValue[]
+  body?: string
+}
+
+export interface APIFieldDoc {
+  path: string
+  type?: string
+  required?: boolean
+  description?: string
+}
+
 export interface APIRequest {
+  protocol?: APIProtocol | ''
   method: string
   url: string
   path_params?: KeyValue[]
   query?: KeyValue[]
   headers?: KeyValue[]
   body?: APIBody | null
+  ws?: APIWebSocket | null
+  grpc?: APIGRPC | null
+  sse?: APISSE | null
 }
 
 export interface ExtractRule {
   name: string
-  from: 'jsonpath' | 'regex' | 'header'
+  from: 'jsonpath' | 'regex' | 'header' | 'xpath'
   expr: string
   group?: number
   default?: string
@@ -97,7 +153,7 @@ export interface ExtractRule {
 }
 
 export interface AssertRule {
-  type: 'status' | 'duration' | 'body_contains' | 'jsonpath'
+  type: 'status' | 'duration' | 'body_contains' | 'jsonpath' | 'json_schema'
   equals?: string
   in?: number[]
   max?: string
@@ -118,6 +174,8 @@ export interface API {
   auth?: AuthConfig | null
   extract?: ExtractRule[]
   assert?: AssertRule[]
+  examples?: APIResponseExample[]
+  response_fields?: APIFieldDoc[]
   folder_id: string
   version: string
 }
@@ -314,9 +372,11 @@ export interface DataSource {
 }
 
 export interface ThinkConfig {
-  type: 'fixed' | 'uniform' | ''
+  type: 'fixed' | 'uniform' | 'normal' | ''
   min?: string
   max?: string
+  mean?: string
+  stddev?: string
 }
 
 export interface Stage {
@@ -346,6 +406,7 @@ export interface ThresholdResult {
 
 export interface HTTPOptions {
   conn_mode?: 'per_vu' | 'shared' | ''
+  http_version?: 'auto' | 'http1' | 'http2' | ''
   keep_alive?: boolean
   max_requests_per_conn?: number
   follow_redirects?: boolean
@@ -360,7 +421,10 @@ export interface HTTPOptions {
   }
   max_body_read?: number
   dns_refresh?: string
+  dns_overrides?: Record<string, string>
+  proxy_url?: string
   connect_backoff?: string
+  allowed_targets?: string[]
 }
 
 export interface LoadConfig {
@@ -384,13 +448,35 @@ export interface StepOverride {
   assert?: AssertRule[]
 }
 
+export type ScenarioStepType = 'http' | 'ws' | 'grpc' | 'sse' | 'script' | 'group' | 'loop' | 'if' | 'weighted'
+
+export interface ScenarioWeightedBranch {
+  name?: string
+  weight: number
+  steps?: ScenarioStep[]
+}
+
 export interface ScenarioStep {
   id: string
   name?: string
-  api_id: string
+  type?: ScenarioStepType | ''
+  api_id?: string
+  script?: string
   disabled?: boolean
   override?: StepOverride | null
   think?: ThinkConfig | null
+  loop_count?: number
+  while?: string
+  max_iterations?: number
+  expr?: string
+  children?: ScenarioStep[]
+  else?: ScenarioStep[]
+  branches?: ScenarioWeightedBranch[]
+}
+
+export interface ScenarioMixItem {
+  scenario_id: string
+  weight: number
 }
 
 export interface Scenario {
@@ -424,11 +510,13 @@ export interface PhaseView {
 export interface StepView {
   id?: string
   name?: string
+  is_group?: boolean
   requests: number
   rps: number
   errors: number
   error_rate: number
   latency: LatencyStats
+  latency_buckets?: number[]
   bytes_sent: number
   bytes_received: number
   sent_bps: number
@@ -436,6 +524,46 @@ export interface StepView {
   status?: Record<string, number>
   error_kinds?: Record<string, number>
   phases?: Record<string, PhaseView>
+}
+
+export interface NodeSnapshotView {
+  agent_id: string
+  agent_name: string
+  active_vus: number
+  active_conns: number
+  target: number
+  requests: number
+  rps: number
+  errors: number
+  error_rate: number
+  p50_ms: number
+  p95_ms: number
+  p99_ms: number
+  sent_bps: number
+  received_bps: number
+}
+
+export interface LatencyBucket {
+  low_ms: number
+  high_ms: number
+  count: number
+}
+
+export interface StepHistogramView {
+  id: string
+  name: string
+  is_group?: boolean
+  latency: LatencyStats
+  bands: number[]
+  buckets: LatencyBucket[]
+}
+
+export interface RunHistogramResponse {
+  run_id: string
+  latency: LatencyStats
+  bands: number[]
+  buckets: LatencyBucket[]
+  steps?: StepHistogramView[]
 }
 
 export interface SampleView {
@@ -468,6 +596,7 @@ export interface SnapshotView extends StepView {
   overhead_bytes_sent: number
   overhead_bytes_received: number
   steps: StepView[]
+  nodes?: NodeSnapshotView[]
   samples?: SampleView[]
 }
 
@@ -584,7 +713,33 @@ export interface AgentView {
   rtt_ms: number
   clock_offset_ms: number
   bandwidth_bps: number
+  labels?: Record<string, string>
+  weight: number
+  effective_weight: number
+  load_share?: number
+  cert_serial?: string
   stats?: SysmonStats
+}
+
+export interface AgentJoinToken {
+  id: string
+  name: string
+  single_use: boolean
+  used_count: number
+  created_by?: string
+  created_at: string
+  expires_at: string
+  used_at?: string
+}
+
+export interface JoinTokenCreated {
+  token: string
+  item: AgentJoinToken
+}
+
+export interface AgentCAInfo {
+  fingerprint: string
+  cert_pem: string
 }
 
 export interface RunEstimate {
@@ -677,6 +832,57 @@ export interface SystemInfo {
   version: string
   tls: boolean
   cluster_addr: string
+  cluster_ca_fingerprint: string
+}
+
+export interface APIToken {
+  id: string
+  user_id: number
+  name: string
+  prefix: string
+  role: UserRole
+  created_at: string
+  last_used_at?: string
+  expires_at?: string
+}
+
+export interface CreateAPITokenResult {
+  token: APIToken
+  plaintext: string
+}
+
+export interface SecurityPolicy {
+  allowlist_enabled: boolean
+  allowed_targets?: string[]
+  member_max_vus?: number
+  member_max_rps?: number
+  scripts_disabled?: boolean
+}
+
+export interface MetricsSinkConfig {
+  enabled: boolean
+  type: 'influxdb' | 'prometheus_pushgateway' | string
+  url: string
+  org?: string
+  bucket?: string
+  database?: string
+  username?: string
+  token?: string
+  job?: string
+  extra_tags?: Record<string, string>
+}
+
+export interface AuditEntry {
+  id: number
+  created_at: string
+  user_id: number
+  username: string
+  role: string
+  action: string
+  resource?: string
+  resource_id?: string
+  remote_addr?: string
+  detail?: unknown
 }
 
 export interface WSEvent {

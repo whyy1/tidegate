@@ -66,9 +66,15 @@ func (c *Controller) EstimateRun(ctx context.Context, projectID string, req Star
 	if err != nil {
 		return nil, err
 	}
+	var filtered []AgentView
+	for _, ag := range agents {
+		if matchNodeSelector(ag.Labels, req.NodeSelector) {
+			filtered = append(filtered, ag)
+		}
+	}
 	var totalCPU int
 	var availBps uint64
-	for _, ag := range agents {
+	for _, ag := range filtered {
 		totalCPU += ag.CPUCores
 		if ag.BandwidthBps > 0 {
 			availBps += uint64(ag.BandwidthBps)
@@ -86,6 +92,8 @@ func (c *Controller) EstimateRun(ctx context.Context, projectID string, req Star
 	var warnings []string
 	if len(agents) == 0 {
 		warnings = append(warnings, "当前没有在线的发压节点，无法直接启动压测")
+	} else if len(filtered) == 0 {
+		warnings = append(warnings, "没有符合所选节点标签的在线发压节点，请调整节点筛选条件")
 	} else {
 		if availBps == 0 {
 			warnings = append(warnings, "未检测到网卡协商速率且未手动设置节点带宽上限，建议在节点管理中填写实际可用带宽")
@@ -105,7 +113,7 @@ func (c *Controller) EstimateRun(ctx context.Context, projectID string, req Star
 		AvgRequestBytes:    avgReqBytes,
 		EstimatedPeakRPS:   math.Round(estPeakRPS*100) / 100,
 		EstimatedUplinkBps: math.Round(estUplinkBps*100) / 100,
-		OnlineAgents:       len(agents),
+		OnlineAgents:       len(filtered),
 		TotalCPUCores:      totalCPU,
 		AvailableUplinkBps: availBps,
 		Warnings:           warnings,

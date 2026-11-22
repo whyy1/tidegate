@@ -184,9 +184,12 @@ export function EnvModal({
             </div>
 
             <div>
-              <label className="block font-medium text-slate-700 mb-1.5">
-                环境变量（优先级高于项目变量，支持敏感标记「密」）
+              <label className="block font-medium text-slate-700 mb-1">
+                环境变量（优先级高于项目变量）
               </label>
+              <p className="text-[11px] text-slate-500 mb-1.5">
+                勾选「密」的敏感变量会采用 AES-256-GCM 加密写入本地密钥保险箱（Vault），不再明文落盘至 YAML。
+              </p>
               <KeyValueEditor items={vars} onChange={setVars} keyPlaceholder="变量名" valuePlaceholder="变量值" />
             </div>
 

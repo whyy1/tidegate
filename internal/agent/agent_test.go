@@ -2,13 +2,17 @@ package agent
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"google.golang.org/grpc/credentials"
 
 	"tidegate/internal/cluster"
 	"tidegate/internal/metrics"
@@ -98,12 +102,13 @@ func TestAgentLifecycleAndRuns(t *testing.T) {
 
 	workDir := t.TempDir()
 	ag, err := New(Options{
-		JoinAddr:    lis.Addr().String(),
-		Token:       "secret-node-token",
-		Name:        "local-test",
-		Version:     "1.0-test",
-		WorkDir:     workDir,
-		SysInterval: 50 * time.Millisecond,
+		JoinAddr:          lis.Addr().String(),
+		Token:             "secret-node-token",
+		Name:              "local-test",
+		Version:           "1.0-test",
+		WorkDir:           workDir,
+		SysInterval:       50 * time.Millisecond,
+		InsecurePlaintext: true,
 		ClusterOptions: cluster.ClientOptions{
 			MinBackoff: 50 * time.Millisecond,
 		},
@@ -291,4 +296,99 @@ loop1:
 	if len(entries) != 0 {
 		t.Fatalf("workDir not clean on exit: %v", entries)
 	}
+}
+
+func TestAgentMTLSEnrollmentLabelsAndPersistedCertRestart(t *testing.T) {
+	ca, err := cluster.NewEphemeralClusterCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvTLS, err := ca.IssueServerTLSConfig([]string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	h := newRecordingHandler()
+	tokenUsed := false
+	csrv := cluster.NewServer(cluster.ServerOptions{
+		Version:     "1.0-mtls",
+		Credentials: credentials.NewTLS(srvTLS),
+		Handler:     h,
+		Enroll: func(_ context.Context, req *cluster.EnrollRequest) (*cluster.EnrollResponse, error) {
+			if tokenUsed || req.Token != "one-time-join" {
+				return &cluster.EnrollResponse{RejectMessage: "加入令牌已失效"}, nil
+			}
+			tokenUsed = true
+			certPEM, _, _, err := ca.SignCSR(req.CSRDER, req.Name, time.Hour)
+			if err != nil {
+				return nil, err
+			}
+			return &cluster.EnrollResponse{
+				ClientCertPEM: certPEM,
+				CACertPEM:     ca.CertPEM(),
+			}, nil
+		},
+		VerifyClientCert: func(cert *x509.Certificate, _ string) error {
+			if cert == nil {
+				return errors.New("missing cert")
+			}
+			return nil
+		},
+	})
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lis.Close()
+	go func() { _ = csrv.Serve(lis) }()
+	defer csrv.Stop()
+
+	certDir := t.TempDir()
+	ag1, err := New(Options{
+		JoinAddr:      lis.Addr().String(),
+		Token:         "one-time-join",
+		Name:          "edge-ap",
+		Version:       "1.0-mtls",
+		CAFingerprint: ca.Fingerprint(),
+		CertDir:       certDir,
+		Labels:        map[string]string{"zone": "ap-east", "tier": "high"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan error, 1)
+	go func() { done1 <- ag1.Run(ctx1) }()
+
+	node1 := <-h.joined
+	if info := node1.Info(); info.Labels["zone"] != "ap-east" || info.CertSerial == "" {
+		t.Fatalf("unexpected agent mTLS info: %+v", info)
+	}
+	cancel1()
+	<-done1
+	<-h.leftCh
+
+	// Restart agent with NO token using persisted certificates in certDir.
+	ag2, err := New(Options{
+		JoinAddr:      lis.Addr().String(),
+		Name:          "edge-ap",
+		Version:       "1.0-mtls",
+		CAFingerprint: ca.Fingerprint(),
+		CertDir:       certDir,
+		Labels:        map[string]string{"zone": "ap-east", "tier": "high"},
+	})
+	if err != nil {
+		t.Fatalf("New without token failed: %v", err)
+	}
+	ctx2, cancel2 := context.WithCancel(context.Background())
+	defer cancel2()
+	done2 := make(chan error, 1)
+	go func() { done2 <- ag2.Run(ctx2) }()
+
+	node2 := <-h.joined
+	if node2.Info().CertSerial != node1.Info().CertSerial {
+		t.Fatalf("expected reused persisted cert serial %s, got %s", node1.Info().CertSerial, node2.Info().CertSerial)
+	}
+	cancel2()
+	<-done2
 }

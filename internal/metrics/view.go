@@ -14,21 +14,40 @@ type PhaseView struct {
 
 // StepView is the JSON form of StepStats with computed percentiles.
 type StepView struct {
-	ID            string               `json:"id,omitempty"`
-	Name          string               `json:"name,omitempty"`
-	IsGroup       bool                 `json:"is_group,omitempty"`
-	Requests      int64                `json:"requests"`
-	RPS           float64              `json:"rps"`
-	Errors        int64                `json:"errors"`
-	ErrorRate     float64              `json:"error_rate"`
-	Latency       LatencyStats         `json:"latency"`
-	BytesSent     int64                `json:"bytes_sent"`
-	BytesReceived int64                `json:"bytes_received"`
-	SentBps       float64              `json:"sent_bps"`
-	ReceivedBps   float64              `json:"received_bps"`
-	Status        map[string]int64     `json:"status,omitempty"`
-	ErrorKinds    map[string]int64     `json:"error_kinds,omitempty"`
-	Phases        map[string]PhaseView `json:"phases,omitempty"`
+	ID             string               `json:"id,omitempty"`
+	Name           string               `json:"name,omitempty"`
+	IsGroup        bool                 `json:"is_group,omitempty"`
+	Requests       int64                `json:"requests"`
+	RPS            float64              `json:"rps"`
+	Errors         int64                `json:"errors"`
+	ErrorRate      float64              `json:"error_rate"`
+	Latency        LatencyStats         `json:"latency"`
+	LatencyBuckets []int64              `json:"latency_buckets,omitempty"`
+	BytesSent      int64                `json:"bytes_sent"`
+	BytesReceived  int64                `json:"bytes_received"`
+	SentBps        float64              `json:"sent_bps"`
+	ReceivedBps    float64              `json:"received_bps"`
+	Status         map[string]int64     `json:"status,omitempty"`
+	ErrorKinds     map[string]int64     `json:"error_kinds,omitempty"`
+	Phases         map[string]PhaseView `json:"phases,omitempty"`
+}
+
+// NodeSnapshotView reports per-agent load and latency breakdown within a SnapshotView.
+type NodeSnapshotView struct {
+	AgentID     string  `json:"agent_id"`
+	AgentName   string  `json:"agent_name"`
+	ActiveVUs   int64   `json:"active_vus"`
+	ActiveConns int64   `json:"active_conns"`
+	Target      float64 `json:"target"`
+	Requests    int64   `json:"requests"`
+	RPS         float64 `json:"rps"`
+	Errors      int64   `json:"errors"`
+	ErrorRate   float64 `json:"error_rate"`
+	P50Ms       float64 `json:"p50_ms"`
+	P95Ms       float64 `json:"p95_ms"`
+	P99Ms       float64 `json:"p99_ms"`
+	SentBps     float64 `json:"sent_bps"`
+	ReceivedBps float64 `json:"received_bps"`
 }
 
 // SampleView is the JSON form of a Sample.
@@ -64,8 +83,9 @@ type SnapshotView struct {
 	OverheadSent      int64         `json:"overhead_bytes_sent"`
 	OverheadReceived  int64         `json:"overhead_bytes_received"`
 	StepView
-	Steps   []StepView   `json:"steps"`
-	Samples []SampleView `json:"samples,omitempty"`
+	Steps   []StepView         `json:"steps"`
+	Nodes   []NodeSnapshotView `json:"nodes,omitempty"`
+	Samples []SampleView       `json:"samples,omitempty"`
 }
 
 func perSecond(n int64, d time.Duration) float64 {
@@ -91,6 +111,9 @@ func (s *StepStats) view(d time.Duration) StepView {
 	}
 	if s.Requests > 0 {
 		v.ErrorRate = float64(v.Errors) / float64(s.Requests)
+	}
+	if s.Latency != nil && s.Latency.Count() > 0 {
+		v.LatencyBuckets = s.Latency.FixedBands()
 	}
 	if len(s.Status) > 0 {
 		v.Status = make(map[string]int64, len(s.Status))

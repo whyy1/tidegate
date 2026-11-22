@@ -30,21 +30,26 @@ type AgentInterface struct {
 
 // AgentView is the API and WebSocket view of a connected load generator node.
 type AgentView struct {
-	ID            string           `json:"id"`
-	Name          string           `json:"name"`
-	Version       string           `json:"version"`
-	OS            string           `json:"os"`
-	Arch          string           `json:"arch"`
-	CPUCores      int              `json:"cpu_cores"`
-	MemoryBytes   uint64           `json:"memory_bytes"`
-	Interfaces    []AgentInterface `json:"interfaces,omitempty"`
-	RemoteAddr    string           `json:"remote_addr,omitempty"`
-	ConnectedAt   time.Time        `json:"connected_at"`
-	LastSeen      time.Time        `json:"last_seen"`
-	RTTMs         float64          `json:"rtt_ms"`
-	ClockOffsetMs float64          `json:"clock_offset_ms"`
-	BandwidthBps  int64            `json:"bandwidth_bps"`
-	Stats         *sysmon.Stats    `json:"stats,omitempty"`
+	ID              string            `json:"id"`
+	Name            string            `json:"name"`
+	Version         string            `json:"version"`
+	OS              string            `json:"os"`
+	Arch            string            `json:"arch"`
+	CPUCores        int               `json:"cpu_cores"`
+	MemoryBytes     uint64            `json:"memory_bytes"`
+	Interfaces      []AgentInterface  `json:"interfaces,omitempty"`
+	RemoteAddr      string            `json:"remote_addr,omitempty"`
+	ConnectedAt     time.Time         `json:"connected_at"`
+	LastSeen        time.Time         `json:"last_seen"`
+	RTTMs           float64           `json:"rtt_ms"`
+	ClockOffsetMs   float64           `json:"clock_offset_ms"`
+	BandwidthBps    int64             `json:"bandwidth_bps"`
+	Labels          map[string]string `json:"labels,omitempty"`
+	Weight          float64           `json:"weight"`
+	EffectiveWeight float64           `json:"effective_weight"`
+	LoadShare       float64           `json:"load_share,omitempty"`
+	CertSerial      string            `json:"cert_serial,omitempty"`
+	Stats           *sysmon.Stats     `json:"stats,omitempty"`
 }
 
 // Event is one real-time notification emitted by the controller.

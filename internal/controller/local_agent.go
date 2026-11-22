@@ -24,6 +24,8 @@ func startLocalAgentSupervisor(
 	parent context.Context,
 	joinAddr string,
 	token string,
+	caFingerprint string,
+	disableTLS bool,
 	version string,
 	inProcess bool,
 	exePath string,
@@ -35,12 +37,14 @@ func startLocalAgentSupervisor(
 
 	if inProcess {
 		ag, err := agent.New(agent.Options{
-			JoinAddr: joinAddr,
-			Token:    token,
-			Name:     "local",
-			Version:  version,
-			Client:   client,
-			Logger:   log,
+			JoinAddr:          joinAddr,
+			Token:             token,
+			Name:              "local",
+			Version:           version,
+			Client:            client,
+			CAFingerprint:     caFingerprint,
+			InsecurePlaintext: disableTLS,
+			Logger:            log,
 		})
 		if err != nil {
 			cancel()
@@ -72,7 +76,7 @@ func startLocalAgentSupervisor(
 				return
 			}
 			started := time.Now()
-			err := runLocalSubprocess(ctx, exePath, joinAddr, token, client, log)
+			err := runLocalSubprocess(ctx, exePath, joinAddr, token, caFingerprint, disableTLS, client, log)
 			if ctx.Err() != nil {
 				return
 			}
@@ -106,10 +110,18 @@ func runLocalSubprocess(
 	exePath string,
 	joinAddr string,
 	token string,
+	caFingerprint string,
+	disableTLS bool,
 	client engine.ClientKind,
 	log *slog.Logger,
 ) error {
 	args := []string{"agent", "--join", joinAddr, "--token", token, "--name", "local"}
+	if caFingerprint != "" {
+		args = append(args, "--ca-fingerprint", caFingerprint)
+	}
+	if disableTLS {
+		args = append(args, "--insecure")
+	}
 	if client != "" {
 		args = append(args, "--client", string(client))
 	}

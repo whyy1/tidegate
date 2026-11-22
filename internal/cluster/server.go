@@ -3,9 +3,11 @@ package cluster
 import (
 	"context"
 	"crypto/rand"
+	"crypto/x509"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"net"
 	"slices"
 	"strings"
@@ -77,6 +79,10 @@ type ServerOptions struct {
 	// credentials.NewTLS(&tls.Config{ClientAuth: tls.RequireAndVerifyClientCert, ...})
 	// for mutual TLS. Nil serves plaintext.
 	Credentials credentials.TransportCredentials
+	// Enroll handles CSR certificate signing for an enrolling agent.
+	Enroll func(ctx context.Context, req *EnrollRequest) (*EnrollResponse, error)
+	// VerifyClientCert validates the verified mTLS client certificate and node ID.
+	VerifyClientCert func(cert *x509.Certificate, nodeID string) error
 	// GRPCOptions are appended to the options NewServer builds.
 	GRPCOptions []grpc.ServerOption
 	// Logf, when set, receives diagnostic messages.
@@ -150,6 +156,10 @@ type NodeInfo struct {
 	ClockOffset time.Duration
 	// Resumed is true when the node reconnected with its previous ID.
 	Resumed bool
+	// Labels describes optional node labels (e.g. zone=ap-east).
+	Labels map[string]string
+	// CertSerial is the lowercase hex serial of the verified client mTLS certificate.
+	CertSerial string
 }
 
 // Server accepts node connections.
@@ -253,6 +263,29 @@ func (s *Server) Node(id string) *Node {
 		return n
 	}
 	return nil
+}
+
+// DisconnectNode sends a Reject frame with reason to an active node and closes its stream.
+func (s *Server) DisconnectNode(id string, reason string) bool {
+	s.mu.Lock()
+	n := s.nodes[id]
+	s.mu.Unlock()
+	if n == nil || !n.joined.Load() {
+		return false
+	}
+	n.rejectAndClose(RejectBadToken, reason)
+	return true
+}
+
+func (s *Server) enroll(ctx context.Context, req *EnrollRequest) (*EnrollResponse, error) {
+	if !s.enter() {
+		return nil, status.Error(codes.Unavailable, ErrServerClosed.Error())
+	}
+	defer s.wg.Done()
+	if s.opts.Enroll == nil {
+		return &EnrollResponse{RejectMessage: "控制器未启用节点证书签发服务"}, nil
+	}
+	return s.opts.Enroll(ctx, req)
 }
 
 func (s *Server) logf(format string, args ...any) {
@@ -405,7 +438,23 @@ func (s *Server) connect(stream grpc.ServerStream) error {
 	if !ok {
 		return s.reject(stream, remote, RejectProtocol, "协议错误：节点的第一条消息必须是 Hello", "")
 	}
-	if !s.authenticate(hello.Token) {
+
+	var certSerial string
+	if s.opts.VerifyClientCert != nil {
+		var leafCert *x509.Certificate
+		if p, hasPeer := peer.FromContext(ctx); hasPeer {
+			if tlsInfo, ok := p.AuthInfo.(credentials.TLSInfo); ok && len(tlsInfo.State.VerifiedChains) > 0 && len(tlsInfo.State.VerifiedChains[0]) > 0 {
+				leafCert = tlsInfo.State.VerifiedChains[0][0]
+			}
+		}
+		if leafCert == nil {
+			return s.reject(stream, remote, RejectBadToken, "集群已启用双向 TLS，节点必须先凭令牌签发有效客户端证书", "")
+		}
+		if err := s.opts.VerifyClientCert(leafCert, hello.NodeID); err != nil {
+			return s.reject(stream, remote, RejectBadToken, err.Error(), "")
+		}
+		certSerial = CertSerialHex(leafCert)
+	} else if !s.authenticate(hello.Token) {
 		return s.reject(stream, remote, RejectBadToken, "节点令牌无效，控制器拒绝接入", "")
 	}
 	if hello.Version != s.opts.Version {
@@ -413,7 +462,7 @@ func (s *Server) connect(stream grpc.ServerStream) error {
 		return s.reject(stream, remote, RejectVersionMismatch, msg, s.opts.Version)
 	}
 
-	n = s.newNode(hello, remote)
+	n = s.newNode(hello, remote, certSerial)
 	if err := s.register(n); err != nil {
 		return status.Error(codes.Unavailable, err.Error())
 	}
@@ -438,6 +487,7 @@ func (s *Server) connect(stream grpc.ServerStream) error {
 	startCh <- n
 
 	n.watch(ctx)
+	<-n.sendDone
 	s.unregister(n)
 	return status.Error(codes.Unavailable, n.cause.Error())
 }
@@ -510,17 +560,20 @@ type Node struct {
 	srv         *Server
 	id          string
 	hello       Hello // Token cleared
+	certSerial  string
 	remote      string
 	connectedAt time.Time
 	resumed     bool
 
-	queue chan frame
-	pingq chan frame
+	queue   chan frame
+	pingq   chan frame
+	rejectf chan frame
 
 	closeOnce sync.Once
 	cause     error         // set before quit is closed
 	quit      chan struct{} // closed when the session ends
 	left      chan struct{} // closed after OnNodeLeft returned
+	sendDone  chan struct{} // closed after sendLoop flushes and exits
 	joined    atomic.Bool
 
 	lastSeen  atomic.Int64 // Server.now() of the last received message
@@ -533,22 +586,26 @@ type Node struct {
 	sentAt    time.Time
 }
 
-func (s *Server) newNode(h *Hello, remote string) *Node {
+func (s *Server) newNode(h *Hello, remote, certSerial string) *Node {
 	id, resumed := s.newNodeID(h.NodeID)
 	hello := *h
 	hello.Token = ""
 	hello.Interfaces = slices.Clone(h.Interfaces)
+	hello.Labels = maps.Clone(h.Labels)
 	n := &Node{
 		srv:         s,
 		id:          id,
 		hello:       hello,
+		certSerial:  certSerial,
 		remote:      remote,
 		connectedAt: time.Now(),
 		resumed:     resumed,
 		queue:       make(chan frame, s.opts.SendQueue),
 		pingq:       make(chan frame, 1),
+		rejectf:     make(chan frame, 1),
 		quit:        make(chan struct{}),
 		left:        make(chan struct{}),
+		sendDone:    make(chan struct{}),
 	}
 	n.lastSeen.Store(s.now())
 	return n
@@ -578,6 +635,8 @@ func (n *Node) Info() NodeInfo {
 		RTT:         rtt,
 		ClockOffset: offset,
 		Resumed:     n.resumed,
+		Labels:      maps.Clone(h.Labels),
+		CertSerial:  n.certSerial,
 	}
 }
 
@@ -607,8 +666,23 @@ func (n *Node) SetTarget(runID string, value float64) error {
 	return n.send(&SetTarget{RunID: runID, Value: value})
 }
 
+// SetLoadShare queues a dynamic LoadShare adjustment for the node.
+func (n *Node) SetLoadShare(runID string, share float64) error {
+	return n.send(&SetTarget{RunID: runID, LoadShare: share})
+}
+
 // Close disconnects the node. OnNodeLeft follows with ErrNodeClosed.
 func (n *Node) Close() { n.close(ErrNodeClosed) }
+
+func (n *Node) rejectAndClose(reason RejectReason, message string) {
+	if f, err := encodeController(&Reject{Reason: reason, Message: message}, n.srv.opts.MaxMessageSize); err == nil {
+		select {
+		case n.rejectf <- f:
+		default:
+		}
+	}
+	n.close(errors.New(message))
+}
 
 func (n *Node) send(b ControllerBody) error {
 	select {
@@ -640,19 +714,42 @@ func (n *Node) close(cause error) {
 	})
 }
 
-// sendLoop writes queued messages. Pings skip ahead of queued messages. A
-// slow node blocks only this goroutine.
+// sendLoop writes queued messages. Rejects and pings skip ahead of queued
+// messages. A slow node blocks only this goroutine.
 func (n *Node) sendLoop(stream grpc.ServerStream) {
 	defer n.srv.wg.Done()
+	defer close(n.sendDone)
 	for {
+		select {
+		case f := <-n.rejectf:
+			_ = stream.SendMsg(f)
+			return
+		default:
+		}
 		var f frame
 		select {
+		case f = <-n.rejectf:
+			_ = stream.SendMsg(f)
+			return
 		case <-n.quit:
+			select {
+			case rf := <-n.rejectf:
+				_ = stream.SendMsg(rf)
+			default:
+			}
 			return
 		case f = <-n.pingq:
 		default:
 			select {
+			case f = <-n.rejectf:
+				_ = stream.SendMsg(f)
+				return
 			case <-n.quit:
+				select {
+				case rf := <-n.rejectf:
+					_ = stream.SendMsg(rf)
+				default:
+				}
 				return
 			case f = <-n.pingq:
 			case f = <-n.queue:

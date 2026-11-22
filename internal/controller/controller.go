@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"math"
 	"net"
 	"os"
 	"sort"
@@ -15,6 +17,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"google.golang.org/grpc/credentials"
 
 	"tidegate/internal/cluster"
 	"tidegate/internal/engine"
@@ -67,6 +71,8 @@ type Options struct {
 	Client              engine.ClientKind
 	NodeGracePeriod     time.Duration
 	StartDelay          time.Duration
+	ClusterCADir        string
+	DisableClusterTLS   bool
 	Logger              *slog.Logger
 }
 
@@ -82,6 +88,7 @@ type Controller struct {
 	store         *store.Store
 	results       *store.ResultDB
 	log           *slog.Logger
+	ca            *cluster.ClusterCA
 	internalToken string
 	clientKind    engine.ClientKind
 	gracePeriod   time.Duration
@@ -137,15 +144,17 @@ type DebugScenarioRequest struct {
 
 // StartRunRequest starts a distributed or local load test run.
 type StartRunRequest struct {
-	ScenarioID    string                     `json:"scenario_id,omitempty"`
-	Mix           []ScenarioMixItem          `json:"mix,omitempty"`
-	APIID         string                     `json:"api_id,omitempty"`
-	API           *store.API                 `json:"api,omitempty"`
-	EnvironmentID string                     `json:"environment_id,omitempty"`
-	Variables     map[string]scenario.Scalar `json:"variables,omitempty"`
-	Load          *scenario.Load             `json:"load,omitempty"`
-	HTTP          *scenario.HTTPOptions      `json:"http,omitempty"`
-	ActorRole     string                     `json:"-"`
+	ScenarioID        string                     `json:"scenario_id,omitempty"`
+	Mix               []ScenarioMixItem          `json:"mix,omitempty"`
+	APIID             string                     `json:"api_id,omitempty"`
+	API               *store.API                 `json:"api,omitempty"`
+	EnvironmentID     string                     `json:"environment_id,omitempty"`
+	Variables         map[string]scenario.Scalar `json:"variables,omitempty"`
+	Load              *scenario.Load             `json:"load,omitempty"`
+	HTTP              *scenario.HTTPOptions      `json:"http,omitempty"`
+	NodeSelector      map[string]string          `json:"node_selector,omitempty"`
+	NodeFailurePolicy string                     `json:"node_failure_policy,omitempty"`
+	ActorRole         string                     `json:"-"`
 }
 
 // New starts the cluster listener, cleans up interrupted runs, optionally starts
@@ -207,7 +216,15 @@ func New(ctx context.Context, opts Options) (*Controller, error) {
 		lastSys:       make(map[string]sysEntry),
 	}
 
-	srv := cluster.NewServer(cluster.ServerOptions{
+	ca, err := c.initClusterCA(opts)
+	if err != nil {
+		_ = lis.Close()
+		cancel()
+		return nil, err
+	}
+	c.ca = ca
+
+	srvOpts := cluster.ServerOptions{
 		Version: opts.Version,
 		Authenticate: func(tok string) bool {
 			if cluster.TokenEqual(tok, c.internalToken) {
@@ -219,7 +236,19 @@ func New(ctx context.Context, opts Options) (*Controller, error) {
 		Logf: func(format string, args ...any) {
 			log.Info(fmt.Sprintf(format, args...))
 		},
-	})
+	}
+	if ca != nil {
+		srvTLS, err := ca.IssueServerTLSConfig(c.clusterServerHosts(lis.Addr().String()))
+		if err != nil {
+			_ = lis.Close()
+			cancel()
+			return nil, err
+		}
+		srvOpts.Credentials = credentials.NewTLS(srvTLS)
+		srvOpts.Enroll = c.handleEnroll
+		srvOpts.VerifyClientCert = c.handleVerifyClientCert
+	}
+	srv := cluster.NewServer(srvOpts)
 	c.srv = srv
 
 	c.srvWG.Add(1)
@@ -243,6 +272,8 @@ func New(ctx context.Context, opts Options) (*Controller, error) {
 			bgCtx,
 			lis.Addr().String(),
 			c.internalToken,
+			c.ClusterCAFingerprint(),
+			opts.DisableClusterTLS,
 			opts.Version,
 			opts.InProcessLocalAgent,
 			opts.ExecutablePath,
@@ -340,16 +371,24 @@ func (c *Controller) agentsBroadcastLoop() {
 }
 
 // Agents returns all currently connected load generator nodes with latest
-// system metrics and configured bandwidth limits.
+// system metrics and configured bandwidth limits and weights.
 func (c *Controller) Agents(ctx context.Context) ([]AgentView, error) {
 	nodes := c.srv.Nodes()
 	settingsList, err := c.results.ListAgentSettings(ctx)
 	if err != nil {
 		return nil, err
 	}
-	bwMap := make(map[string]int64, len(settingsList))
+	settingsMap := make(map[string]store.AgentSettings, len(settingsList))
 	for _, s := range settingsList {
-		bwMap[s.Name] = s.BandwidthBps
+		settingsMap[s.Name] = s
+	}
+
+	totalWeight := 0.0
+	effWeights := make([]float64, len(nodes))
+	for i, n := range nodes {
+		w := effectiveNodeWeight(n, settingsMap[n.Name])
+		effWeights[i] = w
+		totalWeight += w
 	}
 
 	c.mu.Lock()
@@ -363,8 +402,13 @@ func (c *Controller) Agents(ctx context.Context) ([]AgentView, error) {
 	c.mu.Unlock()
 
 	out := make([]AgentView, 0, len(nodes))
-	for _, n := range nodes {
-		out = append(out, buildAgentView(n, bwMap[n.Name], sysSnapshot[n.ID]))
+	for i, n := range nodes {
+		s := settingsMap[n.Name]
+		share := 0.0
+		if totalWeight > 0 {
+			share = math.Round((effWeights[i]/totalWeight)*10000) / 10000
+		}
+		out = append(out, buildAgentView(n, s.BandwidthBps, s.Weight, effWeights[i], share, sysSnapshot[n.ID]))
 	}
 	return out, nil
 }
@@ -372,41 +416,10 @@ func (c *Controller) Agents(ctx context.Context) ([]AgentView, error) {
 // UpdateAgentSettings updates the configured bandwidth ceiling (bps) of an
 // agent identified by node ID or node name and broadcasts the updated node list.
 func (c *Controller) UpdateAgentSettings(ctx context.Context, idOrName string, bandwidthBps int64) (*AgentView, error) {
-	targetName := strings.TrimSpace(idOrName)
-	if targetName == "" {
-		return nil, userErr(ErrInvalidInput, "节点标识不能为空", nil)
-	}
-	for _, n := range c.srv.Nodes() {
-		if n.ID == idOrName || n.Name == idOrName {
-			targetName = n.Name
-			break
-		}
-	}
-	if err := c.results.SetAgentSettings(ctx, store.AgentSettings{
-		Name:         targetName,
-		BandwidthBps: bandwidthBps,
-	}); err != nil {
-		return nil, err
-	}
-	c.notifyAgentsChanged()
-
-	agents, err := c.Agents(ctx)
-	if err != nil {
-		return nil, err
-	}
-	for i := range agents {
-		if agents[i].ID == idOrName || agents[i].Name == targetName {
-			return &agents[i], nil
-		}
-	}
-	return &AgentView{
-		ID:           idOrName,
-		Name:         targetName,
-		BandwidthBps: bandwidthBps,
-	}, nil
+	return c.PatchAgentSettings(ctx, idOrName, PatchAgentSettingsRequest{BandwidthBps: &bandwidthBps})
 }
 
-func buildAgentView(n cluster.NodeInfo, bwBps int64, st *sysmon.Stats) AgentView {
+func buildAgentView(n cluster.NodeInfo, bwBps int64, weight, effWeight, loadShare float64, st *sysmon.Stats) AgentView {
 	ifaces := make([]AgentInterface, 0, len(n.Interfaces))
 	for _, ni := range n.Interfaces {
 		ifaces = append(ifaces, AgentInterface{
@@ -415,21 +428,26 @@ func buildAgentView(n cluster.NodeInfo, bwBps int64, st *sysmon.Stats) AgentView
 		})
 	}
 	return AgentView{
-		ID:            n.ID,
-		Name:          n.Name,
-		Version:       n.Version,
-		OS:            n.OS,
-		Arch:          n.Arch,
-		CPUCores:      n.CPUCores,
-		MemoryBytes:   n.MemoryBytes,
-		Interfaces:    ifaces,
-		RemoteAddr:    n.RemoteAddr,
-		ConnectedAt:   n.ConnectedAt,
-		LastSeen:      n.LastSeen,
-		RTTMs:         float64(n.RTT) / 1e6,
-		ClockOffsetMs: float64(n.ClockOffset) / 1e6,
-		BandwidthBps:  bwBps,
-		Stats:         st,
+		ID:              n.ID,
+		Name:            n.Name,
+		Version:         n.Version,
+		OS:              n.OS,
+		Arch:            n.Arch,
+		CPUCores:        n.CPUCores,
+		MemoryBytes:     n.MemoryBytes,
+		Interfaces:      ifaces,
+		RemoteAddr:      n.RemoteAddr,
+		ConnectedAt:     n.ConnectedAt,
+		LastSeen:        n.LastSeen,
+		RTTMs:           float64(n.RTT) / 1e6,
+		ClockOffsetMs:   float64(n.ClockOffset) / 1e6,
+		BandwidthBps:    bwBps,
+		Labels:          maps.Clone(n.Labels),
+		Weight:          weight,
+		EffectiveWeight: effWeight,
+		LoadShare:       loadShare,
+		CertSerial:      n.CertSerial,
+		Stats:           st,
 	}
 }
 
@@ -700,9 +718,37 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 		return nil, fmt.Errorf("序列化脱敏场景失败：%w", err)
 	}
 
-	nodes := c.srv.Nodes()
-	if len(nodes) == 0 {
+	failurePolicy := strings.ToLower(strings.TrimSpace(req.NodeFailurePolicy))
+	if failurePolicy == "" {
+		failurePolicy = "redistribute"
+	}
+	if failurePolicy != "redistribute" && failurePolicy != "abort" {
+		return nil, userErr(ErrInvalidInput, fmt.Sprintf("不支持的节点故障策略 %q，可选 redistribute 或 abort", req.NodeFailurePolicy), nil)
+	}
+
+	allNodes := c.srv.Nodes()
+	if len(allNodes) == 0 {
 		return nil, userErr(ErrNoAgents, "当前没有可用的发压节点，请等待本机或远程节点接入后重试", nil)
+	}
+	nodes := filterNodesBySelector(allNodes, req.NodeSelector)
+	if len(nodes) == 0 {
+		return nil, userErr(ErrNoAgents, fmt.Sprintf("没有符合节点标签条件（%s）的在线发压节点", formatSelectorDesc(req.NodeSelector)), nil)
+	}
+
+	settingsList, err := c.results.ListAgentSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	settingsMap := make(map[string]store.AgentSettings, len(settingsList))
+	for _, s := range settingsList {
+		settingsMap[s.Name] = s
+	}
+	weights := make([]float64, len(nodes))
+	totalWeight := 0.0
+	for i, ni := range nodes {
+		w := effectiveNodeWeight(ni, settingsMap[ni.Name])
+		weights[i] = w
+		totalWeight += w
 	}
 
 	dataFiles := make([]cluster.DataFile, 0, len(resolved.Files))
@@ -731,7 +777,7 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 	}
 
 	egress := inspectTargetEgress(ctx, resolved.Definition)
-	ar := newActiveRun(c, runMeta.ID, runMeta.ProjectID, runMeta.ScenarioName, plan.Load.Mode, egress, resolved.Definition.Load.Thresholds)
+	ar := newActiveRun(c, runMeta.ID, runMeta.ProjectID, runMeta.ScenarioName, plan.Load.Mode, failurePolicy, egress, resolved.Definition.Load.Thresholds)
 
 	c.mu.Lock()
 	if c.active != nil {
@@ -739,7 +785,7 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 		_ = c.results.DeleteRun(ctx, runMeta.ID)
 		return nil, userErr(ErrRunActive, "当前已有正在运行的压测任务，请等待结束或先停止", nil)
 	}
-	ar.initNodes(nodes)
+	ar.initNodes(nodes, weights)
 	c.active = ar
 	c.mu.Unlock()
 
@@ -759,7 +805,6 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 	}
 	commonStart := time.Now().Add(startDelay)
 
-	share := 1.0 / float64(len(nodes))
 	dispatched := 0
 	var failedDispatch []string
 	for i, ni := range nodes {
@@ -769,6 +814,7 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 			failedDispatch = append(failedDispatch, ni.Name)
 			continue
 		}
+		share := weights[i] / totalWeight
 		err := node.StartRun(&cluster.StartRun{
 			RunID:      runMeta.ID,
 			Scenario:   scenJSON,
@@ -910,7 +956,7 @@ func (c *Controller) SetRunTargetWithRole(ctx context.Context, runID string, tar
 		}
 	}
 
-	for _, id := range ar.nodeIDs() {
+	for _, id := range ar.activeNodeIDs() {
 		if node := c.srv.Node(id); node != nil {
 			if err := node.SetTarget(runID, target); err != nil {
 				return err
@@ -934,6 +980,10 @@ type clusterHandler struct {
 
 func (h *clusterHandler) OnNodeJoined(n *cluster.Node) {
 	c := h.ctrl
+	info := n.Info()
+	if info.CertSerial != "" {
+		_ = c.results.BindAgentCertNode(c.ctx, info.CertSerial, n.ID(), info.Name)
+	}
 	c.mu.Lock()
 	ar := c.active
 	c.mu.Unlock()
@@ -1021,30 +1071,41 @@ func (h *clusterHandler) OnRunFinished(n *cluster.Node, f *cluster.RunFinished) 
 }
 
 type runNodeState struct {
-	id         string
-	name       string
-	finished   bool
-	lost       bool
-	errText    string
-	summary    *metrics.Snapshot
-	graceTimer *time.Timer
+	id            string
+	name          string
+	weight        float64
+	finished      bool
+	lost          bool
+	redistributed bool
+	errText       string
+	summary       *metrics.Snapshot
+	cumSnap       *metrics.Snapshot
+	seenSeqs      map[int64]bool
+	graceTimer    *time.Timer
 }
 
 type seqBucket struct {
 	seq       int64
 	snap      *metrics.Snapshot
 	seen      map[string]bool
+	nodes     map[string]metrics.NodeSnapshotView
 	createdAt time.Time
 }
 
+type readyBucket struct {
+	snap  *metrics.Snapshot
+	nodes []metrics.NodeSnapshotView
+}
+
 type activeRun struct {
-	ctrl         *Controller
-	id           string
-	projectID    string
-	scenarioName string
-	loadMode     scenario.LoadMode
-	alerts       *alertEvaluator
-	thresholds   []scenario.Threshold
+	ctrl          *Controller
+	id            string
+	projectID     string
+	scenarioName  string
+	loadMode      scenario.LoadMode
+	failurePolicy string
+	alerts        *alertEvaluator
+	thresholds    []scenario.Threshold
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -1054,11 +1115,13 @@ type activeRun struct {
 	startedAt         time.Time
 	thresholdAborted  bool
 	thresholdAbortMsg string
+	nodeAbortMsg      string
 	nodes             map[string]*runNodeState
 	buckets           map[int64]*seqBucket
 	nextFlushSeq      int64
 	finalized         bool
 
+	cumSnap     *metrics.Snapshot
 	latestView  *metrics.SnapshotView
 	totalReqs   int64
 	totalErrors int64
@@ -1066,21 +1129,42 @@ type activeRun struct {
 	stepErrors  map[string]int64
 }
 
-func newActiveRun(ctrl *Controller, id, projectID, scenarioName string, loadMode scenario.LoadMode, egress targetEgress, thresholds []scenario.Threshold) *activeRun {
-	return &activeRun{
-		ctrl:         ctrl,
-		id:           id,
-		projectID:    projectID,
-		scenarioName: scenarioName,
-		loadMode:     loadMode,
-		alerts:       newAlertEvaluator(id, ctrl.results, ctrl.hub, egress),
-		thresholds:   append([]scenario.Threshold(nil), thresholds...),
-		stopCh:       make(chan struct{}),
-		nodes:        make(map[string]*runNodeState),
-		buckets:      make(map[int64]*seqBucket),
-		stepReqs:     make(map[string]int64),
-		stepErrors:   make(map[string]int64),
+func newActiveRun(ctrl *Controller, id, projectID, scenarioName string, loadMode scenario.LoadMode, failurePolicy string, egress targetEgress, thresholds []scenario.Threshold) *activeRun {
+	if failurePolicy == "" {
+		failurePolicy = "redistribute"
 	}
+	return &activeRun{
+		ctrl:          ctrl,
+		id:            id,
+		projectID:     projectID,
+		scenarioName:  scenarioName,
+		loadMode:      loadMode,
+		failurePolicy: failurePolicy,
+		alerts:        newAlertEvaluator(id, ctrl.results, ctrl.hub, egress),
+		thresholds:    append([]scenario.Threshold(nil), thresholds...),
+		stopCh:        make(chan struct{}),
+		nodes:         make(map[string]*runNodeState),
+		buckets:       make(map[int64]*seqBucket),
+		stepReqs:      make(map[string]int64),
+		stepErrors:    make(map[string]int64),
+	}
+}
+
+func (r *activeRun) snapshotClone() *metrics.Snapshot {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.cumSnap == nil {
+		return nil
+	}
+	bin, err := r.cumSnap.MarshalBinary()
+	if err != nil {
+		return nil
+	}
+	var out metrics.Snapshot
+	if err := out.UnmarshalBinary(bin); err != nil {
+		return nil
+	}
+	return &out
 }
 
 func (r *activeRun) recordPrometheusTick(view *metrics.SnapshotView) exporter.PrometheusRun {
@@ -1132,11 +1216,15 @@ func (r *activeRun) setStartedAt(t time.Time) {
 	r.mu.Unlock()
 }
 
-func (r *activeRun) initNodes(nodes []cluster.NodeInfo) {
+func (r *activeRun) initNodes(nodes []cluster.NodeInfo, weights []float64) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for _, n := range nodes {
-		r.nodes[n.ID] = &runNodeState{id: n.ID, name: n.Name}
+	for i, n := range nodes {
+		w := 1.0
+		if i < len(weights) && weights[i] > 0 {
+			w = weights[i]
+		}
+		r.nodes[n.ID] = &runNodeState{id: n.ID, name: n.Name, weight: w}
 	}
 }
 
@@ -1156,6 +1244,18 @@ func (r *activeRun) nodeIDs() []string {
 	out := make([]string, 0, len(r.nodes))
 	for id := range r.nodes {
 		out = append(out, id)
+	}
+	return out
+}
+
+func (r *activeRun) activeNodeIDs() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for id, st := range r.nodes {
+		if !st.finished && !st.lost {
+			out = append(out, id)
+		}
 	}
 	return out
 }
@@ -1213,16 +1313,44 @@ func (r *activeRun) onSnapshot(nodeID string, rs *cluster.RunSnapshot) {
 		r.mu.Unlock()
 		return
 	}
+	nodeName := nodeID
+	if st := r.nodes[nodeID]; st != nil {
+		if st.name != "" {
+			nodeName = st.name
+		}
+		if !st.seenSeqs[rs.Seq] {
+			if st.seenSeqs == nil {
+				st.seenSeqs = make(map[int64]bool)
+			}
+			var nodeCopy metrics.Snapshot
+			if err := nodeCopy.UnmarshalBinary(rs.Snapshot); err == nil {
+				nodeCopy.TrimSamples(0)
+				if st.cumSnap == nil {
+					st.cumSnap = &nodeCopy
+				} else {
+					_ = st.cumSnap.Merge(&nodeCopy, metrics.MergeIntervals)
+				}
+				st.seenSeqs[rs.Seq] = true
+			}
+		}
+	}
+	nodeView := buildNodeSnapshotView(nodeID, nodeName, &snap)
+
 	b := r.buckets[rs.Seq]
 	if b == nil {
 		b = &seqBucket{
 			seq:       rs.Seq,
 			snap:      &snap,
 			seen:      map[string]bool{nodeID: true},
+			nodes:     map[string]metrics.NodeSnapshotView{nodeID: nodeView},
 			createdAt: time.Now(),
 		}
 		r.buckets[rs.Seq] = b
 	} else if !b.seen[nodeID] {
+		if b.nodes == nil {
+			b.nodes = make(map[string]metrics.NodeSnapshotView)
+		}
+		b.nodes[nodeID] = nodeView
 		if err := b.snap.Merge(&snap, metrics.MergeNodes); err == nil {
 			b.seen[nodeID] = true
 		}
@@ -1233,7 +1361,24 @@ func (r *activeRun) onSnapshot(nodeID string, rs *cluster.RunSnapshot) {
 	r.persistAndPublish(ready)
 }
 
-func (r *activeRun) takeReadyBuckets(flushAll bool) []*metrics.Snapshot {
+func sortedBucketNodes(m map[string]metrics.NodeSnapshotView) []metrics.NodeSnapshotView {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make([]metrics.NodeSnapshotView, 0, len(m))
+	for _, nv := range m {
+		out = append(out, nv)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].AgentName != out[j].AgentName {
+			return out[i].AgentName < out[j].AgentName
+		}
+		return out[i].AgentID < out[j].AgentID
+	})
+	return out
+}
+
+func (r *activeRun) takeReadyBuckets(flushAll bool) []readyBucket {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if len(r.buckets) == 0 {
@@ -1245,11 +1390,11 @@ func (r *activeRun) takeReadyBuckets(flushAll bool) []*metrics.Snapshot {
 			seqs = append(seqs, seq)
 		}
 		sort.Slice(seqs, func(i, j int) bool { return seqs[i] < seqs[j] })
-		out := make([]*metrics.Snapshot, 0, len(seqs))
+		out := make([]readyBucket, 0, len(seqs))
 		for _, seq := range seqs {
 			b := r.buckets[seq]
 			delete(r.buckets, seq)
-			out = append(out, b.snap)
+			out = append(out, readyBucket{snap: b.snap, nodes: sortedBucketNodes(b.nodes)})
 			if seq >= r.nextFlushSeq {
 				r.nextFlushSeq = seq + 1
 			}
@@ -1258,7 +1403,7 @@ func (r *activeRun) takeReadyBuckets(flushAll bool) []*metrics.Snapshot {
 	}
 
 	now := time.Now()
-	var out []*metrics.Snapshot
+	var out []readyBucket
 	for {
 		b := r.buckets[r.nextFlushSeq]
 		if b == nil {
@@ -1268,15 +1413,31 @@ func (r *activeRun) takeReadyBuckets(flushAll bool) []*metrics.Snapshot {
 			break
 		}
 		delete(r.buckets, r.nextFlushSeq)
-		out = append(out, b.snap)
+		out = append(out, readyBucket{snap: b.snap, nodes: sortedBucketNodes(b.nodes)})
 		r.nextFlushSeq++
 	}
 	return out
 }
 
-func (r *activeRun) persistAndPublish(snaps []*metrics.Snapshot) {
-	for _, s := range snaps {
+func (r *activeRun) persistAndPublish(items []readyBucket) {
+	for _, item := range items {
+		s := item.snap
 		view := s.View()
+		view.Nodes = item.nodes
+
+		r.mu.Lock()
+		if r.cumSnap == nil {
+			if bin, err := s.MarshalBinary(); err == nil {
+				var copySnap metrics.Snapshot
+				if copySnap.UnmarshalBinary(bin) == nil {
+					r.cumSnap = &copySnap
+				}
+			}
+		} else {
+			_ = r.cumSnap.Merge(s, metrics.MergeIntervals)
+		}
+		r.mu.Unlock()
+
 		if err := r.ctrl.results.AppendSnapshot(r.ctrl.ctx, r.id, view); err != nil {
 			r.ctrl.log.Warn("保存每秒快照失败", "run_id", r.id, "seq", s.Seq, "err", err)
 		}
@@ -1385,12 +1546,64 @@ func (r *activeRun) expireNode(nodeID, nodeName string, reason error) {
 	if reason != nil {
 		msg += "：" + reason.Error()
 	}
-	st.errText = msg
+	policy := r.failurePolicy
+
+	type survTarget struct {
+		id    string
+		share float64
+	}
+	var surviving []*runNodeState
+	survWeight := 0.0
+	for _, s := range r.nodes {
+		if !s.finished && !s.lost {
+			surviving = append(surviving, s)
+			survWeight += s.weight
+		}
+	}
+
+	var updates []survTarget
+	if policy != "abort" && len(surviving) > 0 && survWeight > 0 {
+		st.redistributed = true
+		for _, s := range surviving {
+			updates = append(updates, survTarget{
+				id:    s.id,
+				share: s.weight / survWeight,
+			})
+		}
+	} else {
+		st.errText = msg
+		if policy == "abort" && len(surviving) > 0 && r.nodeAbortMsg == "" {
+			r.nodeAbortMsg = msg
+		}
+	}
+
 	allDone := r.allNodesDoneLocked()
 	if allDone {
 		r.finalized = true
 	}
 	r.mu.Unlock()
+
+	now := time.Now()
+	if policy == "abort" {
+		r.alerts.observeCondition(r.ctrl.ctx, nodeName, "node_offline", store.AlertCritical, msg+"，已按策略立即中止压测", 1, 0, true, now)
+		if !allDone {
+			go func() {
+				_, _ = r.ctrl.StopRun(r.ctrl.ctx, r.id, true)
+			}()
+		}
+	} else if len(updates) > 0 {
+		rebalanceMsg := fmt.Sprintf("%s，已将其负载按权重重分配至其余 %d 个在线节点", msg, len(updates))
+		r.alerts.observeCondition(r.ctrl.ctx, nodeName, "node_offline", store.AlertWarning, rebalanceMsg, 1, 0, true, now)
+		for _, upd := range updates {
+			if node := r.ctrl.srv.Node(upd.id); node != nil {
+				if err := node.SetLoadShare(r.id, upd.share); err != nil {
+					r.ctrl.log.Warn("重分配节点负载占比失败", "run_id", r.id, "node_id", upd.id, "share", upd.share, "err", err)
+				}
+			}
+		}
+	} else {
+		r.alerts.observeCondition(r.ctrl.ctx, nodeName, "node_offline", store.AlertCritical, msg, 1, 0, true, now)
+	}
 
 	if allDone {
 		r.finalize()
@@ -1465,15 +1678,39 @@ func (r *activeRun) finalize() {
 		nodeOrder = append(nodeOrder, st)
 	}
 	sort.Slice(nodeOrder, func(i, j int) bool { return nodeOrder[i].id < nodeOrder[j].id })
+	var summaryNodes []metrics.NodeSnapshotView
 	for _, st := range nodeOrder {
 		if st.errText != "" {
 			errs = append(errs, st.errText)
 		}
-		if st.summary != nil {
+		nodeSnap := st.summary
+		if nodeSnap == nil {
+			nodeSnap = st.cumSnap
+		}
+		if nodeSnap != nil {
+			name := st.name
+			if name == "" {
+				name = st.id
+			}
+			summaryNodes = append(summaryNodes, buildNodeSnapshotView(st.id, name, nodeSnap))
+		}
+	}
+	sort.Slice(summaryNodes, func(i, j int) bool {
+		if summaryNodes[i].AgentName != summaryNodes[j].AgentName {
+			return summaryNodes[i].AgentName < summaryNodes[j].AgentName
+		}
+		return summaryNodes[i].AgentID < summaryNodes[j].AgentID
+	})
+	for _, st := range nodeOrder {
+		nodeSnap := st.summary
+		if nodeSnap == nil {
+			nodeSnap = st.cumSnap
+		}
+		if nodeSnap != nil {
 			if merged == nil {
-				merged = st.summary
+				merged = nodeSnap
 			} else {
-				_ = merged.Merge(st.summary, metrics.MergeNodes)
+				_ = merged.Merge(nodeSnap, metrics.MergeNodes)
 			}
 		}
 	}
@@ -1495,7 +1732,9 @@ func (r *activeRun) finalize() {
 		if b, err := merged.MarshalBinary(); err == nil {
 			mergedBin = b
 		}
-		if b, err := json.Marshal(merged.View()); err == nil {
+		sumView := merged.View()
+		sumView.Nodes = summaryNodes
+		if b, err := json.Marshal(sumView); err == nil {
 			sumJSON = b
 		}
 	}

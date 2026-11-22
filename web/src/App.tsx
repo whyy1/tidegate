@@ -20,6 +20,7 @@ import type {
 } from './lib/types'
 import { wsClient } from './lib/ws'
 import { AgentsView } from './views/AgentsView'
+import { GovernanceView } from './views/GovernanceView'
 import { HistoryCompareView } from './views/HistoryCompareView'
 import { LiveRunView } from './views/LiveRunView'
 import { ScenariosView } from './views/ScenariosView'
@@ -274,6 +275,7 @@ export function App() {
               projectId={activeProject.id}
               activeEnvId={activeEnvId}
               tempVars={tempVars}
+              canWrite={user.role !== 'viewer'}
               onTempVarsChange={setTempVars}
               onWorkspaceMutated={() => loadEnvironments(activeProject.id)}
               onQuickLoadTest={(apiDraft) => {
@@ -295,6 +297,7 @@ export function App() {
               environments={environments}
               activeEnvId={activeEnvId}
               tempVars={tempVars}
+              canWrite={user.role !== 'viewer'}
               onLaunchScenario={(scenarioId) => {
                 setQuickLoadAPI(null)
                 setInspectRunId('')
@@ -312,6 +315,7 @@ export function App() {
               activeEnvId={activeEnvId}
               tempVars={tempVars}
               agents={liveAgents}
+              canWrite={user.role !== 'viewer'}
               preloadedAPI={quickLoadAPI}
               preloadedScenarioId={preloadedScenarioId}
               inspectRunId={inspectRunId}
@@ -332,6 +336,7 @@ export function App() {
           {activeTab === 'history' && (
             <HistoryCompareView
               projectId={activeProject.id}
+              canWrite={user.role !== 'viewer'}
               onInspectRun={(runId) => {
                 setQuickLoadAPI(null)
                 setPreloadedScenarioId('')
@@ -345,12 +350,17 @@ export function App() {
           {activeTab === 'agents' && (
             <AgentsView
               agents={liveAgents}
+              isAdmin={user.role === 'admin'}
               onAgentsRefresh={async () => {
                 const list = await api.listAgents()
                 setAgents(list)
               }}
               onToast={pushToast}
             />
+          )}
+
+          {activeTab === 'governance' && (
+            <GovernanceView currentUser={user} onToast={pushToast} />
           )}
         </div>
       )}

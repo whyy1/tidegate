@@ -198,9 +198,12 @@ export function ProjectModal({
               </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1.5">
+                <div className="flex items-center justify-between mb-1">
                   <span className="font-medium text-slate-700">项目级变量（低于环境变量与临时变量优先级）</span>
                 </div>
+                <p className="text-[11px] text-slate-500 mb-1.5">
+                  勾选「密」的敏感变量将自动存入 AES-256-GCM 加密保险箱，导出与界面回显时会自动脱敏。
+                </p>
                 <KeyValueEditor
                   items={vars}
                   onChange={setVars}

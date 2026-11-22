@@ -221,6 +221,7 @@ func (s *Server) buildHandler() http.Handler {
 	apiMux.Handle("GET /api/v1/runs/{id}", authed(s.handleGetRun))
 	apiMux.Handle("GET /api/v1/runs/{id}/snapshots", authed(s.handleRunSnapshots))
 	apiMux.Handle("GET /api/v1/runs/{id}/samples", authed(s.handleRunSamples))
+	apiMux.Handle("GET /api/v1/runs/{id}/histogram", authed(s.handleRunHistogram))
 	apiMux.Handle("POST /api/v1/runs/{id}/stop", writer(s.handleStopRun))
 	apiMux.Handle("POST /api/v1/runs/{id}/target", writer(s.handleSetRunTarget))
 	apiMux.Handle("DELETE /api/v1/runs/{id}", writer(s.handleDeleteRun))
@@ -228,7 +229,12 @@ func (s *Server) buildHandler() http.Handler {
 
 	// Agents, system, WebSocket.
 	apiMux.Handle("GET /api/v1/agents", authed(s.handleListAgents))
+	apiMux.Handle("GET /api/v1/agents/ca", authed(s.handleGetAgentCA))
+	apiMux.Handle("GET /api/v1/agents/join-tokens", adminOnly(s.handleListJoinTokens))
+	apiMux.Handle("POST /api/v1/agents/join-tokens", adminOnly(s.handleCreateJoinToken))
+	apiMux.Handle("DELETE /api/v1/agents/join-tokens/{id}", adminOnly(s.handleDeleteJoinToken))
 	apiMux.Handle("PATCH /api/v1/agents/{id}", adminOnly(s.handlePatchAgent))
+	apiMux.Handle("DELETE /api/v1/agents/{id}", adminOnly(s.handleRevokeAgent))
 	apiMux.Handle("GET /api/v1/system/info", authed(s.handleSystemInfo))
 	apiMux.Handle("GET /api/v1/ws", authed(s.handleWS))
 

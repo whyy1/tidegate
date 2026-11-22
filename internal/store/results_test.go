@@ -409,3 +409,66 @@ func TestAuditLogsAndSecretVault(t *testing.T) {
 		t.Fatalf("SkipSecretDecrypt still leaked plaintext: %+v", resNoSec.Definition.Variables)
 	}
 }
+
+func TestClusterJoinTokensWeightsAndRevocationStore(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := OpenDB(filepath.Join(dir, DBFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rdb := NewResultDB(db)
+
+	if err := rdb.SetAgentSettings(ctx, AgentSettings{Name: "edge-a", BandwidthBps: 500_000_000, Weight: 3.5}); err != nil {
+		t.Fatal(err)
+	}
+	as, err := rdb.AgentSettings(ctx, "edge-a")
+	if err != nil || as.Weight != 3.5 || as.BandwidthBps != 500_000_000 {
+		t.Fatalf("AgentSettings weight = %+v, err=%v", as, err)
+	}
+
+	now := time.Now()
+	tok := AgentJoinToken{
+		Name:      "edge-token",
+		SingleUse: true,
+		CreatedBy: "admin",
+		CreatedAt: now,
+		ExpiresAt: now.Add(time.Hour),
+	}
+	if err := rdb.CreateJoinToken(ctx, &tok, "hash-1"); err != nil {
+		t.Fatal(err)
+	}
+	list, err := rdb.ListJoinTokens(ctx)
+	if err != nil || len(list) != 1 || !list[0].SingleUse {
+		t.Fatalf("ListJoinTokens = %+v, err=%v", list, err)
+	}
+	if _, err := rdb.ConsumeJoinToken(ctx, "hash-1", now.Add(time.Minute)); err != nil {
+		t.Fatalf("first ConsumeJoinToken failed: %v", err)
+	}
+	if _, err := rdb.ConsumeJoinToken(ctx, "hash-1", now.Add(2*time.Minute)); err == nil {
+		t.Fatal("expected error reusing single-use join token")
+	}
+
+	if err := rdb.SaveAgentCert(ctx, "abcd1234", "edge-a", now.Add(24*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if err := rdb.BindAgentCertNode(ctx, "abcd1234", "node-1", "edge-a"); err != nil {
+		t.Fatal(err)
+	}
+	if rev, err := rdb.IsAgentRevoked(ctx, "abcd1234", "node-1"); err != nil || rev {
+		t.Fatalf("expected non-revoked, got rev=%v err=%v", rev, err)
+	}
+	if err := rdb.RevokeAgent(ctx, "node-1", "edge-a", "abcd1234", "revoked"); err != nil {
+		t.Fatal(err)
+	}
+	if rev, err := rdb.IsAgentRevoked(ctx, "abcd1234", ""); err != nil || !rev {
+		t.Fatalf("expected revoked cert serial, got rev=%v err=%v", rev, err)
+	}
+	if rev, err := rdb.IsAgentRevoked(ctx, "", "node-1"); err != nil || !rev {
+		t.Fatalf("expected revoked node id, got rev=%v err=%v", rev, err)
+	}
+	if err := rdb.DeleteJoinToken(ctx, tok.ID); err != nil {
+		t.Fatal(err)
+	}
+}

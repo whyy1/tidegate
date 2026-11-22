@@ -60,6 +60,49 @@ func (p *profile) withOverride(at time.Duration, value float64) *profile {
 	return q
 }
 
+// withScale returns a profile that preserves p up to at and scales the
+// remainder [at, end) by factor with continuous cum values. Used by SetLoadShare.
+func (p *profile) withScale(at time.Duration, factor float64) *profile {
+	q := &profile{end: p.end}
+	if at < 0 {
+		at = 0
+	}
+	for _, s := range p.segs {
+		segEnd := s.start + s.dur
+		if segEnd <= at {
+			q.segs = append(q.segs, s)
+			continue
+		}
+		if s.start < at {
+			mid := s.valueAt(at)
+			first := segment{start: s.start, dur: at - s.start, from: s.from, to: mid, cum: s.cum}
+			q.segs = append(q.segs, first)
+			restCum := first.cum + (first.from+first.to)/2*first.dur.Seconds()
+			q.segs = append(q.segs, segment{
+				start: at,
+				dur:   segEnd - at,
+				from:  mid * factor,
+				to:    s.to * factor,
+				cum:   restCum,
+			})
+			continue
+		}
+		cum := 0.0
+		if len(q.segs) > 0 {
+			prev := q.segs[len(q.segs)-1]
+			cum = prev.cum + (prev.from+prev.to)/2*prev.dur.Seconds()
+		}
+		q.segs = append(q.segs, segment{
+			start: s.start,
+			dur:   s.dur,
+			from:  s.from * factor,
+			to:    s.to * factor,
+			cum:   cum,
+		})
+	}
+	return q
+}
+
 func (s *segment) valueAt(t time.Duration) float64 {
 	if s.dur <= 0 {
 		return s.to

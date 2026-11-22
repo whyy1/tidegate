@@ -1282,25 +1282,122 @@ func (s *Server) handleListAgents(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handlePatchAgent(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		BandwidthBps int64 `json:"bandwidth_bps"`
+		BandwidthBps *int64   `json:"bandwidth_bps"`
+		Weight       *float64 `json:"weight"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, err)
 		return
 	}
-	out, err := s.ctrl.UpdateAgentSettings(r.Context(), r.PathValue("id"), body.BandwidthBps)
+	out, err := s.ctrl.PatchAgentSettings(r.Context(), r.PathValue("id"), controller.PatchAgentSettingsRequest{
+		BandwidthBps: body.BandwidthBps,
+		Weight:       body.Weight,
+	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	s.audit(r, "agent.update", "agent", r.PathValue("id"), map[string]any{"bandwidth_bps": body.BandwidthBps})
+	s.audit(r, "agent.update", "agent", r.PathValue("id"), map[string]any{
+		"bandwidth_bps": out.BandwidthBps,
+		"weight":        out.Weight,
+	})
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleRevokeAgent(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.ctrl.RevokeAgent(r.Context(), id); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "agent.revoke", "agent", id, nil)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleGetAgentCA(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Query().Get("format") == "pem" {
+		pemBytes := s.ctrl.ClusterCACertPEM()
+		h := w.Header()
+		h.Set("Content-Type", "application/x-pem-file")
+		h.Set("Content-Disposition", `attachment; filename="tidegate-cluster-ca.pem"`)
+		h.Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(pemBytes)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"fingerprint": s.ctrl.ClusterCAFingerprint(),
+		"cert_pem":    string(s.ctrl.ClusterCACertPEM()),
+	})
+}
+
+func (s *Server) handleListJoinTokens(w http.ResponseWriter, r *http.Request) {
+	list, err := s.ctrl.ListJoinTokens(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) handleCreateJoinToken(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Name      string `json:"name"`
+		TTLHours  int    `json:"ttl_hours"`
+		SingleUse *bool  `json:"single_use"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	ttl := 24 * time.Hour
+	if body.TTLHours > 0 {
+		ttl = time.Duration(body.TTLHours) * time.Hour
+	}
+	singleUse := true
+	if body.SingleUse != nil {
+		singleUse = *body.SingleUse
+	}
+	createdBy := ""
+	if u, ok := auth.UserFromContext(r.Context()); ok {
+		createdBy = u.Username
+	}
+	out, err := s.ctrl.CreateJoinToken(r.Context(), body.Name, createdBy, ttl, singleUse)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "agent.join_token.create", "join_token", out.Item.ID, map[string]any{
+		"name":       out.Item.Name,
+		"single_use": out.Item.SingleUse,
+	})
+	writeJSON(w, http.StatusCreated, out)
+}
+
+func (s *Server) handleDeleteJoinToken(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if err := s.ctrl.DeleteJoinToken(r.Context(), id); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "agent.join_token.delete", "join_token", id, nil)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleRunHistogram(w http.ResponseWriter, r *http.Request) {
+	out, err := s.ctrl.RunHistogram(r.Context(), r.PathValue("id"))
+	if err != nil {
+		writeError(w, err)
+		return
+	}
 	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleSystemInfo(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"version":      s.opts.Version,
-		"tls":          s.opts.TLS,
-		"cluster_addr": s.ctrl.ClusterAddr(),
+		"version":                s.opts.Version,
+		"tls":                    s.opts.TLS,
+		"cluster_addr":           s.ctrl.ClusterAddr(),
+		"cluster_ca_fingerprint": s.ctrl.ClusterCAFingerprint(),
 	})
 }

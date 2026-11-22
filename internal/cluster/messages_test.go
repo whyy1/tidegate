@@ -26,6 +26,7 @@ func TestNodeAndControllerMessagesRoundTrip(t *testing.T) {
 				{Name: "eth0", LinkSpeedBps: 10_000_000_000},
 				{Name: "lo", LinkSpeedBps: 0},
 			},
+			Labels: map[string]string{"zone": "ap-east", "tier": "high"},
 		},
 		&Hello{}, // empty oneof member must still decode as *Hello
 		&SysStats{Time: ts, JSON: []byte(`{"cpu":0.25}`)},
@@ -70,7 +71,7 @@ func TestNodeAndControllerMessagesRoundTrip(t *testing.T) {
 			StartTime:  ts.Add(time.Second),
 		},
 		&StopRun{RunID: "run-9", Mode: StopAbort},
-		&SetTarget{RunID: "run-9", Value: 250.5},
+		&SetTarget{RunID: "run-9", Value: 250.5, LoadShare: 0.75},
 		&Ping{Nonce: 7, Time: ts},
 		&Ping{},
 	}
@@ -150,5 +151,25 @@ func TestMessageSizeLimitAndTokenEqual(t *testing.T) {
 	}
 	if TokenEqual("secret-token", "secret-token2") || TokenEqual("secret-token", "") {
 		t.Fatal("TokenEqual true for unequal tokens")
+	}
+
+	erWant := EnrollRequest{Token: "tgj_abc", CSRDER: []byte{1, 2, 3}, Name: "edge-1"}
+	erRaw, err := erWant.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var erGot EnrollRequest
+	if err := erGot.Unmarshal(erRaw); err != nil || !reflect.DeepEqual(erGot, erWant) {
+		t.Fatalf("EnrollRequest round-trip got=(%+v, %v)", erGot, err)
+	}
+
+	respWant := EnrollResponse{ClientCertPEM: []byte("CERT"), CACertPEM: []byte("CA"), RejectMessage: "denied"}
+	respRaw, err := respWant.Marshal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var respGot EnrollResponse
+	if err := respGot.Unmarshal(respRaw); err != nil || !reflect.DeepEqual(respGot, respWant) {
+		t.Fatalf("EnrollResponse round-trip got=(%+v, %v)", respGot, err)
 	}
 }

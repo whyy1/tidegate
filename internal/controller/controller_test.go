@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"tidegate/internal/agent"
+	"tidegate/internal/cluster"
 	"tidegate/internal/exporter"
 	"tidegate/internal/metrics"
 	"tidegate/internal/scenario"
@@ -1194,5 +1195,227 @@ func TestMetricsSinkInfluxAndPrometheusState(t *testing.T) {
 		case <-deadline2:
 			t.Fatal("run stalled while external sink was failing")
 		}
+	}
+}
+
+func TestClusterM3JoinTokensWeightsSelectorFailoverAndRevoke(t *testing.T) {
+	tsrv, err := testserver.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsrv.Start()
+	defer tsrv.Close()
+
+	c, st, rdb := newTestController(t, func(o *Options) {
+		o.InProcessLocalAgent = false
+		o.StartLocalAgent = false
+		o.NodeGracePeriod = 200 * time.Millisecond
+		o.StartDelay = 30 * time.Millisecond
+	})
+	ctx := context.Background()
+	caFP := c.ClusterCAFingerprint()
+	if len(caFP) != 64 || len(c.ClusterCACertPEM()) == 0 {
+		t.Fatalf("expected valid ClusterCA fingerprint & PEM, got fp=%q", caFP)
+	}
+
+	tok1, err := c.CreateJoinToken(ctx, "node-a-tok", "admin", time.Hour, true)
+	if err != nil || !strings.HasPrefix(tok1.Token, "tgj_") {
+		t.Fatalf("CreateJoinToken 1: tok=%+v err=%v", tok1, err)
+	}
+	tok2, err := c.CreateJoinToken(ctx, "node-b-tok", "admin", time.Hour, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ag1, err := agent.New(agent.Options{
+		JoinAddr:      c.ClusterAddr(),
+		Token:         tok1.Token,
+		Name:          "edge-a",
+		Version:       "1.0-test",
+		CAFingerprint: caFP,
+		CertDir:       t.TempDir(),
+		Labels:        map[string]string{"zone": "cn-hz"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx1, cancel1 := context.WithCancel(ctx)
+	defer cancel1()
+	done1 := make(chan error, 1)
+	go func() { done1 <- ag1.Run(ctx1) }()
+
+	ag2, err := agent.New(agent.Options{
+		JoinAddr:      c.ClusterAddr(),
+		Token:         tok2.Token,
+		Name:          "edge-b",
+		Version:       "1.0-test",
+		CAFingerprint: caFP,
+		CertDir:       t.TempDir(),
+		Labels:        map[string]string{"zone": "cn-hz"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx2, cancel2 := context.WithCancel(ctx)
+	defer cancel2()
+	done2 := make(chan error, 1)
+	go func() { done2 <- ag2.Run(ctx2) }()
+
+	waitForAgents(t, c, 2)
+
+	// Set 3:1 weights between edge-a (weight 3) and edge-b (weight 1).
+	wA, wB := 3.0, 1.0
+	if _, err := c.PatchAgentSettings(ctx, "edge-a", PatchAgentSettingsRequest{Weight: &wA}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.PatchAgentSettings(ctx, "edge-b", PatchAgentSettingsRequest{Weight: &wB}); err != nil {
+		t.Fatal(err)
+	}
+	agents, err := c.Agents(ctx)
+	if err != nil || len(agents) != 2 {
+		t.Fatalf("Agents = %+v err=%v", agents, err)
+	}
+	for _, ag := range agents {
+		if ag.Name == "edge-a" && (ag.LoadShare < 0.74 || ag.LoadShare > 0.76) {
+			t.Fatalf("expected edge-a LoadShare=0.75, got %+v", ag)
+		}
+		if ag.Name == "edge-b" && (ag.LoadShare < 0.24 || ag.LoadShare > 0.26) {
+			t.Fatalf("expected edge-b LoadShare=0.25, got %+v", ag)
+		}
+	}
+
+	proj, err := st.CreateProject(&store.Project{Name: "ClusterM3"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiObj, err := st.CreateAPI(proj.ID, &store.API{
+		Name:    "ping",
+		Request: store.APIRequest{Method: "GET", URL: tsrv.URL() + "/ping"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Non-matching NodeSelector must return ErrNoAgents.
+	if _, err := c.StartRun(ctx, proj.ID, StartRunRequest{
+		APIID:        apiObj.ID,
+		NodeSelector: map[string]string{"zone": "us-west"},
+	}); !errors.Is(err, ErrNoAgents) {
+		t.Fatalf("expected ErrNoAgents for unmatched selector, got %v", err)
+	}
+
+	// Start 4-VU run matching zone=cn-hz (3 VUs on edge-a, 1 VU on edge-b),
+	// then disconnect edge-b mid-run under "redistribute" failover!
+	sub := c.Subscribe()
+	defer sub.Close()
+	sub.SubscribeRun("*")
+
+	run1, err := c.StartRun(ctx, proj.ID, StartRunRequest{
+		APIID:             apiObj.ID,
+		NodeSelector:      map[string]string{"zone": "cn-hz"},
+		NodeFailurePolicy: "redistribute",
+		Load: &scenario.Load{
+			Mode:   "vus",
+			Stages: []scenario.Stage{{Duration: scenario.Duration(0), Target: 4}, {Duration: scenario.Duration(2500 * time.Millisecond), Target: 4}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var disconnected bool
+	var sawTwoNodeSnap bool
+	deadline := time.After(10 * time.Second)
+	var finalStatus store.RunStatus
+	for {
+		select {
+		case ev := <-sub.C():
+			if ev.RunID != run1.ID {
+				continue
+			}
+			if ev.Type == EventSnapshot && ev.Snapshot != nil {
+				if len(ev.Snapshot.Nodes) == 2 && !disconnected {
+					sawTwoNodeSnap = true
+					cancel2()
+					<-done2
+					disconnected = true
+				}
+			}
+			if ev.Type == EventRunStatus && !ev.Status.Active() {
+				finalStatus = ev.Status
+				goto afterRun1
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for redistribute run completion")
+		}
+	}
+afterRun1:
+	if !sawTwoNodeSnap || finalStatus != store.RunFinished {
+		t.Fatalf("sawTwoNodeSnap=%v finalStatus=%s (want RunFinished under redistribute)", sawTwoNodeSnap, finalStatus)
+	}
+	alerts, err := rdb.Alerts(ctx, run1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sawOfflineAlert bool
+	for _, al := range alerts {
+		if al.Kind == "node_offline" {
+			sawOfflineAlert = true
+		}
+	}
+	if !sawOfflineAlert {
+		t.Fatalf("expected node_offline alert recorded in %+v", alerts)
+	}
+
+	hist, err := c.RunHistogram(ctx, run1.ID)
+	if err != nil || len(hist.Bands) != 12 || hist.Latency.Count == 0 {
+		t.Fatalf("RunHistogram = %+v err=%v", hist, err)
+	}
+	finishedRun, err := rdb.GetRun(ctx, run1.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sumView metrics.SnapshotView
+	if err := json.Unmarshal(finishedRun.Summary, &sumView); err != nil {
+		t.Fatalf("unmarshal finished summary: %v", err)
+	}
+	if len(sumView.Nodes) != 2 {
+		t.Fatalf("expected 2 per-node entries retained in finished run summary (including failover node), got %d: %+v", len(sumView.Nodes), sumView.Nodes)
+	}
+
+	// Rejoin ag3 using a fresh join token and test "abort" failover + node revocation.
+	tok3, err := c.CreateJoinToken(ctx, "node-c-tok", "admin", time.Hour, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ag3, err := agent.New(agent.Options{
+		JoinAddr:      c.ClusterAddr(),
+		Token:         tok3.Token,
+		Name:          "edge-c",
+		Version:       "1.0-test",
+		CAFingerprint: caFP,
+		Labels:        map[string]string{"zone": "cn-hz"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx3, cancel3 := context.WithCancel(ctx)
+	defer cancel3()
+	done3 := make(chan error, 1)
+	go func() { done3 <- ag3.Run(ctx3) }()
+	waitForAgents(t, c, 2)
+
+	// Revoke edge-c -> must exit Run immediately with *cluster.RejectedError.
+	if err := c.RevokeAgent(ctx, "edge-c"); err != nil {
+		t.Fatalf("RevokeAgent: %v", err)
+	}
+	select {
+	case rerr := <-done3:
+		var rej *cluster.RejectedError
+		if !errors.As(rerr, &rej) {
+			t.Fatalf("expected RejectedError after RevokeAgent, got %v", rerr)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("timed out waiting for revoked edge-c disconnect")
 	}
 }

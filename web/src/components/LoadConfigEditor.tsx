@@ -472,6 +472,61 @@ export function LoadConfigEditor({ load, onChange, http, onHTTPChange, stepOptio
                   <span>忽略自签名 HTTPS 证书</span>
                 </label>
               </div>
+              <div>
+                <label className="block text-slate-600 mb-1">HTTP 协议版本</label>
+                <select
+                  value={http?.http_version || 'auto'}
+                  onChange={(e) =>
+                    onHTTPChange({
+                      ...(http || {}),
+                      http_version: e.target.value as 'auto' | 'http1' | 'http2',
+                    })
+                  }
+                  className="w-full px-2 py-1 border border-slate-300 rounded bg-white"
+                >
+                  <option value="auto">自动协商 (ALPN)</option>
+                  <option value="http1">强制 HTTP/1.1</option>
+                  <option value="http2">启用 HTTP/2</option>
+                </select>
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-slate-600 mb-1">出站代理 (HTTP / SOCKS5)</label>
+                <input
+                  type="text"
+                  placeholder="http://127.0.0.1:8888 或 socks5://127.0.0.1:1080"
+                  value={http?.proxy_url || ''}
+                  onChange={(e) => onHTTPChange({ ...(http || {}), proxy_url: e.target.value || undefined })}
+                  className="w-full px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                />
+              </div>
+              <div className="col-span-2 sm:col-span-4">
+                <label className="block text-slate-600 mb-1">自定义 Host / DNS 覆写（每行一条 `域名=IP:端口` 或 `域名=IP`）</label>
+                <textarea
+                  rows={2}
+                  placeholder="api.example.com=10.0.0.12"
+                  value={Object.entries(http?.dns_overrides || {})
+                    .map(([k, v]) => `${k}=${v}`)
+                    .join('\n')}
+                  onChange={(e) => {
+                    const map: Record<string, string> = {}
+                    for (const line of e.target.value.split(/\r?\n/)) {
+                      const trimmed = line.trim()
+                      if (!trimmed) continue
+                      const eq = trimmed.indexOf('=')
+                      if (eq > 0) {
+                        const host = trimmed.slice(0, eq).trim()
+                        const ip = trimmed.slice(eq + 1).trim()
+                        if (host && ip) map[host] = ip
+                      }
+                    }
+                    onHTTPChange({
+                      ...(http || {}),
+                      dns_overrides: Object.keys(map).length > 0 ? map : undefined,
+                    })
+                  }}
+                  className="w-full px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                />
+              </div>
             </div>
           )}
         </div>

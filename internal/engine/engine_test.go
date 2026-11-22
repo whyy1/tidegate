@@ -669,6 +669,35 @@ load: {stages: [{duration: 0s, target: 2}, {duration: 1500ms, target: 2}]}
 	}
 }
 
+func TestSetLoadShare(t *testing.T) {
+	srv := startTestServer(t)
+	p := compile(t, `
+steps: [{id: a, request: {url: BASE/ping}, think: {type: fixed, min: 40ms}}]
+load: {stages: [{duration: 0s, target: 6}, {duration: 2400ms, target: 6}]}
+`, srv.URL(), nil)
+	e, err := New(p, Options{LoadShare: 0.5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(1150 * time.Millisecond)
+		if err := e.SetLoadShare(1.0); err != nil {
+			t.Errorf("SetLoadShare(1.0): %v", err)
+		}
+	}()
+	go e.Run(context.Background())
+	var snaps []*metrics.Snapshot
+	for s := range e.Snapshots() {
+		snaps = append(snaps, s)
+	}
+	if len(snaps) == 0 || snaps[0].Target != 3 {
+		t.Fatalf("expected initial scaled target 3, got snaps=%+v", snaps)
+	}
+	if e.Summary().ActiveVUs != 6 {
+		t.Fatalf("peak VUs = %d after SetLoadShare(1.0), want 6", e.Summary().ActiveVUs)
+	}
+}
+
 func TestConnectBackoff(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {

@@ -32,6 +32,9 @@ import { SaveAPIModal } from '../components/SaveAPIModal'
 import { api, APIError } from '../lib/api'
 import type {
   API,
+  APIFieldDoc,
+  APIProtocol,
+  APIResponseExample,
   AssertRule,
   DataFile,
   DebugAPIResponse,
@@ -48,6 +51,7 @@ interface Props {
   projectId: string
   activeEnvId: string
   tempVars: Record<string, string>
+  canWrite?: boolean
   onTempVarsChange: (next: Record<string, string>) => void
   onWorkspaceMutated: () => Promise<void>
   onQuickLoadTest: (apiDraft: Partial<API>) => void
@@ -56,7 +60,7 @@ interface Props {
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
 }
 
-type ReqSubTab = 'params' | 'headers' | 'body' | 'auth' | 'extract' | 'assert'
+type ReqSubTab = 'params' | 'headers' | 'body' | 'auth' | 'extract' | 'assert' | 'docs'
 
 interface OpenTab {
   tabKey: string
@@ -132,6 +136,7 @@ export function WorkbenchView({
   projectId,
   activeEnvId,
   tempVars,
+  canWrite = true,
   onTempVarsChange,
   onWorkspaceMutated,
   onQuickLoadTest,
@@ -654,9 +659,12 @@ export function WorkbenchView({
   }
 
   const req = activeTab.api.request || { method: 'GET', url: '' }
+  const protocol = (req.protocol || 'http') as APIProtocol
   const body = req.body || { type: 'none' }
   const extracts = activeTab.api.extract || []
   const asserts = activeTab.api.assert || []
+  const examples = activeTab.api.examples || []
+  const responseFields = activeTab.api.response_fields || []
 
   const updateBody = (patch: Partial<NonNullable<API['request']['body']>>) => {
     updateActiveAPI((cur) => ({
@@ -664,6 +672,36 @@ export function WorkbenchView({
       request: {
         ...req,
         body: { ...body, ...patch },
+      },
+    }))
+  }
+
+  const updateWS = (patch: Partial<NonNullable<API['request']['ws']>>) => {
+    updateActiveAPI((cur) => ({
+      ...cur,
+      request: {
+        ...req,
+        ws: { ...(req.ws || {}), ...patch },
+      },
+    }))
+  }
+
+  const updateGRPC = (patch: Partial<NonNullable<API['request']['grpc']>>) => {
+    updateActiveAPI((cur) => ({
+      ...cur,
+      request: {
+        ...req,
+        grpc: { service: '', method: '', ...(req.grpc || {}), ...patch },
+      },
+    }))
+  }
+
+  const updateSSE = (patch: Partial<NonNullable<API['request']['sse']>>) => {
+    updateActiveAPI((cur) => ({
+      ...cur,
+      request: {
+        ...req,
+        sse: { ...(req.sse || {}), ...patch },
       },
     }))
   }
@@ -726,21 +764,24 @@ export function WorkbenchView({
             </button>
             <button
               type="button"
+              disabled={!canWrite}
               onClick={() => setImportOpen(true)}
-              className="inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-medium"
+              className="inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-md border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-medium disabled:opacity-45"
             >
               <Import className="w-3.5 h-3.5 text-sky-600" /> 导入接口
             </button>
           </div>
           <div className="flex items-center justify-between text-[11px] px-0.5">
             <span className="text-slate-500 font-medium">接口目录树</span>
-            <button
-              type="button"
-              onClick={() => setFolderModal({ open: true, folder: null, parentId: '' })}
-              className="inline-flex items-center gap-1 text-sky-700 hover:underline font-medium"
-            >
-              <FolderPlus className="w-3 h-3" /> 新建目录
-            </button>
+            {canWrite && (
+              <button
+                type="button"
+                onClick={() => setFolderModal({ open: true, folder: null, parentId: '' })}
+                className="inline-flex items-center gap-1 text-sky-700 hover:underline font-medium"
+              >
+                <FolderPlus className="w-3 h-3" /> 新建目录
+              </button>
+            )}
           </div>
         </div>
 
@@ -810,6 +851,11 @@ export function WorkbenchView({
 
         {/* URL & Actions Bar */}
         <div className="p-3 border-b border-slate-200 space-y-2 bg-white shrink-0">
+          {!canWrite && (
+            <div className="px-3 py-1.5 rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-[11px]">
+              当前账号角色为只读访客（viewer），可浏览目录与查看调试历史，但禁止发起实时调试、写入或发起压测。
+            </div>
+          )}
           <div className="flex items-center gap-2 text-xs">
             <span className="text-slate-400 shrink-0">接口名称：</span>
             <input
@@ -828,22 +874,60 @@ export function WorkbenchView({
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <select
-              aria-label="HTTP 方法"
-              value={req.method || 'GET'}
-              onChange={(e) =>
+              aria-label="协议类型"
+              value={protocol}
+              onChange={(e) => {
+                const nextProto = e.target.value as APIProtocol
                 updateActiveAPI((cur) => ({
                   ...cur,
-                  request: { ...req, method: e.target.value },
+                  request: {
+                    ...req,
+                    protocol: nextProto,
+                    method: nextProto === 'http' || nextProto === 'sse' ? req.method || 'GET' : '',
+                  },
                 }))
-              }
-              className="px-2.5 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono text-xs font-bold text-slate-800 focus:border-sky-500 focus:outline-none"
+                if (nextProto === 'ws' || nextProto === 'grpc' || nextProto === 'sse') {
+                  setReqSubTab('body')
+                }
+              }}
+              className="px-2 py-2 rounded-lg border border-slate-300 bg-slate-100 font-mono text-xs font-semibold text-slate-800 focus:border-sky-500 focus:outline-none"
+              title="选择请求协议：HTTP / WebSocket / gRPC / SSE"
             >
-              {['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
+              <option value="http">HTTP</option>
+              <option value="ws">WS</option>
+              <option value="grpc">gRPC</option>
+              <option value="sse">SSE</option>
             </select>
+
+            {protocol === 'http' || protocol === 'sse' ? (
+              <select
+                aria-label="HTTP 方法"
+                value={req.method || 'GET'}
+                onChange={(e) =>
+                  updateActiveAPI((cur) => ({
+                    ...cur,
+                    request: { ...req, method: e.target.value },
+                  }))
+                }
+                className="px-2.5 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono text-xs font-bold text-slate-800 focus:border-sky-500 focus:outline-none"
+              >
+                {['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].map((m) => (
+                  <option key={m} value={m}>
+                    {m}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span
+                className={`px-2.5 py-2 rounded-lg border font-mono text-xs font-bold ${
+                  protocol === 'ws'
+                    ? 'bg-purple-50 border-purple-200 text-purple-700'
+                    : 'bg-indigo-50 border-indigo-200 text-indigo-700'
+                }`}
+              >
+                {protocol === 'ws' ? 'WS' : 'gRPC'}
+              </span>
+            )}
 
             <input
               type="text"
@@ -863,13 +947,21 @@ export function WorkbenchView({
                   },
                 }))
               }}
-              placeholder="输入相对路径 /users/:id、完整 URL，或直接粘贴 curl 命令..."
+              placeholder={
+                protocol === 'ws'
+                  ? '输入 WebSocket 地址 ws:// 或 wss://...'
+                  : protocol === 'grpc'
+                    ? '输入 gRPC 目标地址，如 127.0.0.1:9090 或 grpc://host:9090'
+                    : protocol === 'sse'
+                      ? '输入 SSE 流式接口 URL，如 /api/events'
+                      : '输入相对路径 /users/:id、完整 URL，或直接粘贴 curl 命令...'
+              }
               className="flex-1 min-w-[240px] px-3 py-2 rounded-lg border border-slate-300 font-mono text-xs focus:border-sky-500 focus:outline-none"
             />
 
             <button
               type="button"
-              disabled={sending}
+              disabled={!canWrite || sending}
               onClick={() => void handleDebugSend()}
               className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#0B2A4A] hover:bg-[#123d69] text-white text-xs font-semibold disabled:opacity-50"
             >
@@ -879,9 +971,9 @@ export function WorkbenchView({
 
             <button
               type="button"
-              disabled={saving}
+              disabled={!canWrite || saving}
               onClick={() => void handleSave()}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium disabled:opacity-45"
             >
               <Save className="w-3.5 h-3.5" /> {activeTab.api.id ? '保存' : '另存到目录'}
             </button>
@@ -896,8 +988,9 @@ export function WorkbenchView({
 
             <button
               type="button"
+              disabled={!canWrite}
               onClick={() => onQuickLoadTest(activeTab.api)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-semibold"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-semibold disabled:opacity-45"
               title="将当前接口或草稿直接带入压测大盘发起压测"
             >
               <Zap className="w-3.5 h-3.5" /> 一键压测
@@ -916,11 +1009,22 @@ export function WorkbenchView({
                     id: 'params' as const,
                     label: `Params (${(req.path_params?.length || 0) + (req.query?.length || 0)})`,
                   },
-                  { id: 'headers' as const, label: `Headers (${req.headers?.length || 0})` },
-                  { id: 'body' as const, label: `Body (${body.type || 'none'})` },
+                  { id: 'headers' as const, label: protocol === 'grpc' ? `Metadata (${req.headers?.length || 0})` : `Headers (${req.headers?.length || 0})` },
+                  {
+                    id: 'body' as const,
+                    label:
+                      protocol === 'ws'
+                        ? `WS 帧与连接 (${req.ws?.messages?.length || 0})`
+                        : protocol === 'grpc'
+                          ? 'gRPC 调用配置'
+                          : protocol === 'sse'
+                            ? 'SSE 流与请求体'
+                            : `Body (${body.type || 'none'})`,
+                  },
                   { id: 'auth' as const, label: `Auth (${activeTab.api.auth?.type || 'inherit'})` },
                   { id: 'extract' as const, label: `提取器 (${extracts.length})` },
                   { id: 'assert' as const, label: `断言 (${asserts.length})` },
+                  { id: 'docs' as const, label: `文档示例 (${examples.length + responseFields.length})` },
                 ] as const
               ).map((st) => (
                 <button
@@ -1046,8 +1150,252 @@ export function WorkbenchView({
             )}
 
             {reqSubTab === 'body' && (
-              <div className="space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="space-y-4">
+                {protocol === 'ws' && (
+                  <div className="rounded-lg border border-purple-200 bg-purple-50/40 p-3 space-y-3">
+                    <div className="font-semibold text-purple-900">WebSocket 握手与消息帧设置</div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-slate-600 mb-1">子协议 Subprotocols（逗号分隔）</label>
+                        <input
+                          type="text"
+                          value={(req.ws?.subprotocols || []).join(',')}
+                          onChange={(e) =>
+                            updateWS({
+                              subprotocols: e.target.value
+                                .split(',')
+                                .map((s) => s.trim())
+                                .filter(Boolean),
+                            })
+                          }
+                          placeholder="chat,json"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-600 mb-1">期望接收消息数 (recv_count)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={req.ws?.recv_count ?? 1}
+                          onChange={(e) => updateWS({ recv_count: Math.max(0, Number(e.target.value) || 0) })}
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-600 mb-1">读写空闲超时 (idle_timeout)</label>
+                        <input
+                          type="text"
+                          value={req.ws?.idle_timeout || ''}
+                          onChange={(e) => updateWS({ idle_timeout: e.target.value || undefined })}
+                          placeholder="默认 5s"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                        />
+                      </div>
+                    </div>
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between">
+                        <span className="font-medium text-slate-700">握手后发送的消息帧序列</span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateWS({
+                              messages: [...(req.ws?.messages || []), { type: 'text', data: '{"type":"ping"}' }],
+                            })
+                          }
+                          className="inline-flex items-center gap-1 text-sky-700 hover:underline font-medium"
+                        >
+                          <Plus className="w-3.5 h-3.5" /> 添加发送帧
+                        </button>
+                      </div>
+                      {(req.ws?.messages || []).map((msg, i) => (
+                        <div key={i} className="grid grid-cols-12 gap-2 items-start">
+                          <select
+                            value={msg.type || 'text'}
+                            onChange={(e) =>
+                              updateWS({
+                                messages: (req.ws?.messages || []).map((m, idx) =>
+                                  idx === i ? { ...m, type: e.target.value as 'text' | 'binary' } : m
+                                ),
+                              })
+                            }
+                            className="col-span-2 px-2 py-1.5 border border-slate-300 rounded bg-white"
+                          >
+                            <option value="text">Text 文本</option>
+                            <option value="binary">Binary (Base64)</option>
+                          </select>
+                          <textarea
+                            rows={2}
+                            value={msg.data}
+                            onChange={(e) =>
+                              updateWS({
+                                messages: (req.ws?.messages || []).map((m, idx) =>
+                                  idx === i ? { ...m, data: e.target.value } : m
+                                ),
+                              })
+                            }
+                            placeholder='支持 {{变量}}，如 {"action":"subscribe"}'
+                            className="col-span-9 px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateWS({ messages: (req.ws?.messages || []).filter((_, idx) => idx !== i) })
+                            }
+                            className="col-span-1 justify-self-end p-1 text-slate-400 hover:text-rose-600"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                {protocol === 'grpc' && (
+                  <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-3 space-y-3">
+                    <div className="font-semibold text-indigo-900">gRPC 一元调用 (Unary) 参数与消息体</div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-slate-600 mb-1">服务名 (Service)</label>
+                        <input
+                          type="text"
+                          value={req.grpc?.service || ''}
+                          onChange={(e) => updateGRPC({ service: e.target.value })}
+                          placeholder="example.Greeter"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-600 mb-1">方法名 (Method)</label>
+                        <input
+                          type="text"
+                          value={req.grpc?.method || ''}
+                          onChange={(e) => updateGRPC({ method: e.target.value })}
+                          placeholder="SayHello"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-600 mb-1">调用超时 (timeout)</label>
+                        <input
+                          type="text"
+                          value={req.grpc?.timeout || ''}
+                          onChange={(e) => updateGRPC({ timeout: e.target.value || undefined })}
+                          placeholder="默认 5s"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-600 mb-1">请求载荷编码</label>
+                        <select
+                          value={req.grpc?.payload_encoding || 'json'}
+                          onChange={(e) => updateGRPC({ payload_encoding: e.target.value })}
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                        >
+                          <option value="json">JSON 编解码</option>
+                          <option value="base64">Raw Protobuf (Base64)</option>
+                        </select>
+                      </div>
+                      <div>
+                        <label className="block text-slate-600 mb-1">响应载荷编码</label>
+                        <select
+                          value={req.grpc?.response_encoding || 'json'}
+                          onChange={(e) => updateGRPC({ response_encoding: e.target.value })}
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                        >
+                          <option value="json">JSON 解码</option>
+                          <option value="base64">Raw Protobuf (Base64)</option>
+                        </select>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="block text-slate-600 mb-1">期望状态码</label>
+                          <input
+                            type="number"
+                            min={0}
+                            max={16}
+                            value={req.grpc?.expected_status ?? ''}
+                            onChange={(e) =>
+                              updateGRPC({
+                                expected_status: e.target.value === '' ? undefined : Number(e.target.value),
+                              })
+                            }
+                            placeholder="0 (OK)"
+                            className="w-full px-2 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                          />
+                        </div>
+                        <label className="flex items-center gap-1.5 pt-5 text-slate-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(req.grpc?.tls)}
+                            onChange={(e) => updateGRPC({ tls: e.target.checked })}
+                          />
+                          <span>启用 TLS</span>
+                        </label>
+                      </div>
+                    </div>
+                    <div>
+                      <label className="block text-slate-600 font-medium mb-1">
+                        请求消息载荷（JSON 或 Base64，支持 `{'{{变量}}'}`）
+                      </label>
+                      <textarea
+                        rows={6}
+                        value={body.content || ''}
+                        onChange={(e) => updateBody({ type: body.type && body.type !== 'none' ? body.type : 'json', content: e.target.value })}
+                        placeholder='{\n  "name": "{{user}}"\n}'
+                        className="w-full p-2.5 border border-slate-300 rounded bg-white font-mono text-xs"
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {protocol === 'sse' && (
+                  <div className="rounded-lg border border-teal-200 bg-teal-50/40 p-3 space-y-3">
+                    <div className="font-semibold text-teal-900">Server-Sent Events (SSE) 流读取选项</div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                      <div>
+                        <label className="block text-slate-600 mb-1">最多接收事件数 (max_events)</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={req.sse?.max_events ?? ''}
+                          onChange={(e) =>
+                            updateSSE({
+                              max_events: e.target.value === '' ? undefined : Math.max(0, Number(e.target.value) || 0),
+                            })
+                          }
+                          placeholder="0=不限制直至关流"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-600 mb-1">终止关键字 (stop_contains)</label>
+                        <input
+                          type="text"
+                          value={req.sse?.stop_contains || ''}
+                          onChange={(e) => updateSSE({ stop_contains: e.target.value || undefined })}
+                          placeholder="[DONE]"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-slate-600 mb-1">流超时 (timeout)</label>
+                        <input
+                          type="text"
+                          value={req.sse?.timeout || ''}
+                          onChange={(e) => updateSSE({ timeout: e.target.value || undefined })}
+                          placeholder="默认 30s"
+                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {(protocol === 'http' || protocol === 'sse') && (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
                   <div className="flex flex-wrap gap-1.5">
                     {(
                       [
@@ -1227,6 +1575,8 @@ export function WorkbenchView({
                     />
                   </div>
                 )}
+                  </div>
+                )}
               </div>
             )}
 
@@ -1268,13 +1618,22 @@ export function WorkbenchView({
                       className="col-span-2 px-2 py-1 border border-slate-300 rounded bg-white"
                     >
                       <option value="jsonpath">JSONPath</option>
+                      <option value="xpath">XPath / HTML</option>
                       <option value="regex">正则 (Regex)</option>
                       <option value="header">响应头 (Header)</option>
                     </select>
                     <input
                       type="text"
                       value={ex.expr}
-                      placeholder="$.data.token"
+                      placeholder={
+                        ex.from === 'xpath'
+                          ? '//meta[@name="csrf"]/@content'
+                          : ex.from === 'regex'
+                            ? '"token":"([^"]+)"'
+                            : ex.from === 'header'
+                              ? 'X-Request-Id'
+                              : '$.data.token'
+                      }
                       onChange={(e) => {
                         const next: ExtractRule[] = extracts.map((row, idx) =>
                           idx === i ? { ...row, expr: e.target.value } : row
@@ -1338,6 +1697,7 @@ export function WorkbenchView({
                           if (t === 'status') updateAs({ type: t, equals: '200', max: undefined, value: undefined, expr: undefined, contains: undefined, exists: undefined })
                           else if (t === 'duration') updateAs({ type: t, max: '500ms', equals: undefined, value: undefined, expr: undefined, contains: undefined, exists: undefined })
                           else if (t === 'body_contains') updateAs({ type: t, value: 'ok', equals: undefined, max: undefined, expr: undefined, contains: undefined, exists: undefined })
+                          else if (t === 'json_schema') updateAs({ type: t, value: '{"type":"object"}', equals: undefined, max: undefined, expr: undefined, contains: undefined, exists: undefined })
                           else updateAs({ type: t, expr: '$.code', equals: '0', max: undefined, value: undefined })
                         }}
                         className="col-span-3 px-2 py-1 border border-slate-300 rounded bg-white"
@@ -1346,6 +1706,7 @@ export function WorkbenchView({
                         <option value="duration">最大耗时 (duration)</option>
                         <option value="body_contains">响应体包含 (body_contains)</option>
                         <option value="jsonpath">JSONPath 校验</option>
+                        <option value="json_schema">JSON Schema 校验</option>
                       </select>
 
                       {as.type === 'status' && (
@@ -1408,6 +1769,16 @@ export function WorkbenchView({
                         </>
                       )}
 
+                      {as.type === 'json_schema' && (
+                        <textarea
+                          rows={2}
+                          value={as.value || ''}
+                          placeholder='{"type":"object","required":["code","data"]}'
+                          onChange={(e) => updateAs({ value: e.target.value })}
+                          className="col-span-8 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                        />
+                      )}
+
                       <button
                         type="button"
                         onClick={() => updateActiveAPI((cur) => ({ ...cur, assert: asserts.filter((_, idx) => idx !== i) }))}
@@ -1430,6 +1801,236 @@ export function WorkbenchView({
                 >
                   <Plus className="w-3.5 h-3.5" /> 添加断言规则
                 </button>
+              </div>
+            )}
+
+            {reqSubTab === 'docs' && (
+              <div className="space-y-4">
+                <div>
+                  <label className="block font-semibold text-slate-700 mb-1">接口用途说明（导出 OpenAPI 文档描述）</label>
+                  <textarea
+                    rows={2}
+                    value={activeTab.api.description || ''}
+                    onChange={(e) => updateActiveAPI((cur) => ({ ...cur, description: e.target.value }))}
+                    placeholder="简要说明接口用途、调用前提和注意事项..."
+                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md focus:border-sky-500 focus:outline-none"
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-semibold text-slate-700">响应示例（OpenAPI Examples / Mock 参考）</span>
+                    <div className="flex items-center gap-2">
+                      {activeTab.debugResp?.result && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const res = activeTab.debugResp!.result
+                            const item: APIResponseExample = {
+                              name: `响应 ${res.status || 200}`,
+                              status: res.status || 200,
+                              content_type: res.content_type || 'application/json',
+                              body: res.body || '',
+                            }
+                            updateActiveAPI((cur) => ({ ...cur, examples: [...examples, item] }))
+                            onToast('success', '已从最近一次调试响应保存示例')
+                          }}
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded border border-sky-300 bg-sky-50 text-sky-800 hover:bg-sky-100 font-medium"
+                        >
+                          <Sparkles className="w-3 h-3" /> 将当前调试响应存为示例
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={() =>
+                          updateActiveAPI((cur) => ({
+                            ...cur,
+                            examples: [
+                              ...examples,
+                              { name: '成功响应', status: 200, content_type: 'application/json', body: '{\n  "ok": true\n}' },
+                            ],
+                          }))
+                        }
+                        className="inline-flex items-center gap-1 text-sky-600 hover:underline font-medium"
+                      >
+                        <Plus className="w-3.5 h-3.5" /> 添加示例
+                      </button>
+                    </div>
+                  </div>
+                  {examples.length === 0 ? (
+                    <p className="text-slate-400">暂无响应示例。可在调试接口后一键保存，或手动添加。</p>
+                  ) : (
+                    examples.map((ex, i) => (
+                      <div key={i} className="p-2.5 rounded-lg border border-slate-200 bg-slate-50/70 space-y-2">
+                        <div className="grid grid-cols-12 gap-2 items-center">
+                          <input
+                            type="text"
+                            value={ex.name}
+                            placeholder="示例名称"
+                            onChange={(e) =>
+                              updateActiveAPI((cur) => ({
+                                ...cur,
+                                examples: examples.map((x, idx) => (idx === i ? { ...x, name: e.target.value } : x)),
+                              }))
+                            }
+                            className="col-span-4 px-2 py-1 border border-slate-300 rounded bg-white"
+                          />
+                          <input
+                            type="number"
+                            value={ex.status}
+                            placeholder="状态码"
+                            onChange={(e) =>
+                              updateActiveAPI((cur) => ({
+                                ...cur,
+                                examples: examples.map((x, idx) =>
+                                  idx === i ? { ...x, status: Number(e.target.value) || 200 } : x
+                                ),
+                              }))
+                            }
+                            className="col-span-2 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                          />
+                          <input
+                            type="text"
+                            value={ex.content_type || ''}
+                            placeholder="application/json"
+                            onChange={(e) =>
+                              updateActiveAPI((cur) => ({
+                                ...cur,
+                                examples: examples.map((x, idx) =>
+                                  idx === i ? { ...x, content_type: e.target.value } : x
+                                ),
+                              }))
+                            }
+                            className="col-span-5 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                          />
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateActiveAPI((cur) => ({ ...cur, examples: examples.filter((_, idx) => idx !== i) }))
+                            }
+                            className="col-span-1 justify-self-end p-1 text-slate-400 hover:text-rose-600"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                        <textarea
+                          rows={3}
+                          value={ex.body || ''}
+                          onChange={(e) =>
+                            updateActiveAPI((cur) => ({
+                              ...cur,
+                              examples: examples.map((x, idx) => (idx === i ? { ...x, body: e.target.value } : x)),
+                            }))
+                          }
+                          className="w-full px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                        />
+                      </div>
+                    ))
+                  )}
+                </div>
+
+                <div className="space-y-2">
+                  <div className="flex items-center justify-between">
+                    <span className="font-semibold text-slate-700">响应字段文档（用于 OpenAPI Schema 导出）</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        updateActiveAPI((cur) => ({
+                          ...cur,
+                          response_fields: [
+                            ...responseFields,
+                            { path: 'data.id', type: 'string', required: true, description: '' },
+                          ] as APIFieldDoc[],
+                        }))
+                      }
+                      className="inline-flex items-center gap-1 text-sky-600 hover:underline font-medium"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> 添加字段说明
+                    </button>
+                  </div>
+                  {responseFields.length === 0 ? (
+                    <p className="text-slate-400">暂无响应字段文档定义。</p>
+                  ) : (
+                    responseFields.map((fd, i) => (
+                      <div key={i} className="grid grid-cols-12 gap-2 items-center p-2 rounded border border-slate-200 bg-slate-50/60">
+                        <input
+                          type="text"
+                          value={fd.path}
+                          placeholder="字段路径，如 data.token"
+                          onChange={(e) =>
+                            updateActiveAPI((cur) => ({
+                              ...cur,
+                              response_fields: responseFields.map((x, idx) =>
+                                idx === i ? { ...x, path: e.target.value } : x
+                              ),
+                            }))
+                          }
+                          className="col-span-3 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                        />
+                        <select
+                          value={fd.type || 'string'}
+                          onChange={(e) =>
+                            updateActiveAPI((cur) => ({
+                              ...cur,
+                              response_fields: responseFields.map((x, idx) =>
+                                idx === i ? { ...x, type: e.target.value } : x
+                              ),
+                            }))
+                          }
+                          className="col-span-2 px-2 py-1 border border-slate-300 rounded bg-white"
+                        >
+                          <option value="string">string</option>
+                          <option value="number">number</option>
+                          <option value="integer">integer</option>
+                          <option value="boolean">boolean</option>
+                          <option value="object">object</option>
+                          <option value="array">array</option>
+                        </select>
+                        <label className="col-span-2 inline-flex items-center gap-1 text-slate-700 cursor-pointer">
+                          <input
+                            type="checkbox"
+                            checked={Boolean(fd.required)}
+                            onChange={(e) =>
+                              updateActiveAPI((cur) => ({
+                                ...cur,
+                                response_fields: responseFields.map((x, idx) =>
+                                  idx === i ? { ...x, required: e.target.checked } : x
+                                ),
+                              }))
+                            }
+                          />
+                          <span>必填</span>
+                        </label>
+                        <input
+                          type="text"
+                          value={fd.description || ''}
+                          placeholder="字段业务含义说明"
+                          onChange={(e) =>
+                            updateActiveAPI((cur) => ({
+                              ...cur,
+                              response_fields: responseFields.map((x, idx) =>
+                                idx === i ? { ...x, description: e.target.value } : x
+                              ),
+                            }))
+                          }
+                          className="col-span-4 px-2 py-1 border border-slate-300 rounded bg-white"
+                        />
+                        <button
+                          type="button"
+                          onClick={() =>
+                            updateActiveAPI((cur) => ({
+                              ...cur,
+                              response_fields: responseFields.filter((_, idx) => idx !== i),
+                            }))
+                          }
+                          className="col-span-1 justify-self-end p-1 text-slate-400 hover:text-rose-600"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    ))
+                  )}
+                </div>
               </div>
             )}
           </div>

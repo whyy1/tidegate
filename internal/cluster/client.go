@@ -3,11 +3,14 @@ package cluster
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"os"
+	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -73,8 +76,14 @@ type ClientOptions struct {
 	MaxBufferedBytes   int
 
 	// Credentials secures the connection, for example credentials.NewTLS
-	// with a client certificate for mutual TLS. Nil connects in plaintext.
+	// with a client certificate for mutual TLS. Nil with TLS=false connects in plaintext.
 	Credentials credentials.TransportCredentials
+	// TLS enables automatic CSR enrollment + mutual TLS using the controller Cluster CA.
+	TLS bool
+	// CAFingerprint pins the expected lowercase SHA-256 hex digest of the Cluster CA.
+	CAFingerprint string
+	// CertDir optionally persists enrolled client certificates and CA cert between restarts.
+	CertDir string
 	// DialOptions are appended to the options the client builds.
 	DialOptions []grpc.DialOption
 	// Logf, when set, receives diagnostic messages.
@@ -160,9 +169,10 @@ type Client struct {
 	out     outbox
 	running atomic.Bool
 
-	mu     sync.Mutex
-	nodeID string
-	offset time.Duration
+	mu          sync.Mutex
+	nodeID      string
+	offset      time.Duration
+	clientCreds credentials.TransportCredentials
 }
 
 // NewClient creates a client. Call Run to connect.
@@ -225,8 +235,7 @@ func (c *Client) logf(format string, args ...any) {
 	}
 }
 
-func (c *Client) dialOptions() []grpc.DialOption {
-	creds := c.opts.Credentials
+func (c *Client) dialOptionsWithCreds(creds credentials.TransportCredentials) []grpc.DialOption {
 	if creds == nil {
 		creds = insecure.NewCredentials()
 	}
@@ -244,6 +253,110 @@ func (c *Client) dialOptions() []grpc.DialOption {
 		grpc.WithDisableRetry(),
 	}
 	return append(opts, c.opts.DialOptions...)
+}
+
+func (c *Client) ensureCredentials(ctx context.Context) (credentials.TransportCredentials, error) {
+	if c.opts.Credentials != nil {
+		return c.opts.Credentials, nil
+	}
+	if !c.opts.TLS {
+		return insecure.NewCredentials(), nil
+	}
+
+	c.mu.Lock()
+	cached := c.clientCreds
+	c.mu.Unlock()
+	if cached != nil {
+		return cached, nil
+	}
+
+	if c.opts.CertDir != "" {
+		certPath := filepath.Join(c.opts.CertDir, "agent-cert.pem")
+		keyPath := filepath.Join(c.opts.CertDir, "agent-key.pem")
+		caPath := filepath.Join(c.opts.CertDir, "cluster-ca.pem")
+		if certPEM, err1 := os.ReadFile(certPath); err1 == nil {
+			if keyPEM, err2 := os.ReadFile(keyPath); err2 == nil {
+				if caPEM, err3 := os.ReadFile(caPath); err3 == nil {
+					if tlsCfg, terr := ClientTLSConfig(caPEM, certPEM, keyPEM, c.opts.CAFingerprint); terr == nil {
+						creds := credentials.NewTLS(tlsCfg)
+						c.mu.Lock()
+						c.clientCreds = creds
+						c.mu.Unlock()
+						return creds, nil
+					}
+				}
+			}
+		}
+	}
+
+	if c.opts.Token == "" {
+		return nil, &RejectedError{
+			Reason:  RejectBadToken,
+			Message: "未找到已签发的节点证书，请通过 --token 提供集群加入令牌",
+		}
+	}
+
+	h := c.hello()
+	csrDER, keyPEM, err := GenerateClientCSR(h.Name)
+	if err != nil {
+		return nil, err
+	}
+	bootTLS, err := BootstrapTLSConfig(c.opts.CAFingerprint)
+	if err != nil {
+		return nil, &RejectedError{Reason: RejectProtocol, Message: err.Error()}
+	}
+
+	bootConn, err := grpc.NewClient("passthrough:///"+c.opts.Addr, c.dialOptionsWithCreds(credentials.NewTLS(bootTLS))...)
+	if err != nil {
+		return nil, err
+	}
+	defer bootConn.Close()
+
+	ectx, cancel := context.WithTimeout(ctx, c.opts.ConnectTimeout)
+	defer cancel()
+	var resp EnrollResponse
+	if err := bootConn.Invoke(ectx, enrollMethod, &EnrollRequest{
+		Token:  c.opts.Token,
+		CSRDER: csrDER,
+		Name:   h.Name,
+	}, &resp); err != nil {
+		if strings.Contains(err.Error(), "指纹") || strings.Contains(err.Error(), "certificate") {
+			return nil, fmt.Errorf("TLS 握手或 CA 指纹校验失败：%w", err)
+		}
+		return nil, err
+	}
+	if resp.RejectMessage != "" {
+		return nil, &RejectedError{Reason: RejectBadToken, Message: resp.RejectMessage}
+	}
+	if len(resp.ClientCertPEM) == 0 || len(resp.CACertPEM) == 0 {
+		return nil, errors.New("控制器返回的节点证书内容为空")
+	}
+
+	tlsCfg, err := ClientTLSConfig(resp.CACertPEM, resp.ClientCertPEM, keyPEM, c.opts.CAFingerprint)
+	if err != nil {
+		return nil, &RejectedError{Reason: RejectProtocol, Message: err.Error()}
+	}
+
+	if c.opts.CertDir != "" {
+		if err := os.MkdirAll(c.opts.CertDir, 0o700); err != nil {
+			return nil, fmt.Errorf("创建节点证书目录失败：%w", err)
+		}
+		if err := os.WriteFile(filepath.Join(c.opts.CertDir, "cluster-ca.pem"), resp.CACertPEM, 0o644); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(c.opts.CertDir, "agent-cert.pem"), resp.ClientCertPEM, 0o644); err != nil {
+			return nil, err
+		}
+		if err := os.WriteFile(filepath.Join(c.opts.CertDir, "agent-key.pem"), keyPEM, 0o600); err != nil {
+			return nil, err
+		}
+	}
+
+	creds := credentials.NewTLS(tlsCfg)
+	c.mu.Lock()
+	c.clientCreds = creds
+	c.mu.Unlock()
+	return creds, nil
 }
 
 func (c *Client) hello() *Hello {
@@ -277,7 +390,11 @@ func (c *Client) hello() *Hello {
 // session runs one connection attempt. welcomed reports whether the
 // controller accepted the node.
 func (c *Client) session(ctx context.Context, h ClientHandler) (welcomed bool, err error) {
-	conn, err := grpc.NewClient("passthrough:///"+c.opts.Addr, c.dialOptions()...)
+	creds, err := c.ensureCredentials(ctx)
+	if err != nil {
+		return false, err
+	}
+	conn, err := grpc.NewClient("passthrough:///"+c.opts.Addr, c.dialOptionsWithCreds(creds)...)
 	if err != nil {
 		return false, err
 	}
@@ -292,7 +409,11 @@ func (c *Client) session(ctx context.Context, h ClientHandler) (welcomed bool, e
 	}
 	if err != nil {
 		var rej *RejectedError
-		if !errors.As(err, &rej) {
+		if errors.As(err, &rej) {
+			c.mu.Lock()
+			c.clientCreds = nil
+			c.mu.Unlock()
+		} else {
 			if cause := context.Cause(sctx); cause != nil {
 				err = cause
 			}

@@ -1,8 +1,8 @@
-import { Activity, Cpu, FolderKanban, Globe, Layers, Play, Server, UserCheck, Workflow } from 'lucide-react'
+import { Activity, Cpu, FolderKanban, Globe, Layers, Play, Server, ShieldCheck, UserCheck, Workflow } from 'lucide-react'
 import type { AgentView, Environment, Project, User } from '../lib/types'
 import { TempVarsPopover } from './TempVarsPopover'
 
-export type NavTab = 'workbench' | 'scenarios' | 'run' | 'history' | 'agents'
+export type NavTab = 'workbench' | 'scenarios' | 'run' | 'history' | 'agents' | 'governance'
 
 interface Props {
   user: User
@@ -54,6 +54,7 @@ export function TopBar({
     { id: 'run', label: '实时压测', icon: Play, badge: activeRunId ? '运行中' : undefined },
     { id: 'history', label: '历史与对比', icon: Activity },
     { id: 'agents', label: '发压节点', icon: Server, badge: String(agents.length) },
+    { id: 'governance', label: '系统治理', icon: ShieldCheck },
   ]
 
   return (

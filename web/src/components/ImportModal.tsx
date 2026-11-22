@@ -64,7 +64,7 @@ export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, on
       return
     }
     if (sourceMode === 'text' && !textContent.trim()) {
-      onToast('error', '请先粘贴 OpenAPI / Postman / HAR / cURL 文本内容')
+      onToast('error', '请先粘贴 OpenAPI / Postman / Apifox / JMeter / HAR / cURL 文本内容')
       return
     }
     setBusy(true)
@@ -102,9 +102,9 @@ export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, on
       <div className="w-full max-w-3xl bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col max-h-[86vh]">
         <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
           <div>
-            <h2 className="text-sm font-semibold text-slate-900">两步安全导入接口 / 集合 / 抓包</h2>
+            <h2 className="text-sm font-semibold text-slate-900">两步安全导入接口 / 集合 / 测试计划</h2>
             <p className="text-[11px] text-slate-500">
-              自动识别 OpenAPI 3.x、Swagger 2.0、Postman v2.1、HAR 1.2、cURL 与 .tidegate；先预览差异再写入，保留既有接口 ID
+              自动识别 OpenAPI 3.x、Swagger 2.0、Postman v2.1、Apifox、JMeter (.jmx)、HAR 1.2、cURL 与 .tidegate；先预览差异再写入，保留既有接口 ID
             </p>
           </div>
           <button type="button" onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 rounded">
@@ -156,6 +156,8 @@ export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, on
                   <option value="openapi3">OpenAPI 3.0 / 3.1</option>
                   <option value="swagger2">Swagger 2.0</option>
                   <option value="postman">Postman v2.1 / 环境</option>
+                  <option value="apifox">Apifox 项目导出 (.json)</option>
+                  <option value="jmeter">JMeter 测试计划 (.jmx)</option>
                   <option value="har">HAR 1.2</option>
                   <option value="curl">cURL 命令</option>
                   <option value="tidegate">.tidegate 压缩包</option>
@@ -206,18 +208,20 @@ export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, on
                   setTextContent(e.target.value)
                   setPreview(null)
                 }}
-                placeholder="粘贴 OpenAPI JSON/YAML、Swagger 2.0、Postman Collection v2.1 / 环境 JSON、HAR JSON 或 curl 命令..."
+                placeholder="粘贴 OpenAPI JSON/YAML、Swagger 2.0、Postman v2.1、Apifox JSON、JMeter XML (.jmx)、HAR JSON 或 curl 命令..."
                 className="w-full px-3 py-2 border border-slate-300 rounded-lg font-mono text-xs focus:border-sky-500 focus:outline-none"
               />
             ) : (
               <label className="flex flex-col items-center justify-center gap-2 border-2 border-dashed border-slate-300 hover:border-sky-400 rounded-lg p-6 cursor-pointer bg-slate-50">
                 <FileUp className="w-5 h-5 text-sky-600" />
                 <span className="text-slate-700 font-medium">
-                  {selectedFile ? `${selectedFile.name} (${Math.round(selectedFile.size / 1024)} KB)` : '点击选择导入文件 (.yaml, .json, .har, .tidegate)'}
+                  {selectedFile
+                    ? `${selectedFile.name} (${Math.round(selectedFile.size / 1024)} KB)`
+                    : '点击选择导入文件 (.yaml, .json, .jmx, .har, .tidegate)'}
                 </span>
                 <input
                   type="file"
-                  accept=".yaml,.yml,.json,.har,.tidegate,.zip,.txt"
+                  accept=".yaml,.yml,.json,.jmx,.xml,.har,.tidegate,.zip,.txt"
                   onChange={(e) => {
                     setSelectedFile(e.target.files?.[0] || null)
                     setPreview(null)

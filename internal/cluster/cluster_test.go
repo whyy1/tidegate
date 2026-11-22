@@ -2,6 +2,7 @@ package cluster
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 )
 
@@ -456,4 +458,114 @@ func (w *wrapHandler) OnStartRun(r *StartRun) {
 		w.onStart(r)
 	}
 	w.ClientHandler.OnStartRun(r)
+}
+
+func TestClusterMTLSEnrollmentPinningAndRevocation(t *testing.T) {
+	ca, err := NewEphemeralClusterCA()
+	if err != nil {
+		t.Fatal(err)
+	}
+	srvTLS, err := ca.IssueServerTLSConfig([]string{"127.0.0.1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var mu sync.Mutex
+	revoked := map[string]bool{}
+	sh := newTestServerHandler()
+	srv, addr := startTestClusterServer(t, ServerOptions{
+		Version:     "0.1.0",
+		Credentials: credentials.NewTLS(srvTLS),
+		Handler:     sh,
+		Enroll: func(_ context.Context, req *EnrollRequest) (*EnrollResponse, error) {
+			if req.Token != "join-once" {
+				return &EnrollResponse{RejectMessage: "加入令牌无效"}, nil
+			}
+			certPEM, _, _, err := ca.SignCSR(req.CSRDER, req.Name, time.Hour)
+			if err != nil {
+				return nil, err
+			}
+			return &EnrollResponse{
+				ClientCertPEM: certPEM,
+				CACertPEM:     ca.CertPEM(),
+			}, nil
+		},
+		VerifyClientCert: func(cert *x509.Certificate, _ string) error {
+			mu.Lock()
+			isRevoked := revoked[CertSerialHex(cert)]
+			mu.Unlock()
+			if isRevoked {
+				return errors.New("节点证书已被管理员吊销")
+			}
+			return nil
+		},
+	})
+
+	// 1. Mismatched CA fingerprint must be rejected before trusting the server.
+	badFPClient := NewClient(ClientOptions{
+		Addr:          addr,
+		Token:         "join-once",
+		Version:       "0.1.0",
+		TLS:           true,
+		CAFingerprint: strings.Repeat("0", 64),
+		ConnectTimeout: time.Second,
+		MinBackoff:    10 * time.Millisecond,
+	})
+	badCtx, badCancel := context.WithTimeout(context.Background(), 400*time.Millisecond)
+	defer badCancel()
+	if err := badFPClient.Run(badCtx, newTestClientHandler()); err == nil {
+		t.Fatal("expected CA fingerprint mismatch error")
+	}
+
+	// 2. Enroll with valid CA fingerprint + persistent cert directory, then reconnect without token.
+	certDir := t.TempDir()
+	ch := newTestClientHandler()
+	cl := NewClient(ClientOptions{
+		Addr:          addr,
+		Token:         "join-once",
+		Name:          "tls-edge-1",
+		Version:       "0.1.0",
+		TLS:           true,
+		CAFingerprint: ca.Fingerprint(),
+		CertDir:       certDir,
+		Hello: func() Hello {
+			return Hello{Labels: map[string]string{"zone": "cn-hz", "tier": "edge"}}
+		},
+	})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- cl.Run(ctx, ch) }()
+
+	node := <-sh.joined
+	<-ch.welcomes
+	info := node.Info()
+	if info.CertSerial == "" || info.Labels["zone"] != "cn-hz" {
+		t.Fatalf("unexpected mTLS node info: %+v", info)
+	}
+	if err := node.SetLoadShare("run-x", 0.75); err != nil {
+		t.Fatal(err)
+	}
+	st := <-ch.targets
+	if st.RunID != "run-x" || st.LoadShare != 0.75 {
+		t.Fatalf("unexpected SetLoadShare payload: %+v", st)
+	}
+
+	// 3. Revoke serial and call DisconnectNode; Client.Run must exit with *RejectedError.
+	mu.Lock()
+	revoked[info.CertSerial] = true
+	mu.Unlock()
+	if !srv.DisconnectNode(node.ID(), "节点已被管理员吊销") {
+		t.Fatal("DisconnectNode returned false")
+	}
+	select {
+	case err := <-done:
+		var rej *RejectedError
+		if !errors.As(err, &rej) || !strings.Contains(rej.Message, "吊销") {
+			t.Fatalf("expected RejectedError with revocation message, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("timed out waiting for revoked client exit")
+	}
+	<-sh.left
 }

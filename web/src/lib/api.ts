@@ -1,7 +1,12 @@
 import type {
   API,
+  APIToken,
+  AgentCAInfo,
+  AgentJoinToken,
   AgentView,
   ApplyResult,
+  AuditEntry,
+  CreateAPITokenResult,
   DataFile,
   DebugAPIResponse,
   DebugRecord,
@@ -11,22 +16,28 @@ import type {
   FilePreview,
   Folder,
   HTTPOptions,
+  JoinTokenCreated,
   KeyValue,
   LoadConfig,
+  MetricsSinkConfig,
   PreviewResult,
   Project,
   Run,
   RunComparisonResponse,
   RunDetail,
   RunEstimate,
+  RunHistogramResponse,
   SampleRecord,
   Scenario,
+  ScenarioMixItem,
+  SecurityPolicy,
   SessionItem,
   SetupStatus,
   SnapshotView,
   SystemInfo,
   Tree,
   User,
+  UserRole,
 } from './types'
 
 export class APIError extends Error {
@@ -111,12 +122,15 @@ async function request<T>(
 
 export interface StartRunPayload {
   scenario_id?: string
+  mix?: ScenarioMixItem[]
   api_id?: string
   api?: Partial<API>
   environment_id?: string
   variables?: Record<string, string>
   load?: LoadConfig
   http?: HTTPOptions
+  node_selector?: Record<string, string>
+  node_failure_policy?: 'redistribute' | 'abort'
 }
 
 export interface ImportJSONInput {
@@ -351,6 +365,11 @@ export const api = {
       `/api/v1/projects/${encodeURIComponent(pid)}/scenarios/${encodeURIComponent(id)}?version=${encodeURIComponent(version)}`,
       { method: 'DELETE' }
     ),
+  exportScenarioURL: (pid: string, id: string, format: 'k6' = 'k6', envId = '') => {
+    const qs = new URLSearchParams({ format })
+    if (envId) qs.set('env_id', envId)
+    return `/api/v1/projects/${encodeURIComponent(pid)}/scenarios/${encodeURIComponent(id)}/export?${qs.toString()}`
+  },
 
   // Runs, Estimator, Snapshots, Samples, Compare
   estimateRun: (pid: string, payload: StartRunPayload) =>
@@ -382,19 +401,65 @@ export const api = {
   setRunTarget: (id: string, target: number) =>
     request<void>(`/api/v1/runs/${encodeURIComponent(id)}/target`, { method: 'POST', jsonBody: { target } }),
   deleteRun: (id: string) => request<void>(`/api/v1/runs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  exportRunURL: (id: string, format: 'json' | 'csv' | 'html' | 'har') =>
+  exportRunURL: (id: string, format: 'json' | 'csv' | 'html' | 'har' | 'jtl') =>
     `/api/v1/runs/${encodeURIComponent(id)}/export?format=${encodeURIComponent(format)}`,
+  runHistogram: (id: string) => request<RunHistogramResponse>(`/api/v1/runs/${encodeURIComponent(id)}/histogram`),
   compareRuns: (ids: string[], maxPoints = 600) =>
     request<RunComparisonResponse>(
       `/api/v1/runs/compare?ids=${encodeURIComponent(ids.join(','))}&max_points=${maxPoints}`
     ),
 
-  // Agents & System
+  // Agents, Enrollment & System
   listAgents: async () => (await request<AgentView[] | null>('/api/v1/agents')) || [],
-  patchAgent: (id: string, bandwidth_bps: number) =>
+  patchAgent: (id: string, patch: { bandwidth_bps?: number; weight?: number }) =>
     request<AgentView>(`/api/v1/agents/${encodeURIComponent(id)}`, {
       method: 'PATCH',
-      jsonBody: { bandwidth_bps },
+      jsonBody: patch,
     }),
+  revokeAgent: (id: string) => request<void>(`/api/v1/agents/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  getAgentCA: () => request<AgentCAInfo>('/api/v1/agents/ca'),
+  exportAgentCAPEMUrl: () => '/api/v1/agents/ca?format=pem',
+  listJoinTokens: async () => (await request<AgentJoinToken[] | null>('/api/v1/agents/join-tokens')) || [],
+  createJoinToken: (body: { name: string; ttl_hours?: number; single_use?: boolean }) =>
+    request<JoinTokenCreated>('/api/v1/agents/join-tokens', { method: 'POST', jsonBody: body }),
+  deleteJoinToken: (id: string) =>
+    request<void>(`/api/v1/agents/join-tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   systemInfo: () => request<SystemInfo>('/api/v1/system/info'),
+
+  // Personal API Tokens
+  listAPITokens: async () => (await request<APIToken[] | null>('/api/v1/auth/tokens')) || [],
+  createAPIToken: (body: { name: string; role?: UserRole; ttl_days?: number; expires_in?: string }) =>
+    request<CreateAPITokenResult>('/api/v1/auth/tokens', { method: 'POST', jsonBody: body }),
+  revokeAPIToken: (id: string) =>
+    request<void>(`/api/v1/auth/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+
+  // Governance: Users, Security Policy, Metrics Sink & Audit Logs
+  listUsers: async () => (await request<User[] | null>('/api/v1/users')) || [],
+  createUser: (body: { username: string; password: string; role: UserRole }) =>
+    request<{ user: User }>('/api/v1/users', { method: 'POST', jsonBody: body }),
+  patchUser: (id: number, body: { role: UserRole }) =>
+    request<{ user: User }>(`/api/v1/users/${id}`, { method: 'PATCH', jsonBody: body }),
+  deleteUser: (id: number) => request<void>(`/api/v1/users/${id}`, { method: 'DELETE' }),
+  getSecurityPolicy: () => request<SecurityPolicy>('/api/v1/settings/security'),
+  putSecurityPolicy: (pol: SecurityPolicy) =>
+    request<SecurityPolicy>('/api/v1/settings/security', { method: 'PUT', jsonBody: pol }),
+  getMetricsSink: () => request<MetricsSinkConfig>('/api/v1/settings/metrics-sink'),
+  putMetricsSink: (cfg: MetricsSinkConfig) =>
+    request<MetricsSinkConfig>('/api/v1/settings/metrics-sink', { method: 'PUT', jsonBody: cfg }),
+  testMetricsSink: (cfg?: MetricsSinkConfig) =>
+    request<{ ok: boolean }>('/api/v1/settings/metrics-sink/test', {
+      method: 'POST',
+      jsonBody: cfg,
+    }),
+  prometheusMetricsUrl: () => '/api/v1/metrics/prometheus',
+  fetchPrometheusMetrics: () => request<string>('/api/v1/metrics/prometheus'),
+  listAuditLogs: async (params: { action?: string; username?: string; limit?: number; before_id?: number } = {}) => {
+    const qs = new URLSearchParams()
+    if (params.action) qs.set('action', params.action)
+    if (params.username) qs.set('username', params.username)
+    if (params.limit) qs.set('limit', String(params.limit))
+    if (params.before_id) qs.set('before_id', String(params.before_id))
+    const q = qs.toString()
+    return (await request<AuditEntry[] | null>(`/api/v1/audit-logs${q ? '?' + q : ''}`)) || []
+  },
 }

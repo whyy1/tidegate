@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -125,6 +126,40 @@ CREATE TABLE audit_logs (
 );
 CREATE INDEX audit_logs_created ON audit_logs (created_at DESC, id DESC);
 CREATE INDEX audit_logs_action ON audit_logs (action, created_at DESC);
+`,
+}, {
+	Version: 3,
+	Name:    "cluster m3",
+	SQL: `
+ALTER TABLE agent_settings ADD COLUMN weight REAL NOT NULL DEFAULT 0;
+
+CREATE TABLE agent_join_tokens (
+	id          TEXT    PRIMARY KEY,
+	name        TEXT    NOT NULL DEFAULT '',
+	token_hash  TEXT    NOT NULL UNIQUE,
+	single_use  INTEGER NOT NULL DEFAULT 1,
+	used_count  INTEGER NOT NULL DEFAULT 0,
+	created_by  TEXT    NOT NULL DEFAULT '',
+	created_at  INTEGER NOT NULL,
+	expires_at  INTEGER NOT NULL,
+	used_at     INTEGER
+);
+
+CREATE TABLE agent_certs (
+	serial_hex  TEXT    PRIMARY KEY,
+	node_id     TEXT    NOT NULL DEFAULT '',
+	node_name   TEXT    NOT NULL DEFAULT '',
+	created_at  INTEGER NOT NULL,
+	expires_at  INTEGER NOT NULL,
+	revoked_at  INTEGER
+);
+CREATE INDEX agent_certs_node ON agent_certs (node_id, node_name);
+
+CREATE TABLE revoked_nodes (
+	node_id     TEXT    PRIMARY KEY,
+	reason      TEXT    NOT NULL DEFAULT '',
+	revoked_at  INTEGER NOT NULL
+);
 `,
 }}
 
@@ -273,8 +308,10 @@ type AgentSettings struct {
 	Name string `json:"name"`
 	// BandwidthBps is the manually set bandwidth limit in bits per second;
 	// 0 means unset (the negotiated link speed is used).
-	BandwidthBps int64     `json:"bandwidth_bps"`
-	UpdatedAt    time.Time `json:"updated_at,omitzero"`
+	BandwidthBps int64 `json:"bandwidth_bps"`
+	// Weight configures proportional load distribution; 0 means auto (by CPU cores).
+	Weight    float64   `json:"weight"`
+	UpdatedAt time.Time `json:"updated_at,omitzero"`
 }
 
 // DefaultMaxSamplesPerKind bounds the samples stored per run and category.
@@ -914,7 +951,7 @@ func (r *ResultDB) Settings(ctx context.Context) (map[string]string, error) {
 func (r *ResultDB) AgentSettings(ctx context.Context, name string) (AgentSettings, error) {
 	s := AgentSettings{Name: name}
 	var updated int64
-	err := r.db.QueryRowContext(ctx, `SELECT bandwidth_bps, updated_at FROM agent_settings WHERE agent_name = ?`, name).Scan(&s.BandwidthBps, &updated)
+	err := r.db.QueryRowContext(ctx, `SELECT bandwidth_bps, weight, updated_at FROM agent_settings WHERE agent_name = ?`, name).Scan(&s.BandwidthBps, &s.Weight, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return s, nil
 	}
@@ -928,7 +965,7 @@ func (r *ResultDB) AgentSettings(ctx context.Context, name string) (AgentSetting
 // ListAgentSettings returns the settings of every agent that has any,
 // sorted by name.
 func (r *ResultDB) ListAgentSettings(ctx context.Context) ([]AgentSettings, error) {
-	rows, err := r.db.QueryContext(ctx, `SELECT agent_name, bandwidth_bps, updated_at FROM agent_settings ORDER BY agent_name`)
+	rows, err := r.db.QueryContext(ctx, `SELECT agent_name, bandwidth_bps, weight, updated_at FROM agent_settings ORDER BY agent_name`)
 	if err != nil {
 		return nil, err
 	}
@@ -937,7 +974,7 @@ func (r *ResultDB) ListAgentSettings(ctx context.Context) ([]AgentSettings, erro
 	for rows.Next() {
 		var s AgentSettings
 		var updated int64
-		if err := rows.Scan(&s.Name, &s.BandwidthBps, &updated); err != nil {
+		if err := rows.Scan(&s.Name, &s.BandwidthBps, &s.Weight, &updated); err != nil {
 			return nil, err
 		}
 		s.UpdatedAt = fromMS(updated)
@@ -954,9 +991,12 @@ func (r *ResultDB) SetAgentSettings(ctx context.Context, s AgentSettings) error 
 	if s.BandwidthBps < 0 {
 		return invalid("bandwidth_bps", "不能是负数")
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT INTO agent_settings (agent_name, bandwidth_bps, updated_at) VALUES (?, ?, ?)
-		ON CONFLICT (agent_name) DO UPDATE SET bandwidth_bps = excluded.bandwidth_bps, updated_at = excluded.updated_at`,
-		s.Name, s.BandwidthBps, ms(time.Now()))
+	if math.IsNaN(s.Weight) || math.IsInf(s.Weight, 0) || s.Weight < 0 {
+		return invalid("weight", "节点权重必须是非负有限数字")
+	}
+	_, err := r.db.ExecContext(ctx, `INSERT INTO agent_settings (agent_name, bandwidth_bps, weight, updated_at) VALUES (?, ?, ?, ?)
+		ON CONFLICT (agent_name) DO UPDATE SET bandwidth_bps = excluded.bandwidth_bps, weight = excluded.weight, updated_at = excluded.updated_at`,
+		s.Name, s.BandwidthBps, s.Weight, ms(time.Now()))
 	return err
 }
 

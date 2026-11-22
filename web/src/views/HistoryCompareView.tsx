@@ -7,6 +7,7 @@ import type { Run, RunComparisonResponse } from '../lib/types'
 
 interface Props {
   projectId: string
+  canWrite?: boolean
   onInspectRun: (runId: string) => void
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
 }
@@ -25,7 +26,7 @@ function fmtDeltaPct(val?: number, lowerIsBetter = false) {
   )
 }
 
-export function HistoryCompareView({ projectId, onInspectRun, onToast }: Props) {
+export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, onToast }: Props) {
   const [runs, setRuns] = useState<Run[]>([])
   const [loading, setLoading] = useState(false)
   const [selectedIds, setSelectedIds] = useState<string[]>([])
@@ -237,7 +238,15 @@ export function HistoryCompareView({ projectId, onInspectRun, onToast }: Props) 
                           >
                             HAR
                           </a>
-                          {!active && (
+                          <a
+                            href={api.exportRunURL(r.id, 'jtl')}
+                            download
+                            className="px-1.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-600"
+                            title="导出 JMeter 兼容 JTL"
+                          >
+                            JTL
+                          </a>
+                          {!active && canWrite && (
                             <button
                               type="button"
                               title={confirmDelId === r.id ? '再次点击确认删除' : '删除压测记录'}

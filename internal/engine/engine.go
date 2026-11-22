@@ -84,12 +84,13 @@ type Engine struct {
 	data         []*dataState
 	seed         uint64
 
-	prof     atomic.Pointer[profile]
-	target   atomic.Uint64 // float64 bits of the current target
-	start    int64         // nanotime at start
-	started  time.Time
-	maxVUs   int
-	maxReq   int64
+	prof      atomic.Pointer[profile]
+	loadShare atomic.Uint64 // float64 bits of current load share
+	target    atomic.Uint64 // float64 bits of the current target
+	start     int64         // nanotime at start
+	started   time.Time
+	maxVUs    atomic.Int64
+	maxReq    int64
 	reqCount atomic.Int64
 	reqDone  atomic.Int64
 
@@ -219,11 +220,12 @@ func New(plan *scenario.Plan, opts Options) (*Engine, error) {
 	e.summary = e.collector.NewSnapshot()
 
 	share := opts.LoadShare
+	e.loadShare.Store(math.Float64bits(share))
 	e.prof.Store(newProfile(plan.Load.Stages, share))
 	if open {
-		e.maxVUs = max(1, int(math.Ceil(float64(plan.Load.MaxVUs)*share)))
+		e.maxVUs.Store(int64(max(1, int(math.Ceil(float64(plan.Load.MaxVUs)*share)))))
 	} else {
-		e.maxVUs = int(math.Round(plan.Load.PeakTarget * share))
+		e.maxVUs.Store(int64(math.Round(plan.Load.PeakTarget * share)))
 	}
 	if plan.Load.MaxRequests > 0 {
 		e.maxReq = max(1, int64(math.Ceil(float64(plan.Load.MaxRequests)*share)))
@@ -239,8 +241,8 @@ func New(plan *scenario.Plan, opts Options) (*Engine, error) {
 		if ds.Used && len(st.rows) == 0 {
 			return nil, fmt.Errorf("数据文件 %q 在当前切片中没有数据行", ds.Name)
 		}
-		if ds.Used && ds.Mode == scenario.DataUnique && e.maxVUs > len(st.rows) {
-			return nil, fmt.Errorf("数据文件 %q 是 unique 模式，只有 %d 行，少于最大虚拟用户数 %d", ds.Name, len(st.rows), e.maxVUs)
+		if ds.Used && ds.Mode == scenario.DataUnique && int(e.maxVUs.Load()) > len(st.rows) {
+			return nil, fmt.Errorf("数据文件 %q 是 unique 模式，只有 %d 行，少于最大虚拟用户数 %d", ds.Name, len(st.rows), e.maxVUs.Load())
 		}
 		e.data = append(e.data, st)
 	}
@@ -390,6 +392,14 @@ func (e *Engine) Abort() {
 	e.vusMu.Unlock()
 }
 
+func (e *Engine) currentLoadShare() float64 {
+	s := math.Float64frombits(e.loadShare.Load())
+	if s <= 0 {
+		return 1
+	}
+	return s
+}
+
 // SetTarget overrides the current target (virtual users or iterations per
 // second) from now until the end of the planned duration.
 func (e *Engine) SetTarget(v float64) error {
@@ -399,7 +409,7 @@ func (e *Engine) SetTarget(v float64) error {
 	if e.start == 0 {
 		return errors.New("engine: not running")
 	}
-	v *= e.opts.LoadShare
+	v *= e.currentLoadShare()
 	if e.plan.Load.Mode == scenario.LoadVUs {
 		v = math.Round(v)
 	}
@@ -407,6 +417,38 @@ func (e *Engine) SetTarget(v float64) error {
 		old := e.prof.Load()
 		if e.prof.CompareAndSwap(old, old.withOverride(e.elapsed(), v)) {
 			return nil
+		}
+	}
+}
+
+// SetLoadShare dynamically adjusts this node's share of the planned load curve
+// (used when redistributing load after another cluster node disconnects).
+func (e *Engine) SetLoadShare(share float64) error {
+	if share <= 0 || share > 1 || math.IsNaN(share) || math.IsInf(share, 0) {
+		return errors.New("engine: invalid load share")
+	}
+	if e.start == 0 {
+		return errors.New("engine: not running")
+	}
+	for {
+		oldShareBits := e.loadShare.Load()
+		oldShare := math.Float64frombits(oldShareBits)
+		if oldShare <= 0 {
+			oldShare = 1
+		}
+		if e.loadShare.CompareAndSwap(oldShareBits, math.Float64bits(share)) {
+			factor := share / oldShare
+			if e.plan.Load.Mode == scenario.LoadRate {
+				e.maxVUs.Store(int64(max(1, int(math.Ceil(float64(e.plan.Load.MaxVUs)*share)))))
+			} else {
+				e.maxVUs.Store(int64(math.Round(e.plan.Load.PeakTarget * share)))
+			}
+			for {
+				old := e.prof.Load()
+				if e.prof.CompareAndSwap(old, old.withScale(e.elapsed(), factor)) {
+					return nil
+				}
+			}
 		}
 	}
 }
@@ -583,7 +625,7 @@ func (e *Engine) runOpen() {
 			continue
 		default:
 		}
-		if nvus < e.maxVUs {
+		if nvus < int(e.maxVUs.Load()) {
 			v := e.newVU(nvus)
 			nvus++
 			go v.runOpen(planned)

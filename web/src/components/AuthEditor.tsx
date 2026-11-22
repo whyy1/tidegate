@@ -21,6 +21,7 @@ export function AuthEditor({ value, onChange, allowInherit = true }: Props) {
             { id: 'bearer' as const, label: 'Bearer Token' },
             { id: 'basic' as const, label: 'Basic Auth' },
             { id: 'api_key' as const, label: 'API Key' },
+            { id: 'oauth2' as const, label: 'OAuth 2.0' },
           ] as const
         ).map((opt) => (
           <button
@@ -111,6 +112,67 @@ export function AuthEditor({ value, onChange, allowInherit = true }: Props) {
               onChange={(e) => onChange({ ...cur, value: e.target.value })}
               className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md font-mono text-xs focus:border-sky-500 focus:outline-none"
             />
+          </div>
+        </div>
+      )}
+
+      {cur.type === 'oauth2' && (
+        <div className="space-y-3 max-w-2xl">
+          <div className="text-[11px] text-slate-500 bg-sky-50/70 border border-sky-200 rounded-md px-3 py-2">
+            支持 OAuth 2.0 客户端凭证模式（Client Credentials），调试和压测时会自动获取并按过期时间缓存/续期 Access Token。
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="md:col-span-2">
+              <label className="block text-slate-600 font-medium mb-1">Token 获取地址 (token_url)</label>
+              <input
+                type="text"
+                value={cur.token_url || ''}
+                placeholder="https://auth.example.com/oauth/token"
+                onChange={(e) => onChange({ ...cur, token_url: e.target.value })}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md font-mono text-xs focus:border-sky-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-600 font-medium mb-1">Client ID</label>
+              <input
+                type="text"
+                value={cur.client_id || ''}
+                placeholder="{{oauth_client_id}}"
+                onChange={(e) => onChange({ ...cur, client_id: e.target.value })}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md font-mono text-xs focus:border-sky-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-600 font-medium mb-1">Client Secret</label>
+              <input
+                type="password"
+                value={cur.client_secret || ''}
+                placeholder="{{oauth_client_secret}}"
+                onChange={(e) => onChange({ ...cur, client_secret: e.target.value })}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md font-mono text-xs focus:border-sky-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-600 font-medium mb-1">Scope（可选）</label>
+              <input
+                type="text"
+                value={cur.scope || ''}
+                placeholder="read write"
+                onChange={(e) => onChange({ ...cur, scope: e.target.value })}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md font-mono text-xs focus:border-sky-500 focus:outline-none"
+              />
+            </div>
+            <div>
+              <label className="block text-slate-600 font-medium mb-1">客户端认证方式</label>
+              <select
+                value={cur.client_auth || 'basic'}
+                onChange={(e) => onChange({ ...cur, client_auth: e.target.value as 'basic' | 'body' })}
+                className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md text-xs bg-white focus:border-sky-500 focus:outline-none"
+              >
+                <option value="basic">Authorization Basic 请求头（默认）</option>
+                <option value="body">表单 Body 参数传输</option>
+              </select>
+            </div>
           </div>
         </div>
       )}

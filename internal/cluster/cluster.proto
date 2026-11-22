@@ -19,6 +19,7 @@ option go_package = "tidegate/internal/cluster";
 
 service Cluster {
   rpc Connect(stream NodeMessage) returns (stream ControllerMessage);
+  rpc Enroll(EnrollRequest) returns (EnrollResponse);
 }
 
 // Envelope for everything a node sends.
@@ -57,6 +58,24 @@ message Hello {
   int32 cpu_cores = 7;
   uint64 memory_bytes = 8;
   repeated NetInterface interfaces = 9;
+  repeated Label labels = 10;
+}
+
+message Label {
+  string key = 1;
+  string value = 2;
+}
+
+message EnrollRequest {
+  string token = 1;
+  bytes csr_der = 2;
+  string name = 3;
+}
+
+message EnrollResponse {
+  bytes client_cert_pem = 1;
+  bytes ca_cert_pem = 2;
+  string reject_message = 3;
 }
 
 message NetInterface {
@@ -149,10 +168,11 @@ message StopRun {
   StopMode mode = 2;
 }
 
-// Changes the load target of a running run.
+// Changes the load target or load share of a running run.
 message SetTarget {
   string run_id = 1;
   double value = 2;
+  double load_share = 3;
 }
 
 message Ping {

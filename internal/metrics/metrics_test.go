@@ -419,4 +419,18 @@ func TestGroupStepExcludedFromTotalAndBinaryV2(t *testing.T) {
 	if v.IsGroup || !v.Steps[0].IsGroup || v.Steps[1].IsGroup || v.Requests != 20 {
 		t.Fatalf("view IsGroup mismatch: %+v", v)
 	}
+	if len(v.LatencyBuckets) != 12 {
+		t.Fatalf("expected 12 LatencyBuckets, got %d", len(v.LatencyBuckets))
+	}
+	var sumBuckets int64
+	for _, c := range v.LatencyBuckets {
+		sumBuckets += c
+	}
+	if sumBuckets != 2 {
+		t.Fatalf("LatencyBuckets sum = %d, want 2", sumBuckets)
+	}
+	dist := got.Total.Latency.Distribution(20)
+	if len(dist) == 0 {
+		t.Fatal("expected non-empty Distribution")
+	}
 }

@@ -45,7 +45,10 @@ serve 常用选项（也可用 TIDEGATE_* 环境变量）：
 
 agent 常用选项：
   --join <host:port>             控制器集群地址（TIDEGATE_JOIN）
-  --token <令牌>                 集群认证令牌（TIDEGATE_TOKEN）
+  --token <令牌>                 集群加入令牌或认证令牌（TIDEGATE_TOKEN）
+  --ca-fingerprint <SHA256>      控制器集群 CA SHA-256 指纹校验（TIDEGATE_CA_FINGERPRINT）
+  --labels <k=v,k2=v2>           节点标签（TIDEGATE_LABELS）
+  --cert-dir <目录>              mTLS 节点证书持久化目录（TIDEGATE_CERT_DIR）
   --name <名称>                  节点显示名称（TIDEGATE_NAME）
 
 run 常用选项：

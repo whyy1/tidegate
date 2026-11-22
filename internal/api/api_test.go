@@ -1838,4 +1838,69 @@ func TestM2CProtocolsScriptsAndMetricsExporters(t *testing.T) {
 		}
 		time.Sleep(40 * time.Millisecond)
 	}
+
+	// Verify Cluster M3 HTTP APIs: system/info fingerprint, /agents/ca, join tokens, agent weight, /runs/{id}/histogram.
+	resp = doJSONReq(t, adminCl, "GET", env.baseURL+"/api/v1/system/info", nil, false)
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET system/info = %d", resp.StatusCode)
+	}
+	var sysInfo map[string]any
+	decodeBody(t, resp, &sysInfo)
+	if fp, _ := sysInfo["cluster_ca_fingerprint"].(string); len(fp) != 64 {
+		t.Fatalf("expected 64-hex cluster_ca_fingerprint in %+v", sysInfo)
+	}
+
+	resp = doJSONReq(t, adminCl, "GET", env.baseURL+"/api/v1/agents/ca", nil, false)
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET agents/ca = %d", resp.StatusCode)
+	}
+	var caDTO struct {
+		Fingerprint string `json:"fingerprint"`
+		CertPEM     string `json:"cert_pem"`
+	}
+	decodeBody(t, resp, &caDTO)
+	if len(caDTO.Fingerprint) != 64 || !strings.Contains(caDTO.CertPEM, "BEGIN CERTIFICATE") {
+		t.Fatalf("unexpected agents/ca response: %+v", caDTO)
+	}
+
+	resp = doJSONReq(t, viewerCl, "POST", env.baseURL+"/api/v1/agents/join-tokens", map[string]any{"name": "v"}, true)
+	if resp.StatusCode != 403 {
+		resp.Body.Close()
+		t.Fatalf("viewer POST join-tokens = %d, want 403", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/agents/join-tokens", map[string]any{
+		"name":       "edge-batch",
+		"ttl_hours":  12,
+		"single_use": true,
+	}, true)
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("POST join-tokens = %d: %s", resp.StatusCode, b)
+	}
+	var jt controller.JoinTokenCreated
+	decodeBody(t, resp, &jt)
+	if !strings.HasPrefix(jt.Token, "tgj_") || jt.Item.ID == "" {
+		t.Fatalf("unexpected created join token: %+v", jt)
+	}
+
+	resp = doJSONReq(t, adminCl, "DELETE", env.baseURL+"/api/v1/agents/join-tokens/"+jt.Item.ID, nil, true)
+	if resp.StatusCode != 204 {
+		t.Fatalf("DELETE join-token = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = doJSONReq(t, adminCl, "GET", env.baseURL+"/api/v1/runs/"+runObj.ID+"/histogram", nil, false)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("GET run histogram = %d: %s", resp.StatusCode, b)
+	}
+	var hResp controller.RunHistogramResponse
+	decodeBody(t, resp, &hResp)
+	if hResp.RunID != runObj.ID || len(hResp.Bands) != 12 {
+		t.Fatalf("unexpected RunHistogramResponse: %+v", hResp)
+	}
 }

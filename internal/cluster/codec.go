@@ -1,6 +1,7 @@
 package cluster
 
 import (
+	"context"
 	"fmt"
 
 	"google.golang.org/grpc"
@@ -9,6 +10,7 @@ import (
 const (
 	serviceName   = "tidegate.cluster.v1.Cluster"
 	connectMethod = "/" + serviceName + "/Connect"
+	enrollMethod  = "/" + serviceName + "/Enroll"
 )
 
 // frame is a message that has already been encoded. Senders marshal when a
@@ -33,18 +35,26 @@ func (codec) Marshal(v any) ([]byte, error) {
 		return m.Marshal()
 	case *ControllerMessage:
 		return m.Marshal()
+	case *EnrollRequest:
+		return m.Marshal()
+	case *EnrollResponse:
+		return m.Marshal()
 	}
 	return nil, fmt.Errorf("cluster: cannot marshal %T", v)
 }
 
-// Unmarshal decodes into *NodeMessage or *ControllerMessage. gRPC hands a
-// freshly materialized buffer to v1 codecs, so the decoded []byte fields may
-// alias it safely.
+// Unmarshal decodes into *NodeMessage, *ControllerMessage, *EnrollRequest, or
+// *EnrollResponse. gRPC hands a freshly materialized buffer to v1 codecs, so the
+// decoded []byte fields may alias it safely.
 func (codec) Unmarshal(data []byte, v any) error {
 	switch m := v.(type) {
 	case *NodeMessage:
 		return m.Unmarshal(data)
 	case *ControllerMessage:
+		return m.Unmarshal(data)
+	case *EnrollRequest:
+		return m.Unmarshal(data)
+	case *EnrollResponse:
 		return m.Unmarshal(data)
 	}
 	return fmt.Errorf("cluster: cannot unmarshal into %T", v)
@@ -53,6 +63,7 @@ func (codec) Unmarshal(data []byte, v any) error {
 // connectHandler is the service interface registered with grpc.Server.
 type connectHandler interface {
 	connect(stream grpc.ServerStream) error
+	enroll(ctx context.Context, req *EnrollRequest) (*EnrollResponse, error)
 }
 
 var connectStreamDesc = grpc.StreamDesc{
@@ -64,6 +75,26 @@ var connectStreamDesc = grpc.StreamDesc{
 var serviceDesc = grpc.ServiceDesc{
 	ServiceName: serviceName,
 	HandlerType: (*connectHandler)(nil),
+	Methods: []grpc.MethodDesc{{
+		MethodName: "Enroll",
+		Handler: func(srv any, ctx context.Context, dec func(any) error, interceptor grpc.UnaryServerInterceptor) (any, error) {
+			in := new(EnrollRequest)
+			if err := dec(in); err != nil {
+				return nil, err
+			}
+			if interceptor == nil {
+				return srv.(connectHandler).enroll(ctx, in)
+			}
+			info := &grpc.UnaryServerInfo{
+				Server:     srv,
+				FullMethod: enrollMethod,
+			}
+			handler := func(ctx context.Context, req any) (any, error) {
+				return srv.(connectHandler).enroll(ctx, req.(*EnrollRequest))
+			}
+			return interceptor(ctx, in, info, handler)
+		},
+	}},
 	Streams: []grpc.StreamDesc{{
 		StreamName: "Connect",
 		Handler: func(srv any, stream grpc.ServerStream) error {

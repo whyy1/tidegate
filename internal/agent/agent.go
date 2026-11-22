@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -24,15 +25,19 @@ import (
 
 // Options configure an Agent.
 type Options struct {
-	JoinAddr       string
-	Token          string
-	Name           string
-	Version        string
-	WorkDir        string
-	SysInterval    time.Duration
-	Client         engine.ClientKind
-	Logger         *slog.Logger
-	ClusterOptions cluster.ClientOptions
+	JoinAddr          string
+	Token             string
+	Name              string
+	Version           string
+	WorkDir           string
+	SysInterval       time.Duration
+	Client            engine.ClientKind
+	Labels            map[string]string
+	CAFingerprint     string
+	CertDir           string
+	InsecurePlaintext bool
+	Logger            *slog.Logger
+	ClusterOptions    cluster.ClientOptions
 }
 
 // Agent runs on a load generator machine, maintaining a cluster connection to
@@ -64,12 +69,24 @@ type agentRun struct {
 	aborted bool
 }
 
+func hasPersistedCert(certDir string) bool {
+	if certDir == "" {
+		return false
+	}
+	for _, f := range []string{"agent-cert.pem", "agent-key.pem", "cluster-ca.pem"} {
+		if _, err := os.Stat(filepath.Join(certDir, f)); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
 // New creates an Agent. Call Run to connect and start serving.
 func New(opts Options) (*Agent, error) {
 	if opts.JoinAddr == "" {
 		return nil, errors.New("未指定控制器接入地址（--join）")
 	}
-	if opts.Token == "" {
+	if opts.Token == "" && !hasPersistedCert(opts.CertDir) {
 		return nil, errors.New("未指定节点接入令牌（--token）")
 	}
 	workDir := opts.WorkDir
@@ -107,6 +124,16 @@ func New(opts Options) (*Agent, error) {
 	if opts.Version != "" {
 		clOpts.Version = opts.Version
 	}
+	if clOpts.Credentials == nil && !opts.InsecurePlaintext {
+		clOpts.TLS = true
+		if opts.CAFingerprint != "" {
+			clOpts.CAFingerprint = opts.CAFingerprint
+		}
+		if opts.CertDir != "" {
+			clOpts.CertDir = opts.CertDir
+		}
+	}
+	labelsCopy := maps.Clone(opts.Labels)
 	if clOpts.Hello == nil {
 		clOpts.Hello = func() cluster.Hello {
 			return cluster.Hello{
@@ -115,6 +142,7 @@ func New(opts Options) (*Agent, error) {
 				CPUCores:    host.CPUCores,
 				MemoryBytes: host.MemoryTotalBytes,
 				Interfaces:  slices.Clone(ifaces),
+				Labels:      maps.Clone(labelsCopy),
 			}
 		}
 	}
@@ -250,8 +278,15 @@ func (h *handler) OnSetTarget(t *cluster.SetTarget) {
 	eng := ar.eng
 	ar.mu.Unlock()
 	if eng != nil {
-		if err := eng.SetTarget(t.Value); err != nil {
-			a.log.Warn("动态调整并发失败", "run_id", t.RunID, "value", t.Value, "err", err)
+		if t.LoadShare > 0 {
+			if err := eng.SetLoadShare(t.LoadShare); err != nil {
+				a.log.Warn("动态调整负载占比失败", "run_id", t.RunID, "load_share", t.LoadShare, "err", err)
+			}
+		}
+		if t.Value > 0 {
+			if err := eng.SetTarget(t.Value); err != nil {
+				a.log.Warn("动态调整并发失败", "run_id", t.RunID, "value", t.Value, "err", err)
+			}
 		}
 	}
 }

@@ -1,6 +1,8 @@
 package cluster
 
 import (
+	"maps"
+	"sort"
 	"strconv"
 	"time"
 
@@ -210,6 +212,52 @@ type Hello struct {
 	CPUCores    int
 	MemoryBytes uint64
 	Interfaces  []NetInterface
+	Labels      map[string]string
+}
+
+type labelEntry struct {
+	key   string
+	value string
+}
+
+func (m *labelEntry) size() int {
+	return sizeString(1, m.key) + sizeString(2, m.value)
+}
+
+func (m *labelEntry) appendTo(b []byte) []byte {
+	b = appendString(b, 1, m.key)
+	return appendString(b, 2, m.value)
+}
+
+func (m *labelEntry) unmarshal(b []byte) error {
+	d := decoder{b: b}
+	for d.next() {
+		switch d.key {
+		case 1<<3 | wBytes:
+			m.key = d.string()
+		case 2<<3 | wBytes:
+			m.value = d.string()
+		default:
+			d.skip()
+		}
+	}
+	return d.err
+}
+
+func sortedHelloLabels(labels map[string]string) []labelEntry {
+	if len(labels) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]labelEntry, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, labelEntry{key: k, value: labels[k]})
+	}
+	return out
 }
 
 // NetInterface describes one network interface of a node.
@@ -227,6 +275,9 @@ func (m *Hello) size() int {
 	for i := range m.Interfaces {
 		n += sizeMessage(9, &m.Interfaces[i])
 	}
+	for _, lb := range sortedHelloLabels(m.Labels) {
+		n += sizeMessage(10, &lb)
+	}
 	return n
 }
 
@@ -241,6 +292,9 @@ func (m *Hello) appendTo(b []byte) []byte {
 	b = appendUint(b, 8, m.MemoryBytes)
 	for i := range m.Interfaces {
 		b = appendMessage(b, 9, &m.Interfaces[i])
+	}
+	for _, lb := range sortedHelloLabels(m.Labels) {
+		b = appendMessage(b, 10, &lb)
 	}
 	return b
 }
@@ -269,6 +323,13 @@ func (m *Hello) unmarshal(b []byte) error {
 			var v NetInterface
 			d.message(&v)
 			m.Interfaces = append(m.Interfaces, v)
+		case 10<<3 | wBytes:
+			var lb labelEntry
+			d.message(&lb)
+			if m.Labels == nil {
+				m.Labels = make(map[string]string)
+			}
+			m.Labels[lb.key] = lb.value
 		default:
 			d.skip()
 		}
@@ -784,19 +845,21 @@ func (m *StopRun) Unmarshal(b []byte) error {
 	return m.unmarshal(b)
 }
 
-// SetTarget changes the load target of a running run.
+// SetTarget changes the load target or load share of a running run.
 type SetTarget struct {
-	RunID string
-	Value float64
+	RunID     string
+	Value     float64
+	LoadShare float64
 }
 
 func (m *SetTarget) size() int {
-	return sizeString(1, m.RunID) + sizeDouble(2, m.Value)
+	return sizeString(1, m.RunID) + sizeDouble(2, m.Value) + sizeDouble(3, m.LoadShare)
 }
 
 func (m *SetTarget) appendTo(b []byte) []byte {
 	b = appendString(b, 1, m.RunID)
-	return appendDouble(b, 2, m.Value)
+	b = appendDouble(b, 2, m.Value)
+	return appendDouble(b, 3, m.LoadShare)
 }
 
 func (m *SetTarget) unmarshal(b []byte) error {
@@ -807,6 +870,8 @@ func (m *SetTarget) unmarshal(b []byte) error {
 			m.RunID = d.string()
 		case 2<<3 | wFixed64:
 			m.Value = d.double()
+		case 3<<3 | wFixed64:
+			m.LoadShare = d.double()
 		default:
 			d.skip()
 		}
@@ -822,6 +887,94 @@ func (m *SetTarget) Unmarshal(b []byte) error {
 	*m = SetTarget{}
 	return m.unmarshal(b)
 }
+
+// EnrollRequest exchanges a cluster join token and PKCS#10 CSR for a signed mTLS certificate.
+type EnrollRequest struct {
+	Token  string
+	CSRDER []byte
+	Name   string
+}
+
+func (m *EnrollRequest) size() int {
+	return sizeString(1, m.Token) + sizeBytes(2, m.CSRDER) + sizeString(3, m.Name)
+}
+
+func (m *EnrollRequest) appendTo(b []byte) []byte {
+	b = appendString(b, 1, m.Token)
+	b = appendBytes(b, 2, m.CSRDER)
+	return appendString(b, 3, m.Name)
+}
+
+func (m *EnrollRequest) unmarshal(b []byte) error {
+	d := decoder{b: b}
+	for d.next() {
+		switch d.key {
+		case 1<<3 | wBytes:
+			m.Token = d.string()
+		case 2<<3 | wBytes:
+			m.CSRDER = d.bytes()
+		case 3<<3 | wBytes:
+			m.Name = d.string()
+		default:
+			d.skip()
+		}
+	}
+	return d.err
+}
+
+// Marshal returns the protobuf encoding of m.
+func (m *EnrollRequest) Marshal() ([]byte, error) { return marshal(m) }
+
+// Unmarshal decodes a protobuf encoded EnrollRequest into m.
+func (m *EnrollRequest) Unmarshal(b []byte) error {
+	*m = EnrollRequest{}
+	return m.unmarshal(b)
+}
+
+// EnrollResponse returns the signed client certificate and Cluster CA certificate.
+type EnrollResponse struct {
+	ClientCertPEM []byte
+	CACertPEM     []byte
+	RejectMessage string
+}
+
+func (m *EnrollResponse) size() int {
+	return sizeBytes(1, m.ClientCertPEM) + sizeBytes(2, m.CACertPEM) + sizeString(3, m.RejectMessage)
+}
+
+func (m *EnrollResponse) appendTo(b []byte) []byte {
+	b = appendBytes(b, 1, m.ClientCertPEM)
+	b = appendBytes(b, 2, m.CACertPEM)
+	return appendString(b, 3, m.RejectMessage)
+}
+
+func (m *EnrollResponse) unmarshal(b []byte) error {
+	d := decoder{b: b}
+	for d.next() {
+		switch d.key {
+		case 1<<3 | wBytes:
+			m.ClientCertPEM = d.bytes()
+		case 2<<3 | wBytes:
+			m.CACertPEM = d.bytes()
+		case 3<<3 | wBytes:
+			m.RejectMessage = d.string()
+		default:
+			d.skip()
+		}
+	}
+	return d.err
+}
+
+// Marshal returns the protobuf encoding of m.
+func (m *EnrollResponse) Marshal() ([]byte, error) { return marshal(m) }
+
+// Unmarshal decodes a protobuf encoded EnrollResponse into m.
+func (m *EnrollResponse) Unmarshal(b []byte) error {
+	*m = EnrollResponse{}
+	return m.unmarshal(b)
+}
+
+var _ = maps.Clone[map[string]string, string, string]
 
 // Ping is the controller's application level heartbeat.
 type Ping struct {
