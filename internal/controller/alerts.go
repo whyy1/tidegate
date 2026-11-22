@@ -301,14 +301,15 @@ func inspectStepsEgress(ctx context.Context, steps []scenario.Step, seen map[str
 			}
 			continue
 		}
-		if st.Request == nil {
-			continue
-		}
-		raw := strings.TrimSpace(st.Request.URL)
+		raw := stepTargetString(st)
 		if raw == "" || strings.Contains(raw, "{{") {
 			continue
 		}
-		u, err := url.Parse(raw)
+		norm := raw
+		if !strings.Contains(norm, "://") {
+			norm = "http://" + norm
+		}
+		u, err := url.Parse(norm)
 		if err != nil || u.Host == "" {
 			continue
 		}
@@ -326,7 +327,7 @@ func inspectStepsEgress(ctx context.Context, steps []scenario.Step, seen map[str
 		}
 
 		lookupCtx, cancel := context.WithTimeout(ctx, 750*time.Millisecond)
-		eg, err := sysmon.EgressInterfaceContext(lookupCtx, raw)
+		eg, err := sysmon.EgressInterfaceContext(lookupCtx, norm)
 		cancel()
 		if err != nil {
 			// Remote address lookup failed or remote agent may use a non-loopback path.
@@ -341,4 +342,19 @@ func inspectStepsEgress(ctx context.Context, steps []scenario.Step, seen map[str
 		}
 	}
 	return false
+}
+
+func stepTargetString(st scenario.Step) string {
+	switch {
+	case st.Request != nil:
+		return strings.TrimSpace(st.Request.URL)
+	case st.WebSocket != nil:
+		return strings.TrimSpace(st.WebSocket.URL)
+	case st.GRPC != nil:
+		return strings.TrimSpace(st.GRPC.Target)
+	case st.SSE != nil:
+		return strings.TrimSpace(st.SSE.URL)
+	default:
+		return ""
+	}
 }

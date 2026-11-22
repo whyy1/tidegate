@@ -314,6 +314,23 @@ func (c *compiler) collectVars() {
 	c.collectExtractVars("", c.def.Steps)
 }
 
+func (c *compiler) allocMutableVar(name string) {
+	if _, ok := c.slots[name]; ok {
+		return
+	}
+	c.slots[name] = len(c.plan.Vars)
+	c.plan.Vars = append(c.plan.Vars, name)
+	init := ""
+	if v, ok := c.consts[name]; ok {
+		if strings.Contains(v, "{{") {
+			c.fail("variables."+name, "这个变量会被提取器或脚本改写，初始值不能包含模板")
+		}
+		init = v
+		delete(c.consts, name)
+	}
+	c.plan.VarInit = append(c.plan.VarInit, init)
+}
+
 func (c *compiler) collectExtractVars(prefix string, steps []Step) {
 	for i := range steps {
 		st := &steps[i]
@@ -325,20 +342,14 @@ func (c *compiler) collectExtractVars(prefix string, steps []Step) {
 				c.fail(stepWhere(i, st.ID, fmt.Sprintf("%sextract[%d].name", prefix, j)), "变量名 %q 无效，只能包含字母、数字、下划线和连字符，且不能以数字开头", ex.Name)
 				continue
 			}
-			if _, ok := c.slots[ex.Name]; ok {
-				continue
-			}
-			c.slots[ex.Name] = len(c.plan.Vars)
-			c.plan.Vars = append(c.plan.Vars, ex.Name)
-			init := ""
-			if v, ok := c.consts[ex.Name]; ok {
-				if strings.Contains(v, "{{") {
-					c.fail("variables."+ex.Name, "这个变量会被提取器改写，初始值不能包含模板")
+			c.allocMutableVar(ex.Name)
+		}
+		if st.Script != nil && strings.TrimSpace(st.Script.Code) != "" {
+			if assigned, err := ExtractAssignedVars(st.Script.Code); err == nil {
+				for _, name := range assigned {
+					c.allocMutableVar(name)
 				}
-				init = v
-				delete(c.consts, ex.Name)
 			}
-			c.plan.VarInit = append(c.plan.VarInit, init)
 		}
 		if st.Group != nil {
 			c.collectExtractVars(prefix+"group.", st.Group.Children)
@@ -418,6 +429,60 @@ func (c *compiler) compileSteps() {
 	}
 	ids := map[string]string{}
 	c.plan.Steps = c.compileStepList("", c.def.Steps, ids)
+	if hasNetworkNode(c.plan.Steps) {
+		markScriptsAsGroup(c.plan.Steps, c.plan.FlatSteps)
+	}
+}
+
+func hasNetworkNode(nodes []Node) bool {
+	for _, n := range nodes {
+		switch st := n.(type) {
+		case *HTTPStep, *WSStep, *GRPCStepPlan, *SSEStepPlan:
+			return true
+		case *GroupNode:
+			if hasNetworkNode(st.Children) {
+				return true
+			}
+		case *LoopNode:
+			if hasNetworkNode(st.Children) {
+				return true
+			}
+		case *IfNode:
+			if hasNetworkNode(st.Then) || hasNetworkNode(st.Else) {
+				return true
+			}
+		case *WeightedNode:
+			for _, br := range st.Branches {
+				if hasNetworkNode(br.Steps) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func markScriptsAsGroup(nodes []Node, flat []StepInfo) {
+	for _, n := range nodes {
+		switch st := n.(type) {
+		case *ScriptStepPlan:
+			st.IsGroup = true
+			if st.Index >= 0 && st.Index < len(flat) {
+				flat[st.Index].IsGroup = true
+			}
+		case *GroupNode:
+			markScriptsAsGroup(st.Children, flat)
+		case *LoopNode:
+			markScriptsAsGroup(st.Children, flat)
+		case *IfNode:
+			markScriptsAsGroup(st.Then, flat)
+			markScriptsAsGroup(st.Else, flat)
+		case *WeightedNode:
+			for _, br := range st.Branches {
+				markScriptsAsGroup(br.Steps, flat)
+			}
+		}
+	}
 }
 
 func (c *compiler) compileStepList(prefix string, steps []Step, ids map[string]string) []Node {
@@ -441,6 +506,18 @@ func (c *compiler) compileStepList(prefix string, steps []Step, ids map[string]s
 		if st.Request != nil {
 			kindCount++
 		}
+		if st.WebSocket != nil {
+			kindCount++
+		}
+		if st.GRPC != nil {
+			kindCount++
+		}
+		if st.SSE != nil {
+			kindCount++
+		}
+		if st.Script != nil {
+			kindCount++
+		}
 		if st.Group != nil {
 			kindCount++
 		}
@@ -455,13 +532,21 @@ func (c *compiler) compileStepList(prefix string, steps []Step, ids map[string]s
 		}
 		switch {
 		case kindCount == 0:
-			c.fail(stepWhere(i, st.ID, "request"), "缺少 request 或控制流配置")
+			c.fail(stepWhere(i, st.ID, "request"), "缺少 request、协议步骤或控制流配置")
 			continue
 		case kindCount > 1:
-			c.fail(stepWhere(i, st.ID, ""), "同一时间只能设置 request、group、loop、if、weighted 中的一个")
+			c.fail(stepWhere(i, st.ID, ""), "同一时间只能设置 request、websocket、grpc、sse、script、group、loop、if、weighted 中的一个")
 			continue
 		case st.Request != nil:
 			nodes = append(nodes, c.compileHTTPStep(i, st))
+		case st.WebSocket != nil:
+			nodes = append(nodes, c.compileWSStep(i, st))
+		case st.GRPC != nil:
+			nodes = append(nodes, c.compileGRPCStep(i, st))
+		case st.SSE != nil:
+			nodes = append(nodes, c.compileSSEStep(i, st))
+		case st.Script != nil:
+			nodes = append(nodes, c.compileScriptStep(i, st))
 		case st.Group != nil:
 			nodes = append(nodes, c.compileGroupStep(i, st, ids))
 		case st.Loop != nil:
@@ -595,6 +680,159 @@ func (c *compiler) compileWeightedStep(i int, st *Step, ids map[string]string) *
 	return wn
 }
 
+type headerFlags struct {
+	hasContentType    bool
+	hasAuthorization  bool
+	hasUserAgent      bool
+	hasAcceptEncoding bool
+	hasConnection     bool
+	hasHost           bool
+}
+
+func (c *compiler) compileHeadersHelper(w func(string) string, fieldPrefix string, hdrMap map[string]string, hdrList []NameValue, lowerCanon bool) ([]HeaderTemplate, headerFlags) {
+	var out []HeaderTemplate
+	var flags headerFlags
+	add := func(rawName, val string) {
+		name := strings.TrimSpace(rawName)
+		if !tokenRe.MatchString(name) {
+			c.fail(w(fieldPrefix), "请求头名称 %q 无效", rawName)
+			return
+		}
+		canon := textproto.CanonicalMIMEHeaderKey(name)
+		if !lowerCanon {
+			switch canon {
+			case "Content-Length", "Transfer-Encoding":
+				c.fail(w(fieldPrefix+"."+name), "由引擎根据请求体自动生成，不能手动设置")
+				return
+			case "Content-Type":
+				flags.hasContentType = true
+			case "Authorization":
+				flags.hasAuthorization = true
+			case "User-Agent":
+				flags.hasUserAgent = true
+			case "Accept-Encoding":
+				flags.hasAcceptEncoding = true
+			case "Connection":
+				flags.hasConnection = true
+			case "Host":
+				flags.hasHost = true
+			}
+		} else {
+			canon = strings.ToLower(name)
+		}
+		if strings.ContainsAny(val, "\r\n") {
+			c.fail(w(fieldPrefix+"."+name), "值不能包含换行")
+			return
+		}
+		out = append(out, HeaderTemplate{Name: name, Canonical: canon, Value: c.template(w(fieldPrefix+"."+name), val, escapeNone)})
+	}
+	for _, k := range sortedKeys(hdrMap) {
+		add(k, hdrMap[k])
+	}
+	for _, h := range hdrList {
+		add(h.Name, string(h.Value))
+	}
+	return out, flags
+}
+
+func (c *compiler) compileURLWithQuery(w func(string) string, fieldPrefix, rawURL string, query map[string]Scalar, queryList []NameValue, parseFn func(string) (*Target, error), schemeHint string) URLTemplate {
+	rawURL = strings.TrimSpace(rawURL)
+	if rawURL == "" {
+		c.fail(w(fieldPrefix+".url"), "不能为空")
+		return URLTemplate{}
+	}
+	parts := []*Template{c.template(w(fieldPrefix+".url"), rawURL, escapeNone)}
+	if len(query) > 0 || len(queryList) > 0 {
+		sep := "?"
+		if strings.Contains(rawURL, "?") {
+			sep = "&"
+		}
+		for _, k := range sortedKeys(query) {
+			parts = append(parts, StaticTemplate(sep+queryEscape(k)+"="))
+			parts = append(parts, c.template(w(fieldPrefix+".query."+k), string(query[k]), escapeQuery))
+			sep = "&"
+		}
+		for _, q := range queryList {
+			parts = append(parts, StaticTemplate(sep+queryEscape(q.Name)+"="))
+			parts = append(parts, c.template(w(fieldPrefix+".query."+q.Name), string(q.Value), escapeQuery))
+			sep = "&"
+		}
+	}
+	return c.compileURLWith(w(fieldPrefix+".url"), concatTemplates(parts...), parseFn, schemeHint)
+}
+
+func (c *compiler) compileStepAuth(w func(string) string, fieldPrefix string, ba *BasicAuth, oa *OAuth2Auth, hasAuth bool, hdrs *[]HeaderTemplate) (basicUser, basicPass *Template, oaPlan *OAuth2Plan) {
+	if hasAuth {
+		return nil, nil, nil
+	}
+	if ba != nil {
+		if strings.TrimSpace(ba.Username) == "" {
+			c.fail(w(fieldPrefix+".basic_auth.username"), "basic 鉴权需要用户名")
+		} else {
+			ut := c.template(w(fieldPrefix+".basic_auth.username"), ba.Username, escapeNone)
+			pt := c.template(w(fieldPrefix+".basic_auth.password"), ba.Password, escapeNone)
+			if ut.Static() && pt.Static() {
+				cred := base64.StdEncoding.EncodeToString([]byte(ut.Literal() + ":" + pt.Literal()))
+				*hdrs = append(*hdrs, HeaderTemplate{Name: "Authorization", Canonical: "Authorization", Value: StaticTemplate("Basic " + cred)})
+			} else {
+				basicUser = ut
+				basicPass = pt
+			}
+		}
+	}
+	if oa != nil {
+		if strings.TrimSpace(oa.TokenURL) == "" {
+			c.fail(w(fieldPrefix+".oauth2.token_url"), "OAuth 2.0 鉴权需要 token_url")
+		}
+		if strings.TrimSpace(oa.ClientID) == "" {
+			c.fail(w(fieldPrefix+".oauth2.client_id"), "OAuth 2.0 鉴权需要 client_id")
+		}
+		ca := strings.ToLower(strings.TrimSpace(oa.ClientAuth))
+		if ca == "" {
+			ca = "basic"
+		} else if ca != "basic" && ca != "body" {
+			c.fail(w(fieldPrefix+".oauth2.client_auth"), "取值 %q 无效，只能是 basic 或 body", oa.ClientAuth)
+		}
+		oaPlan = &OAuth2Plan{
+			TokenURL:     c.template(w(fieldPrefix+".oauth2.token_url"), oa.TokenURL, escapeNone),
+			ClientID:     c.template(w(fieldPrefix+".oauth2.client_id"), oa.ClientID, escapeNone),
+			ClientSecret: c.template(w(fieldPrefix+".oauth2.client_secret"), oa.ClientSecret, escapeNone),
+			Scope:        c.template(w(fieldPrefix+".oauth2.scope"), oa.Scope, escapeNone),
+			ClientAuth:   ca,
+		}
+	}
+	return basicUser, basicPass, oaPlan
+}
+
+func (c *compiler) compileStepExtractAssert(w func(string) string, st *Step, minStatus int) (extracts []Extractor, asserts []Assertion, needBody, hasStatusAssert bool) {
+	for j, ex := range st.Extract {
+		if ex.Disabled {
+			continue
+		}
+		if e, ok := c.compileExtract(w(fmt.Sprintf("extract[%d]", j)), ex); ok {
+			if e.Source != ExtractHeader {
+				needBody = true
+			}
+			extracts = append(extracts, e)
+		}
+	}
+	for j, as := range st.Assert {
+		if as.Disabled {
+			continue
+		}
+		if a, ok := c.compileAssertWith(w(fmt.Sprintf("assert[%d]", j)), as, minStatus); ok {
+			switch a.Kind {
+			case AssertBodyContains, AssertJSONPath, AssertJSONSchema:
+				needBody = true
+			case AssertStatus:
+				hasStatusAssert = true
+			}
+			asserts = append(asserts, a)
+		}
+	}
+	return extracts, asserts, needBody, hasStatusAssert
+}
+
 func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 	w := func(field string) string { return stepWhere(i, st.ID, field) }
 	req := st.Request
@@ -614,139 +852,299 @@ func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 		c.fail(w("request.method"), "请求方法 %q 无效", req.Method)
 	}
 
-	// URL plus query parameters form one template.
-	rawURL := strings.TrimSpace(req.URL)
-	if rawURL == "" {
-		c.fail(w("request.url"), "不能为空")
-	} else {
-		parts := []*Template{c.template(w("request.url"), rawURL, escapeNone)}
-		if len(req.Query) > 0 || len(req.QueryList) > 0 {
-			sep := "?"
-			if strings.Contains(rawURL, "?") {
-				sep = "&"
-			}
-			for _, k := range sortedKeys(req.Query) {
-				parts = append(parts, StaticTemplate(sep+queryEscape(k)+"="))
-				parts = append(parts, c.template(w("request.query."+k), string(req.Query[k]), escapeQuery))
-				sep = "&"
-			}
-			for _, q := range req.QueryList {
-				parts = append(parts, StaticTemplate(sep+queryEscape(q.Name)+"="))
-				parts = append(parts, c.template(w("request.query."+q.Name), string(q.Value), escapeQuery))
-				sep = "&"
-			}
-		}
-		s.URL = c.compileURL(w("request.url"), concatTemplates(parts...))
-	}
+	s.URL = c.compileURLWithQuery(w, "request", req.URL, req.Query, req.QueryList, ParseTarget, "http:// 或 https://")
 
-	// Headers in a stable order.
-	hasContentType := false
-	hasAuthorization := false
-	addHeader := func(rawName, val string) {
-		name := strings.TrimSpace(rawName)
-		if !tokenRe.MatchString(name) {
-			c.fail(w("request.headers"), "请求头名称 %q 无效", rawName)
-			return
-		}
-		canon := textproto.CanonicalMIMEHeaderKey(name)
-		switch canon {
-		case "Content-Length", "Transfer-Encoding":
-			c.fail(w("request.headers."+name), "由引擎根据请求体自动生成，不能手动设置")
-			return
-		case "Content-Type":
-			hasContentType = true
-		case "Authorization":
-			hasAuthorization = true
-		case "User-Agent":
-			s.HasUserAgent = true
-		case "Accept-Encoding":
-			s.HasAcceptEncoding = true
-		case "Connection":
-			s.HasConnection = true
-		case "Host":
-			s.HasHost = true
-		}
-		if strings.ContainsAny(val, "\r\n") {
-			c.fail(w("request.headers."+name), "值不能包含换行")
-			return
-		}
-		s.Headers = append(s.Headers, HeaderTemplate{Name: name, Canonical: canon, Value: c.template(w("request.headers."+name), val, escapeNone)})
-	}
-	for _, k := range sortedKeys(req.Headers) {
-		addHeader(k, req.Headers[k])
-	}
-	for _, h := range req.HeaderList {
-		addHeader(h.Name, string(h.Value))
-	}
-	if req.BasicAuth != nil && !hasAuthorization {
-		if strings.TrimSpace(req.BasicAuth.Username) == "" {
-			c.fail(w("request.basic_auth.username"), "basic 鉴权需要用户名")
-		} else {
-			ut := c.template(w("request.basic_auth.username"), req.BasicAuth.Username, escapeNone)
-			pt := c.template(w("request.basic_auth.password"), req.BasicAuth.Password, escapeNone)
-			if ut.Static() && pt.Static() {
-				cred := base64.StdEncoding.EncodeToString([]byte(ut.Literal() + ":" + pt.Literal()))
-				s.Headers = append(s.Headers, HeaderTemplate{Name: "Authorization", Canonical: "Authorization", Value: StaticTemplate("Basic " + cred)})
-			} else {
-				s.BasicUser = ut
-				s.BasicPass = pt
-			}
-		}
-	}
-	if req.OAuth2 != nil && !hasAuthorization {
-		if strings.TrimSpace(req.OAuth2.TokenURL) == "" {
-			c.fail(w("request.oauth2.token_url"), "OAuth 2.0 鉴权需要 token_url")
-		}
-		if strings.TrimSpace(req.OAuth2.ClientID) == "" {
-			c.fail(w("request.oauth2.client_id"), "OAuth 2.0 鉴权需要 client_id")
-		}
-		ca := strings.ToLower(strings.TrimSpace(req.OAuth2.ClientAuth))
-		if ca == "" {
-			ca = "basic"
-		} else if ca != "basic" && ca != "body" {
-			c.fail(w("request.oauth2.client_auth"), "取值 %q 无效，只能是 basic 或 body", req.OAuth2.ClientAuth)
-		}
-		s.OAuth2 = &OAuth2Plan{
-			TokenURL:     c.template(w("request.oauth2.token_url"), req.OAuth2.TokenURL, escapeNone),
-			ClientID:     c.template(w("request.oauth2.client_id"), req.OAuth2.ClientID, escapeNone),
-			ClientSecret: c.template(w("request.oauth2.client_secret"), req.OAuth2.ClientSecret, escapeNone),
-			Scope:        c.template(w("request.oauth2.scope"), req.OAuth2.Scope, escapeNone),
-			ClientAuth:   ca,
-		}
-	}
+	var flags headerFlags
+	s.Headers, flags = c.compileHeadersHelper(w, "request.headers", req.Headers, req.HeaderList, false)
+	s.HasUserAgent = flags.hasUserAgent
+	s.HasAcceptEncoding = flags.hasAcceptEncoding
+	s.HasConnection = flags.hasConnection
+	s.HasHost = flags.hasHost
+
+	s.BasicUser, s.BasicPass, s.OAuth2 = c.compileStepAuth(w, "request", req.BasicAuth, req.OAuth2, flags.hasAuthorization, &s.Headers)
 
 	if req.Body != nil {
 		s.Body, s.ContentType = c.compileBody(w, req.Body)
 	}
-	if hasContentType {
+	if flags.hasContentType {
 		s.ContentType = ""
 	}
 
-	for j, ex := range st.Extract {
-		if ex.Disabled {
-			continue
+	s.Extract, s.Assert, s.NeedBody, s.HasStatusAssert = c.compileStepExtractAssert(w, st, 100)
+	if st.Think != nil {
+		s.Think = c.compileThink(w("think"), st.Think)
+		c.plan.ThinkMax += thinkMaxBound(s.Think)
+	}
+	return s
+}
+
+func (c *compiler) compileWSStep(i int, st *Step) *WSStep {
+	w := func(field string) string { return stepWhere(i, st.ID, field) }
+	ws := st.WebSocket
+	name := st.Name
+	if name == "" {
+		name = st.ID
+	}
+	info := StepInfo{Index: len(c.plan.FlatSteps), ID: st.ID, Name: name}
+	c.plan.FlatSteps = append(c.plan.FlatSteps, info)
+	s := &WSStep{
+		StepInfo:     info,
+		RecvCount:    ws.RecvCount,
+		IdleTimeout:  ws.IdleTimeout.D(),
+		Subprotocols: append([]string(nil), ws.Subprotocols...),
+	}
+	if s.RecvCount < 0 {
+		c.fail(w("websocket.recv_count"), "不能为负数")
+	}
+	if s.IdleTimeout < 0 {
+		c.fail(w("websocket.idle_timeout"), "不能为负数")
+	}
+	if s.IdleTimeout == 0 {
+		s.IdleTimeout = DefaultTLSTimeout
+	}
+	s.URL = c.compileURLWithQuery(w, "websocket", ws.URL, nil, nil, ParseWSTarget, "ws:// 或 wss://")
+
+	var flags headerFlags
+	s.Headers, flags = c.compileHeadersHelper(w, "websocket.headers", ws.Headers, ws.HeaderList, false)
+	s.HasUserAgent = flags.hasUserAgent
+	s.HasHost = flags.hasHost
+
+	for mi, m := range ws.Messages {
+		mw := w(fmt.Sprintf("websocket.messages[%d]", mi))
+		tp := strings.ToLower(strings.TrimSpace(m.Type))
+		var binary bool
+		switch tp {
+		case "", "text":
+			binary = false
+		case "binary":
+			binary = true
+		default:
+			c.fail(mw+".type", "WebSocket 消息类型 %q 无效，只能是 text 或 binary", m.Type)
 		}
-		if e, ok := c.compileExtract(w(fmt.Sprintf("extract[%d]", j)), ex); ok {
-			if e.Source != ExtractHeader {
-				s.NeedBody = true
+		tmpl := c.template(mw+".data", m.Data, escapeNone)
+		if binary && tmpl.Static() && strings.TrimSpace(tmpl.Literal()) != "" {
+			if _, err := base64.StdEncoding.DecodeString(strings.TrimSpace(tmpl.Literal())); err != nil {
+				c.fail(mw+".data", "binary 消息内容不是合法的 Base64：%v", err)
 			}
-			s.Extract = append(s.Extract, e)
+		}
+		s.Messages = append(s.Messages, WSMessagePlan{Binary: binary, Data: tmpl})
+	}
+
+	s.Extract, s.Assert, _, s.HasStatusAssert = c.compileStepExtractAssert(w, st, 100)
+	if st.Think != nil {
+		s.Think = c.compileThink(w("think"), st.Think)
+		c.plan.ThinkMax += thinkMaxBound(s.Think)
+	}
+	return s
+}
+
+func (c *compiler) compileGRPCStep(i int, st *Step) *GRPCStepPlan {
+	w := func(field string) string { return stepWhere(i, st.ID, field) }
+	g := st.GRPC
+	name := st.Name
+	if name == "" {
+		name = st.ID
+	}
+	info := StepInfo{Index: len(c.plan.FlatSteps), ID: st.ID, Name: name}
+	c.plan.FlatSteps = append(c.plan.FlatSteps, info)
+	s := &GRPCStepPlan{
+		StepInfo:       info,
+		ExpectedStatus: g.ExpectedStatus,
+		Timeout:        g.Timeout.D(),
+	}
+	if g.TLS != nil {
+		s.HasTLSOverride = true
+		s.TLS = *g.TLS
+	}
+	if s.Timeout < 0 {
+		c.fail(w("grpc.timeout"), "不能为负数")
+	}
+	if s.Timeout == 0 {
+		s.Timeout = c.plan.HTTP.TotalTimeout
+	}
+	rawTarget := strings.TrimSpace(g.Target)
+	if rawTarget == "" {
+		c.fail(w("grpc.target"), "不能为空")
+	} else {
+		tt := c.template(w("grpc.target"), rawTarget, escapeNone)
+		if tt.Static() {
+			o, err := ParseGRPCTarget(tt.Literal(), g.TLS)
+			if err != nil {
+				c.fail(w("grpc.target"), "%v", err)
+			} else {
+				s.Origin = o
+				s.TLS = o.TLS
+			}
+		} else {
+			s.Target = tt
 		}
 	}
-	for j, as := range st.Assert {
-		if as.Disabled {
-			continue
+
+	svc := strings.Trim(strings.TrimSpace(g.Service), "/")
+	mtd := strings.TrimSpace(g.Method)
+	if svc == "" && strings.HasPrefix(mtd, "/") {
+		trimmed := strings.Trim(mtd, "/")
+		if parts := strings.Split(trimmed, "/"); len(parts) == 2 && parts[0] != "" && parts[1] != "" {
+			s.FullMethod = "/" + trimmed
+		} else {
+			c.fail(w("grpc.method"), "gRPC 方法名无效，应为 Service + Method 或 /package.Service/Method")
 		}
-		if a, ok := c.compileAssert(w(fmt.Sprintf("assert[%d]", j)), as); ok {
-			switch a.Kind {
-			case AssertBodyContains, AssertJSONPath, AssertJSONSchema:
-				s.NeedBody = true
-			case AssertStatus:
-				s.HasStatusAssert = true
-			}
-			s.Assert = append(s.Assert, a)
+	} else {
+		if svc == "" {
+			c.fail(w("grpc.service"), "gRPC 服务名不能为空")
+		}
+		if mtd == "" || strings.Contains(mtd, "/") {
+			c.fail(w("grpc.method"), "gRPC 方法名无效")
+		}
+		if svc != "" && mtd != "" {
+			s.FullMethod = "/" + svc + "/" + mtd
 		}
 	}
+
+	s.Metadata, _ = c.compileHeadersHelper(w, "grpc.metadata", g.Metadata, g.MetadataList, true)
+	s.Payload = c.template(w("grpc.payload"), g.Payload, escapeNone)
+
+	pe := strings.ToLower(strings.TrimSpace(g.PayloadEncoding))
+	switch pe {
+	case "", "utf8", "json":
+		if pe == "" {
+			pe = "utf8"
+		}
+	case "base64":
+		if s.Payload.Static() && strings.TrimSpace(s.Payload.Literal()) != "" {
+			if _, err := base64.StdEncoding.DecodeString(strings.TrimSpace(s.Payload.Literal())); err != nil {
+				c.fail(w("grpc.payload"), "Base64 载荷无效：%v", err)
+			}
+		}
+	case "hex":
+		if s.Payload.Static() && strings.TrimSpace(s.Payload.Literal()) != "" {
+			if _, err := hex.DecodeString(strings.TrimSpace(s.Payload.Literal())); err != nil {
+				c.fail(w("grpc.payload"), "十六进制载荷无效：%v", err)
+			}
+		}
+	case "proto_string":
+	default:
+		c.fail(w("grpc.payload_encoding"), "不支持的 payload_encoding %q（可选 utf8、json、base64、hex、proto_string）", g.PayloadEncoding)
+	}
+	s.PayloadEncoding = pe
+
+	re := strings.ToLower(strings.TrimSpace(g.ResponseEncoding))
+	switch re {
+	case "", "raw", "utf8":
+		re = "raw"
+	case "proto_string", "base64":
+	default:
+		c.fail(w("grpc.response_encoding"), "不支持的 response_encoding %q（可选 raw、proto_string、base64）", g.ResponseEncoding)
+	}
+	s.ResponseEncoding = re
+
+	if g.ExpectedStatus != nil && (*g.ExpectedStatus < 0 || *g.ExpectedStatus > 16) {
+		c.fail(w("grpc.expected_status"), "gRPC 状态码必须在 0-16 之间")
+	}
+
+	s.Extract, s.Assert, _, s.HasStatusAssert = c.compileStepExtractAssert(w, st, 0)
+	if st.Think != nil {
+		s.Think = c.compileThink(w("think"), st.Think)
+		c.plan.ThinkMax += thinkMaxBound(s.Think)
+	}
+	return s
+}
+
+func (c *compiler) compileSSEStep(i int, st *Step) *SSEStepPlan {
+	w := func(field string) string { return stepWhere(i, st.ID, field) }
+	se := st.SSE
+	name := st.Name
+	if name == "" {
+		name = st.ID
+	}
+	info := StepInfo{Index: len(c.plan.FlatSteps), ID: st.ID, Name: name}
+	c.plan.FlatSteps = append(c.plan.FlatSteps, info)
+	s := &SSEStepPlan{
+		StepInfo:  info,
+		MaxEvents: se.MaxEvents,
+		Timeout:   se.Timeout.D(),
+	}
+	if se.StopContains != "" {
+		s.StopContains = []byte(se.StopContains)
+	}
+	if s.MaxEvents < 0 {
+		c.fail(w("sse.max_events"), "不能为负数")
+	}
+	if s.MaxEvents == 0 && len(s.StopContains) == 0 {
+		s.MaxEvents = 1
+	}
+	if s.Timeout < 0 {
+		c.fail(w("sse.timeout"), "不能为负数")
+	}
+	if s.Timeout == 0 {
+		s.Timeout = c.plan.HTTP.TotalTimeout
+	}
+	s.Method = strings.ToUpper(strings.TrimSpace(se.Method))
+	if s.Method == "" {
+		s.Method = "GET"
+	}
+	if !tokenRe.MatchString(s.Method) {
+		c.fail(w("sse.method"), "请求方法 %q 无效", se.Method)
+	}
+	s.URL = c.compileURLWithQuery(w, "sse", se.URL, se.Query, se.QueryList, ParseTarget, "http:// 或 https://")
+
+	var flags headerFlags
+	s.Headers, flags = c.compileHeadersHelper(w, "sse.headers", se.Headers, se.HeaderList, false)
+	s.HasUserAgent = flags.hasUserAgent
+	s.HasHost = flags.hasHost
+	s.BasicUser, s.BasicPass, s.OAuth2 = c.compileStepAuth(w, "sse", se.BasicAuth, se.OAuth2, flags.hasAuthorization, &s.Headers)
+
+	if se.Body != nil {
+		s.Body, s.ContentType = c.compileBody(w, se.Body)
+	}
+	if flags.hasContentType {
+		s.ContentType = ""
+	}
+	s.Extract, s.Assert, _, s.HasStatusAssert = c.compileStepExtractAssert(w, st, 100)
+	if st.Think != nil {
+		s.Think = c.compileThink(w("think"), st.Think)
+		c.plan.ThinkMax += thinkMaxBound(s.Think)
+	}
+	return s
+}
+
+func (c *compiler) compileScriptStep(i int, st *Step) *ScriptStepPlan {
+	w := func(field string) string { return stepWhere(i, st.ID, field) }
+	name := st.Name
+	if name == "" {
+		name = st.ID
+	}
+	info := StepInfo{Index: len(c.plan.FlatSteps), ID: st.ID, Name: name}
+	c.plan.FlatSteps = append(c.plan.FlatSteps, info)
+	s := &ScriptStepPlan{StepInfo: info}
+	if strings.TrimSpace(st.Script.Code) == "" {
+		c.fail(w("script.code"), "脚本文本不能为空")
+		return s
+	}
+	opts := &ScriptCompileOptions{
+		ResolveSlot: func(name string) (int, bool) {
+			slot, ok := c.slots[name]
+			return slot, ok
+		},
+		ResolveConst: func(name string) (*Template, bool) {
+			lit, ok := c.consts[name]
+			if !ok {
+				return nil, false
+			}
+			segs, err := parseTemplate(lit, c, escapeNone, 0)
+			if err != nil {
+				return nil, false
+			}
+			return newTemplate(lit, segs), true
+		},
+		ResolveData: c.resolveData,
+	}
+	prog, err := CompileScript(st.Script.Code, opts)
+	if err != nil {
+		c.fail(w("script.code"), "%v", err)
+		return s
+	}
+	s.Prog = prog
 	if st.Think != nil {
 		s.Think = c.compileThink(w("think"), st.Think)
 		c.plan.ThinkMax += thinkMaxBound(s.Think)
@@ -763,9 +1161,9 @@ func sortedKeys[V any](m map[string]V) []string {
 	return keys
 }
 
-func (c *compiler) compileURL(where string, t *Template) URLTemplate {
+func (c *compiler) compileURLWith(where string, t *Template, parseFn func(string) (*Target, error), schemeHint string) URLTemplate {
 	if t.Static() {
-		tg, err := ParseTarget(t.Literal())
+		tg, err := parseFn(t.Literal())
 		if err != nil {
 			c.fail(where, "%v", err)
 			return URLTemplate{}
@@ -779,7 +1177,7 @@ func (c *compiler) compileURL(where string, t *Template) URLTemplate {
 		if i := strings.Index(lit, "://"); i > 0 {
 			rest := lit[i+3:]
 			if j := strings.IndexAny(rest, "/?"); j >= 0 {
-				tg, err := ParseTarget(lit[:i+3+j])
+				tg, err := parseFn(lit[:i+3+j])
 				if err != nil {
 					c.fail(where, "%v", err)
 					return URLTemplate{}
@@ -792,7 +1190,7 @@ func (c *compiler) compileURL(where string, t *Template) URLTemplate {
 				return URLTemplate{Origin: tg.Origin, Path: newTemplate(t.src, pathSegs)}
 			}
 		} else {
-			c.fail(where, "URL 必须以 http:// 或 https:// 开头")
+			c.fail(where, "URL 必须以 %s 开头", schemeHint)
 			return URLTemplate{}
 		}
 	}
@@ -985,7 +1383,7 @@ func (c *compiler) compileExtract(where string, ex Extract) (Extractor, bool) {
 	return e, true
 }
 
-func (c *compiler) compileAssert(where string, as Assert) (Assertion, bool) {
+func (c *compiler) compileAssertWith(where string, as Assert, minStatus int) (Assertion, bool) {
 	a := Assertion{Type: as.Type, Description: as.Description}
 	switch as.Type {
 	case "status":
@@ -1004,8 +1402,8 @@ func (c *compiler) compileAssert(where string, as Assert) (Assertion, bool) {
 			return a, false
 		}
 		for _, n := range a.Statuses {
-			if n < 100 || n > 999 {
-				c.fail(where, "状态码 %d 超出范围 100-999", n)
+			if n < minStatus || n > 999 {
+				c.fail(where, "状态码 %d 超出范围 %d-999", n, minStatus)
 				return a, false
 			}
 		}

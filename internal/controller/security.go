@@ -24,12 +24,16 @@ var ErrTargetNotAllowed = scenario.ErrTargetNotAllowed
 // ErrScaleLimitExceeded indicates requested VUs or RPS exceeded the caller role limit.
 var ErrScaleLimitExceeded = errors.New("压测规模超出当前角色上限")
 
+// ErrScriptsDisabled indicates sandboxed script steps have been disabled by policy.
+var ErrScriptsDisabled = errors.New("管理员已全局禁用脚本步骤")
+
 // SecurityPolicy controls outbound target allowlisting and per-role scale limits.
 type SecurityPolicy struct {
 	AllowlistEnabled bool     `json:"allowlist_enabled"`
 	AllowedTargets   []string `json:"allowed_targets,omitempty"`
 	MemberMaxVUs     int      `json:"member_max_vus,omitempty"`
 	MemberMaxRPS     float64  `json:"member_max_rps,omitempty"`
+	ScriptsDisabled  bool     `json:"scripts_disabled,omitempty"`
 }
 
 // GetSecurityPolicy loads the active SecurityPolicy (zero values when unset).
@@ -89,10 +93,45 @@ func CompileTargetMatcher(patterns []string) (func(host string, ip net.IP) error
 	return scenario.CompileTargetMatcher(patterns)
 }
 
-// ValidatePlanTargets verifies every URL, OAuth2 token URL, ProxyURL, and
-// DNS override in plan conforms to policy when AllowlistEnabled is true.
+func planHasScripts(nodes []scenario.Node) bool {
+	for _, n := range nodes {
+		switch st := n.(type) {
+		case *scenario.ScriptStepPlan:
+			return true
+		case *scenario.GroupNode:
+			if planHasScripts(st.Children) {
+				return true
+			}
+		case *scenario.LoopNode:
+			if planHasScripts(st.Children) {
+				return true
+			}
+		case *scenario.IfNode:
+			if planHasScripts(st.Then) || planHasScripts(st.Else) {
+				return true
+			}
+		case *scenario.WeightedNode:
+			for _, br := range st.Branches {
+				if planHasScripts(br.Steps) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// ValidatePlanTargets verifies every URL, OAuth2 token URL, ProxyURL, DNS override,
+// and protocol endpoint in plan conforms to policy, and rejects script steps when
+// ScriptsDisabled is set.
 func ValidatePlanTargets(ctx context.Context, plan *scenario.Plan, policy SecurityPolicy) error {
-	if !policy.AllowlistEnabled || plan == nil {
+	if plan == nil {
+		return nil
+	}
+	if policy.ScriptsDisabled && planHasScripts(plan.Steps) {
+		return userErr(ErrScriptsDisabled, "当前安全策略已全局禁用脚本步骤", nil)
+	}
+	if !policy.AllowlistEnabled {
 		return nil
 	}
 	m, err := scenario.NewTargetMatcher(policy.AllowedTargets)
@@ -137,6 +176,40 @@ func ValidatePlanTargets(ctx context.Context, plan *scenario.Plan, policy Securi
 		return userErr(ErrTargetNotAllowed, fmt.Sprintf("目标域名 %q 不在允许白名单内", h), nil)
 	}
 
+	checkURLTemplate := func(stepID string, u scenario.URLTemplate, parseFn func(string) (*scenario.Target, error)) error {
+		if u.Static != nil && u.Static.Origin != nil {
+			return checkHost(u.Static.Origin.HostName)
+		}
+		if u.Origin != nil {
+			return checkHost(u.Origin.HostName)
+		}
+		if u.Full != nil {
+			if !u.Full.Static() {
+				return userErr(ErrTargetNotAllowed, fmt.Sprintf("步骤 %q 启用白名单时不支持动态域名 URL", stepID), nil)
+			}
+			tg, err := parseFn(u.Full.Literal())
+			if err != nil {
+				return userErr(ErrInvalidInput, err.Error(), err)
+			}
+			return checkHost(tg.Origin.HostName)
+		}
+		return nil
+	}
+
+	checkOAuth2 := func(stepID string, oa *scenario.OAuth2Plan) error {
+		if oa == nil || oa.TokenURL == nil {
+			return nil
+		}
+		if !oa.TokenURL.Static() {
+			return userErr(ErrTargetNotAllowed, fmt.Sprintf("步骤 %q 启用白名单时不支持动态 OAuth2 TokenURL", stepID), nil)
+		}
+		tg, err := scenario.ParseTarget(oa.TokenURL.Literal())
+		if err != nil {
+			return userErr(ErrInvalidInput, err.Error(), err)
+		}
+		return checkHost(tg.Origin.HostName)
+	}
+
 	if plan.HTTP.ProxyURL != nil && plan.HTTP.ProxyURL.Hostname() != "" {
 		if err := checkHost(plan.HTTP.ProxyURL.Hostname()); err != nil {
 			return err
@@ -156,37 +229,39 @@ func ValidatePlanTargets(ctx context.Context, plan *scenario.Plan, policy Securi
 		for _, n := range nodes {
 			switch st := n.(type) {
 			case *scenario.HTTPStep:
-				if st.URL.Static != nil && st.URL.Static.Origin != nil {
-					if err := checkHost(st.URL.Static.Origin.HostName); err != nil {
+				if err := checkURLTemplate(st.ID, st.URL, scenario.ParseTarget); err != nil {
+					return err
+				}
+				if err := checkOAuth2(st.ID, st.OAuth2); err != nil {
+					return err
+				}
+			case *scenario.WSStep:
+				if err := checkURLTemplate(st.ID, st.URL, scenario.ParseWSTarget); err != nil {
+					return err
+				}
+			case *scenario.GRPCStepPlan:
+				if st.Origin != nil {
+					if err := checkHost(st.Origin.HostName); err != nil {
 						return err
 					}
-				} else if st.URL.Origin != nil {
-					if err := checkHost(st.URL.Origin.HostName); err != nil {
-						return err
+				} else if st.Target != nil {
+					if !st.Target.Static() {
+						return userErr(ErrTargetNotAllowed, fmt.Sprintf("步骤 %q 启用白名单时不支持动态 gRPC 目标地址", st.ID), nil)
 					}
-				} else if st.URL.Full != nil {
-					if !st.URL.Full.Static() {
-						return userErr(ErrTargetNotAllowed, fmt.Sprintf("步骤 %q 启用白名单时不支持动态域名 URL", st.ID), nil)
-					}
-					tg, err := scenario.ParseTarget(st.URL.Full.Literal())
+					o, err := scenario.ParseGRPCTarget(st.Target.Literal(), nil)
 					if err != nil {
 						return userErr(ErrInvalidInput, err.Error(), err)
 					}
-					if err := checkHost(tg.Origin.HostName); err != nil {
+					if err := checkHost(o.HostName); err != nil {
 						return err
 					}
 				}
-				if st.OAuth2 != nil && st.OAuth2.TokenURL != nil {
-					if !st.OAuth2.TokenURL.Static() {
-						return userErr(ErrTargetNotAllowed, fmt.Sprintf("步骤 %q 启用白名单时不支持动态 OAuth2 TokenURL", st.ID), nil)
-					}
-					tg, err := scenario.ParseTarget(st.OAuth2.TokenURL.Literal())
-					if err != nil {
-						return userErr(ErrInvalidInput, err.Error(), err)
-					}
-					if err := checkHost(tg.Origin.HostName); err != nil {
-						return err
-					}
+			case *scenario.SSEStepPlan:
+				if err := checkURLTemplate(st.ID, st.URL, scenario.ParseTarget); err != nil {
+					return err
+				}
+				if err := checkOAuth2(st.ID, st.OAuth2); err != nil {
+					return err
 				}
 			case *scenario.GroupNode:
 				if err := walk(st.Children); err != nil {
@@ -295,6 +370,19 @@ func scrubStepsSecrets(steps []scenario.Step) {
 			scrubHeaderMap(st.Request.Headers)
 			scrubHeaderList(st.Request.HeaderList)
 			scrubAuthFields(st.Request.BasicAuth, st.Request.OAuth2)
+		}
+		if st.WebSocket != nil {
+			scrubHeaderMap(st.WebSocket.Headers)
+			scrubHeaderList(st.WebSocket.HeaderList)
+		}
+		if st.GRPC != nil {
+			scrubHeaderMap(st.GRPC.Metadata)
+			scrubHeaderList(st.GRPC.MetadataList)
+		}
+		if st.SSE != nil {
+			scrubHeaderMap(st.SSE.Headers)
+			scrubHeaderList(st.SSE.HeaderList)
+			scrubAuthFields(st.SSE.BasicAuth, st.SSE.OAuth2)
 		}
 		if st.Group != nil {
 			scrubStepsSecrets(st.Group.Children)

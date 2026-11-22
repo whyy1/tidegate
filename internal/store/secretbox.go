@@ -269,3 +269,36 @@ func (v *SecretVault) DeleteScope(ctx context.Context, projectID, scope string) 
 func (v *SecretVault) DeleteProject(ctx context.Context, projectID string) error {
 	return v.rdb.DeleteAllProjectSecrets(ctx, projectID)
 }
+
+const systemSecretProject = "__system__"
+
+// SealSystemSecret encrypts and persists a global system secret such as an external sink token.
+func (v *SecretVault) SealSystemSecret(ctx context.Context, scope, name, plaintext string) error {
+	blob, err := v.box.Seal(systemSecretProject, scope, name, plaintext)
+	if err != nil {
+		return err
+	}
+	return v.rdb.SetProjectSecret(ctx, systemSecretProject, scope, name, blob)
+}
+
+// OpenSystemSecret loads and decrypts a global system secret, returning (_, false, nil) if absent.
+func (v *SecretVault) OpenSystemSecret(ctx context.Context, scope, name string) (string, bool, error) {
+	sec, err := v.rdb.ProjectSecrets(ctx, systemSecretProject, scope)
+	if err != nil {
+		return "", false, err
+	}
+	blob, ok := sec[name]
+	if !ok {
+		return "", false, nil
+	}
+	plain, err := v.box.Open(systemSecretProject, scope, name, blob)
+	if err != nil {
+		return "", false, fmt.Errorf("解密系统密钥 %q 失败：%w", name, err)
+	}
+	return plain, true, nil
+}
+
+// DeleteSystemSecret removes a global system secret from ResultDB.
+func (v *SecretVault) DeleteSystemSecret(ctx context.Context, scope, name string) error {
+	return v.rdb.DeleteProjectSecret(ctx, systemSecretProject, scope, name)
+}

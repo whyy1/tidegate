@@ -588,32 +588,110 @@ func (r *resolver) step(id string, src *stepSource) (scenario.Step, error) {
 	}
 
 	rawURL = applyPathParams(rawURL, pathParams)
-	fullURL, err := r.joinBase(joinField(src.field, "request.url"), a.Name, rawURL)
-	if err != nil {
-		return scenario.Step{}, err
+	proto := strings.ToLower(strings.TrimSpace(a.Request.Protocol))
+	if proto == "websocket" {
+		proto = "ws"
 	}
-	body, err := r.buildScenarioBody(joinField(src.field, "request.body"), apiBody)
-	if err != nil {
-		return scenario.Step{}, err
-	}
-
-	req := scenario.Request{
-		Method:     method,
-		URL:        fullURL,
-		HeaderList: headers,
-		QueryList:  query,
-		BasicAuth:  basicAuth,
-		OAuth2:     oauth2Auth,
-		Body:       body,
-	}
-	return scenario.Step{
+	step := scenario.Step{
 		ID:      id,
 		Name:    name,
-		Request: &req,
 		Extract: append([]scenario.Extract(nil), extract...),
 		Assert:  append([]scenario.Assert(nil), assert...),
 		Think:   think,
-	}, nil
+	}
+
+	switch proto {
+	case "ws":
+		fullURL, err := r.joinBaseForProto(joinField(src.field, "request.url"), a.Name, "ws", rawURL)
+		if err != nil {
+			return scenario.Step{}, err
+		}
+		fullURL = appendQueryParams(fullURL, query)
+		ws := &scenario.WebSocketStep{
+			URL:        fullURL,
+			HeaderList: headers,
+		}
+		if a.Request.WS != nil {
+			ws.Subprotocols = append([]string(nil), a.Request.WS.Subprotocols...)
+			ws.Messages = append([]scenario.WSMessage(nil), a.Request.WS.Messages...)
+			ws.RecvCount = a.Request.WS.RecvCount
+			ws.IdleTimeout = a.Request.WS.IdleTimeout
+		}
+		step.WebSocket = ws
+		return step, nil
+
+	case "grpc":
+		if a.Request.GRPC == nil {
+			return scenario.Step{}, invalid(joinField(src.field, "request.grpc"), "接口 %q 缺少 gRPC 配置", a.Name)
+		}
+		target, err := r.joinBaseForProto(joinField(src.field, "request.url"), a.Name, "grpc", rawURL)
+		if err != nil {
+			return scenario.Step{}, err
+		}
+		payload := ""
+		if apiBody != nil {
+			payload = apiBody.Content
+		}
+		step.GRPC = &scenario.GRPCStep{
+			Target:           target,
+			TLS:              a.Request.GRPC.TLS,
+			Service:          a.Request.GRPC.Service,
+			Method:           a.Request.GRPC.Method,
+			MetadataList:     headers,
+			Payload:          payload,
+			PayloadEncoding:  a.Request.GRPC.PayloadEncoding,
+			ResponseEncoding: a.Request.GRPC.ResponseEncoding,
+			ExpectedStatus:   a.Request.GRPC.ExpectedStatus,
+			Timeout:          a.Request.GRPC.Timeout,
+		}
+		return step, nil
+
+	case "sse":
+		fullURL, err := r.joinBaseForProto(joinField(src.field, "request.url"), a.Name, "sse", rawURL)
+		if err != nil {
+			return scenario.Step{}, err
+		}
+		body, err := r.buildScenarioBody(joinField(src.field, "request.body"), apiBody)
+		if err != nil {
+			return scenario.Step{}, err
+		}
+		sse := &scenario.SSEStep{
+			Method:     method,
+			URL:        fullURL,
+			HeaderList: headers,
+			QueryList:  query,
+			BasicAuth:  basicAuth,
+			OAuth2:     oauth2Auth,
+			Body:       body,
+		}
+		if a.Request.SSE != nil {
+			sse.MaxEvents = a.Request.SSE.MaxEvents
+			sse.StopContains = a.Request.SSE.StopContains
+			sse.Timeout = a.Request.SSE.Timeout
+		}
+		step.SSE = sse
+		return step, nil
+
+	default:
+		fullURL, err := r.joinBaseForProto(joinField(src.field, "request.url"), a.Name, "http", rawURL)
+		if err != nil {
+			return scenario.Step{}, err
+		}
+		body, err := r.buildScenarioBody(joinField(src.field, "request.body"), apiBody)
+		if err != nil {
+			return scenario.Step{}, err
+		}
+		step.Request = &scenario.Request{
+			Method:     method,
+			URL:        fullURL,
+			HeaderList: headers,
+			QueryList:  query,
+			BasicAuth:  basicAuth,
+			OAuth2:     oauth2Auth,
+			Body:       body,
+		}
+		return step, nil
+	}
 }
 
 func (r *resolver) applyAuth(field, apiName string, auth *Auth, headers *[]scenario.NameValue, query *[]scenario.NameValue) (*scenario.BasicAuth, *scenario.OAuth2Auth, error) {
@@ -710,15 +788,75 @@ func (r *resolver) expandConst(s string, depth int) (string, bool) {
 // joinBase prefixes relative URLs with the environment's base URL. URLs
 // with a scheme and URLs starting with a template are kept as written.
 func (r *resolver) joinBase(field, apiName, u string) (string, error) {
+	return r.joinBaseForProto(field, apiName, "http", u)
+}
+
+func (r *resolver) joinBaseForProto(field, apiName, proto, u string) (string, error) {
 	t := strings.TrimSpace(u)
 	lower := strings.ToLower(t)
-	if t == "" || strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") || strings.HasPrefix(t, "{{") {
+	if strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") ||
+		strings.HasPrefix(lower, "ws://") || strings.HasPrefix(lower, "wss://") ||
+		strings.HasPrefix(lower, "grpc://") || strings.HasPrefix(lower, "grpcs://") ||
+		strings.HasPrefix(t, "{{") {
 		return t, nil
 	}
-	if r.baseURL == "" {
-		return "", invalid(field, "接口 %q 的地址 %q 是相对路径，请选择设置了基础地址的环境，或改成 http:// 或 https:// 开头的完整地址", apiName, t)
+	if proto == "grpc" {
+		if t == "" {
+			if r.baseURL == "" {
+				return "", invalid(field, "接口 %q 的 gRPC 地址不能为空", apiName)
+			}
+			bu := strings.TrimSpace(r.baseURL)
+			switch {
+			case strings.HasPrefix(strings.ToLower(bu), "http://"):
+				return "grpc://" + bu[7:], nil
+			case strings.HasPrefix(strings.ToLower(bu), "https://"):
+				return "grpcs://" + bu[8:], nil
+			default:
+				return bu, nil
+			}
+		}
+		return t, nil
 	}
-	return strings.TrimRight(r.baseURL, "/") + "/" + strings.TrimLeft(t, "/"), nil
+	if t == "" {
+		return "", nil
+	}
+	if r.baseURL == "" {
+		return "", invalid(field, "接口 %q 的地址 %q 是相对路径，请选择设置了基础地址的环境，或改成完整协议地址", apiName, t)
+	}
+	joined := strings.TrimRight(r.baseURL, "/") + "/" + strings.TrimLeft(t, "/")
+	if proto == "ws" {
+		if strings.HasPrefix(strings.ToLower(joined), "http://") {
+			joined = "ws://" + joined[7:]
+		} else if strings.HasPrefix(strings.ToLower(joined), "https://") {
+			joined = "wss://" + joined[8:]
+		}
+	}
+	return joined, nil
+}
+
+func appendQueryParams(rawURL string, query []scenario.NameValue) string {
+	if len(query) == 0 {
+		return rawURL
+	}
+	sep := "?"
+	if strings.Contains(rawURL, "?") {
+		sep = "&"
+	}
+	var b strings.Builder
+	b.WriteString(rawURL)
+	for _, q := range query {
+		b.WriteString(sep)
+		b.WriteString(url.QueryEscape(q.Name))
+		b.WriteByte('=')
+		val := string(q.Value)
+		if strings.Contains(val, "{{") {
+			b.WriteString(val)
+		} else {
+			b.WriteString(url.QueryEscape(val))
+		}
+		sep = "&"
+	}
+	return b.String()
 }
 
 func (r *resolver) result(def *scenario.Definition) *Resolved {
@@ -764,7 +902,7 @@ func (p *project) collectStepTrees(r *resolver, prefix string, steps []ScenarioS
 		stType := strings.ToLower(strings.TrimSpace(st.Type))
 		node := &resolvedStepTree{step: st}
 		switch stType {
-		case "", "http":
+		case "", "http", "ws", "grpc", "sse":
 			a, e, err := p.loadAPI(st.APIID)
 			if err != nil {
 				if errors.Is(err, ErrNotFound) {
@@ -779,6 +917,17 @@ func (p *project) collectStepTrees(r *resolver, prefix string, steps []ScenarioS
 				}
 			}
 			node.src = src
+		case "script":
+			if strings.TrimSpace(st.Script) == "" {
+				return nil, invalid(field+".script", "脚本文本不能为空")
+			}
+			assigned, err := scenario.ExtractAssignedVars(st.Script)
+			if err != nil {
+				return nil, invalid(field+".script", "%v", err)
+			}
+			for _, vname := range assigned {
+				r.mutable[vname] = true
+			}
 		case "group":
 			ch, err := p.collectStepTrees(r, field+".children", st.Children)
 			if err != nil {
@@ -839,12 +988,19 @@ func (r *resolver) buildScenarioSteps(trees []*resolvedStepTree) ([]scenario.Ste
 		st := tn.step
 		stType := strings.ToLower(strings.TrimSpace(st.Type))
 		switch stType {
-		case "", "http":
+		case "", "http", "ws", "grpc", "sse":
 			step, err := r.step(st.ID, tn.src)
 			if err != nil {
 				return nil, err
 			}
 			out = append(out, step)
+		case "script":
+			out = append(out, scenario.Step{
+				ID:     st.ID,
+				Name:   st.Name,
+				Think:  st.Think,
+				Script: &scenario.ScriptStep{Code: st.Script},
+			})
 		case "group":
 			ch, err := r.buildScenarioSteps(tn.children)
 			if err != nil {
@@ -1218,7 +1374,11 @@ func (s *Store) PreviewEffectiveAPI(projectID string, in *API, opts ResolveOptio
 		}
 		joinedURL := applyPathParams(strings.TrimSpace(a.Request.URL), a.Request.PathParams)
 		lower := strings.ToLower(joinedURL)
-		if joinedURL != "" && baseURL != "" && !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(joinedURL, "{{") {
+		hasProtoPrefix := strings.HasPrefix(lower, "http://") || strings.HasPrefix(lower, "https://") ||
+			strings.HasPrefix(lower, "ws://") || strings.HasPrefix(lower, "wss://") ||
+			strings.HasPrefix(lower, "grpc://") || strings.HasPrefix(lower, "grpcs://") ||
+			strings.HasPrefix(joinedURL, "{{")
+		if joinedURL != "" && baseURL != "" && !hasProtoPrefix && strings.ToLower(strings.TrimSpace(a.Request.Protocol)) != "grpc" {
 			joinedURL = strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(joinedURL, "/")
 		}
 

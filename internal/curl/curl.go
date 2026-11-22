@@ -35,6 +35,7 @@ type FormatOptions struct {
 	FormFields    store.KeyValueList
 	FormFiles     []scenario.BodyFile
 	Multipart     bool
+	NoBuffer      bool
 	Shell         string // "bash" (default) or "powershell"
 	RedactSecrets bool
 }
@@ -371,7 +372,11 @@ func Format(opts FormatOptions) (string, error) {
 		cmd = "curl.exe"
 	}
 
-	parts := []string{cmd + " -X " + method + " " + quote(rawURL)}
+	prefix := cmd
+	if opts.NoBuffer {
+		prefix += " -N"
+	}
+	parts := []string{prefix + " -X " + method + " " + quote(rawURL)}
 	for _, h := range opts.Headers {
 		if strings.TrimSpace(h.Name) == "" {
 			continue
@@ -448,6 +453,11 @@ func FormatAPI(api *store.API, preview *store.EffectivePreview, mode, shell stri
 		return expandCurlTemplate(s, varVals, secretVars, redact)
 	}
 
+	proto := strings.ToLower(strings.TrimSpace(api.Request.Protocol))
+	if proto == "grpc" {
+		return "", errors.New("gRPC 接口不支持导出为 cURL 命令，请使用工作台直接调试")
+	}
+
 	method := strings.ToUpper(strings.TrimSpace(api.Request.Method))
 	if method == "" {
 		method = "GET"
@@ -461,11 +471,20 @@ func FormatAPI(api *store.API, preview *store.EffectivePreview, mode, shell stri
 	rawURL = applyPathParamsSimple(rawURL, api.Request.PathParams, expand)
 	rawURL = expand(rawURL)
 	lower := strings.ToLower(rawURL)
-	if mode == ModeExpanded && baseURL != "" && rawURL != "" && !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") {
-		rawURL = strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(rawURL, "/")
-	}
-	if mode == ModeTemplate && baseURL != "" && rawURL != "" && !strings.HasPrefix(lower, "http://") && !strings.HasPrefix(lower, "https://") && !strings.HasPrefix(rawURL, "{{") {
-		rawURL = strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(rawURL, "/")
+	hasKnownScheme := strings.HasPrefix(lower, "http://") ||
+		strings.HasPrefix(lower, "https://") ||
+		strings.HasPrefix(lower, "ws://") ||
+		strings.HasPrefix(lower, "wss://")
+	if !hasKnownScheme && baseURL != "" && rawURL != "" && (mode == ModeExpanded || !strings.HasPrefix(rawURL, "{{")) {
+		joined := strings.TrimRight(baseURL, "/") + "/" + strings.TrimLeft(rawURL, "/")
+		if proto == "ws" {
+			if strings.HasPrefix(strings.ToLower(joined), "http://") {
+				joined = "ws://" + joined[7:]
+			} else if strings.HasPrefix(strings.ToLower(joined), "https://") {
+				joined = "wss://" + joined[8:]
+			}
+		}
+		rawURL = joined
 	}
 
 	// Collect headers: inherited (not overridden) -> auth -> API headers.
@@ -528,10 +547,15 @@ func FormatAPI(api *store.API, preview *store.EffectivePreview, mode, shell stri
 	allQuery = append(allQuery, extraQuery...)
 	rawURL = appendQueryParams(rawURL, allQuery, expand, redact)
 
+	if proto == "sse" && !hasMetricHeader(headers, "Accept") {
+		headers = append(headers, metrics.Header{Name: "Accept", Value: "text/event-stream"})
+	}
+
 	opts := FormatOptions{
 		Method:        method,
 		URL:           rawURL,
 		Headers:       headers,
+		NoBuffer:      proto == "sse",
 		Shell:         shell,
 		RedactSecrets: redact,
 	}

@@ -806,3 +806,126 @@ func ptrScalar(s string) *scenario.Scalar {
 	v := scenario.Scalar(s)
 	return &v
 }
+
+func TestWritePrometheusFormatAndEscaping(t *testing.T) {
+	var b strings.Builder
+	sv := &metrics.SnapshotView{
+		ActiveVUs:   12,
+		ActiveConns: 8,
+		Target:      50,
+		StepView: metrics.StepView{
+			RPS:         125.5,
+			ErrorRate:   0.01,
+			SentBps:     1024,
+			ReceivedBps: 4096,
+			Latency: metrics.LatencyStats{
+				P50: 1.5,
+				P90: 4.0,
+				P95: 6.2,
+				P99: 12.1,
+				Max: 25.0,
+			},
+		},
+		Steps: []metrics.StepView{
+			{ID: "s1", Name: `login "v1"\test`, IsGroup: false, Requests: 100, RPS: 100, ErrorRate: 0.01, Latency: metrics.LatencyStats{P95: 5.5}},
+			{ID: "tx", Name: "group_tx", IsGroup: true, Requests: 50, RPS: 50, Latency: metrics.LatencyStats{P95: 10.0}},
+		},
+	}
+	err := WritePrometheus(&b, PrometheusState{
+		Agents: []PrometheusAgent{
+			{ID: "a1", Name: "node-1", CPURatio: 0.42, MemoryRatio: 0.55, UplinkBps: 8000, DownlinkBps: 16000, RTTMs: 1.25},
+		},
+		Run: PrometheusRun{
+			Active:            true,
+			RunID:             "run-1",
+			ProjectID:         "p1",
+			ScenarioName:      "Checkout",
+			Snapshot:          sv,
+			RequestsTotal:     250,
+			ErrorsTotal:       2,
+			StepRequestsTotal: map[string]int64{"s1": 250, "tx": 125},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, want := range []string{
+		"tidegate_agents_online 1",
+		`tidegate_agent_cpu_usage_ratio{agent_id="a1",agent_name="node-1"} 0.42`,
+		`tidegate_run_active{run_id="run-1",scenario="Checkout"} 1`,
+		`tidegate_run_requests_total{run_id="run-1",scenario="Checkout"} 250`,
+		`tidegate_run_latency_ms{run_id="run-1",scenario="Checkout",quantile="0.95"} 6.2`,
+		`step_name="login \"v1\"\\test"`,
+		`tidegate_step_requests_total{run_id="run-1",scenario="Checkout",step_id="s1",step_name="login \"v1\"\\test",is_group="false"} 250`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("prometheus output missing %q:\n%s", want, out)
+		}
+	}
+}
+
+func TestExportMultiProtocolOpenAPIAndPostman(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := st.CreateProject(&store.Project{Name: "MultiProto"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPI(pr.ID, &store.API{
+		Name: "WS Chat",
+		Request: store.APIRequest{
+			Protocol: "ws",
+			Method:   "GET",
+			URL:      "wss://ws.example.com/chat",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPI(pr.ID, &store.API{
+		Name: "gRPC Echo",
+		Request: store.APIRequest{
+			Protocol: "grpc",
+			URL:      "127.0.0.1:50051",
+			GRPC:     &store.APIGRPC{Service: "echo.EchoService", Method: "SayHello"},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPI(pr.ID, &store.API{
+		Name: "SSE Stream",
+		Request: store.APIRequest{
+			Protocol: "sse",
+			Method:   "GET",
+			URL:      "/events",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	oaBytes, err := ExportOpenAPI(st, pr.ID, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oaStr := string(oaBytes)
+	if strings.Contains(oaStr, "/chat") || strings.Contains(oaStr, "50051") {
+		t.Fatalf("OpenAPI should skip ws and grpc endpoints, got:\n%s", oaStr)
+	}
+	if !strings.Contains(oaStr, `"/events"`) || !strings.Contains(oaStr, `"text/event-stream"`) {
+		t.Fatalf("OpenAPI missing SSE text/event-stream response:\n%s", oaStr)
+	}
+
+	pmBytes, err := ExportPostman(st, pr.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pmStr := string(pmBytes)
+	if !strings.Contains(pmStr, `"wss://ws.example.com/chat"`) {
+		t.Fatalf("Postman should preserve wss:// URL without {{baseUrl}} prefix:\n%s", pmStr)
+	}
+	if strings.Contains(pmStr, `{{baseUrl}}/127.0.0.1:50051`) || !strings.Contains(pmStr, `"127.0.0.1:50051"`) {
+		t.Fatalf("Postman should preserve raw gRPC target without {{baseUrl}} prefix:\n%s", pmStr)
+	}
+}

@@ -152,6 +152,10 @@ func (s *Server) buildHandler() http.Handler {
 	apiMux.Handle("DELETE /api/v1/users/{id}", adminOnly(s.handleDeleteUser))
 	apiMux.Handle("GET /api/v1/settings/security", authed(s.handleGetSecurityPolicy))
 	apiMux.Handle("PUT /api/v1/settings/security", adminOnly(s.handlePutSecurityPolicy))
+	apiMux.Handle("GET /api/v1/settings/metrics-sink", authed(s.handleGetMetricsSink))
+	apiMux.Handle("PUT /api/v1/settings/metrics-sink", adminOnly(s.handlePutMetricsSink))
+	apiMux.Handle("POST /api/v1/settings/metrics-sink/test", adminOnly(s.handleTestMetricsSink))
+	apiMux.Handle("GET /api/v1/metrics/prometheus", authed(s.handlePrometheusMetrics))
 	apiMux.Handle("GET /api/v1/audit-logs", adminOnly(s.handleListAuditLogs))
 
 	// Projects.

@@ -175,6 +175,9 @@ func scrubAuth(a *store.Auth) *store.Auth {
 	if cp.Value != "" && !isTemplateExpr(cp.Value) {
 		cp.Value = ""
 	}
+	if cp.ClientSecret != "" && !isTemplateExpr(cp.ClientSecret) {
+		cp.ClientSecret = ""
+	}
 	return &cp
 }
 

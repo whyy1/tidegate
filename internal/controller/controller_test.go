@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"time"
 
 	"tidegate/internal/agent"
+	"tidegate/internal/exporter"
 	"tidegate/internal/metrics"
 	"tidegate/internal/scenario"
 	"tidegate/internal/store"
@@ -949,5 +951,248 @@ func TestStartRunEnforcesDialTimeRedirectAllowlist(t *testing.T) {
 	}
 	if !foundBlockMsg {
 		t.Fatalf("expected sample error containing %q, got %+v", ErrTargetNotAllowed.Error(), samples)
+	}
+}
+
+func TestScriptsDisabledAndProtocolAllowlist(t *testing.T) {
+	ctx := context.Background()
+	c, st, _ := newTestController(t, nil)
+	waitForAgents(t, c, 1)
+
+	proj, err := st.CreateProject(&store.Project{Name: "m2c-sec"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.SetSecurityPolicy(ctx, SecurityPolicy{
+		AllowlistEnabled: true,
+		AllowedTargets:   []string{"127.0.0.1"},
+		ScriptsDisabled:  true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Script step rejected when ScriptsDisabled=true.
+	_, err = c.DebugScenario(ctx, proj.ID, DebugScenarioRequest{
+		Scenario: &store.Scenario{
+			Name:  "script-blocked",
+			Steps: []store.ScenarioStep{{ID: "sc", Type: "script", Script: `vars.x = "1"`}},
+		},
+	})
+	if !errors.Is(err, ErrScriptsDisabled) {
+		t.Fatalf("expected ErrScriptsDisabled on DebugScenario, got %v", err)
+	}
+
+	// Disallowed ws://, grpc://, and sse targets rejected by allowlist.
+	for _, tc := range []struct {
+		name string
+		api  *store.API
+	}{
+		{
+			name: "ws",
+			api: &store.API{
+				Name:    "ws-bad",
+				Request: store.APIRequest{Protocol: "ws", URL: "ws://evil.invalid/ws"},
+			},
+		},
+		{
+			name: "grpc",
+			api: &store.API{
+				Name: "grpc-bad",
+				Request: store.APIRequest{
+					Protocol: "grpc",
+					URL:      "grpc://evil.invalid:9090",
+					GRPC:     &store.APIGRPC{Service: "s.S", Method: "M"},
+				},
+			},
+		},
+		{
+			name: "sse",
+			api: &store.API{
+				Name:    "sse-bad",
+				Request: store.APIRequest{Protocol: "sse", URL: "http://evil.invalid/events"},
+			},
+		},
+	} {
+		_, err := c.DebugAPI(ctx, proj.ID, DebugAPIRequest{API: tc.api})
+		if !errors.Is(err, ErrTargetNotAllowed) {
+			t.Fatalf("%s: expected ErrTargetNotAllowed, got %v", tc.name, err)
+		}
+	}
+
+	// Re-enabling scripts allows local execution.
+	if _, err := c.SetSecurityPolicy(ctx, SecurityPolicy{
+		AllowlistEnabled: true,
+		AllowedTargets:   []string{"127.0.0.1"},
+		ScriptsDisabled:  false,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	dbg, err := c.DebugScenario(ctx, proj.ID, DebugScenarioRequest{
+		Scenario: &store.Scenario{
+			Name:  "script-ok",
+			Steps: []store.ScenarioStep{{ID: "sc", Type: "script", Script: `vars.h = sha256("hi")`}},
+		},
+	})
+	if err != nil || !dbg.Passed || len(dbg.FinalVars["h"]) != 64 {
+		t.Fatalf("expected script dry-run pass, got dbg=%+v err=%v", dbg, err)
+	}
+}
+
+func TestMetricsSinkInfluxAndPrometheusState(t *testing.T) {
+	ctx := context.Background()
+	var (
+		influxHits  atomic.Int64
+		badAuth     atomic.Int64
+		lastBody    atomic.Value
+		failSink    atomic.Bool
+	)
+	influxSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if failSink.Load() {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		if r.Header.Get("Authorization") != "Token influx-secret-tok" {
+			badAuth.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		b, _ := io.ReadAll(r.Body)
+		lastBody.Store(string(b))
+		influxHits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer influxSrv.Close()
+
+	targetSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer targetSrv.Close()
+
+	c, st, _ := newTestController(t, func(o *Options) {
+		box, err := store.LoadOrCreateMasterKey(filepath.Join(t.TempDir(), "master.key"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.Store.SetSecretVault(store.NewSecretVault(o.Results, box))
+	})
+	waitForAgents(t, c, 1)
+
+	saved, err := c.SetMetricsSinkConfig(ctx, MetricsSinkConfig{
+		Enabled:   true,
+		Type:      "influxdb",
+		URL:       influxSrv.URL,
+		Org:       "perf",
+		Bucket:    "tidegate",
+		Token:     "influx-secret-tok",
+		ExtraTags: map[string]string{"dc": "local"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.Token != store.SecretMask {
+		t.Fatalf("expected masked token on SetMetricsSinkConfig, got %q", saved.Token)
+	}
+	got, err := c.GetMetricsSinkConfig(ctx)
+	if err != nil || got.Token != store.SecretMask || got.Bucket != "tidegate" {
+		t.Fatalf("GetMetricsSinkConfig = %+v, err=%v", got, err)
+	}
+
+	if err := c.TestMetricsSink(ctx, nil); err != nil {
+		t.Fatalf("TestMetricsSink: %v", err)
+	}
+	if influxHits.Load() == 0 || badAuth.Load() != 0 {
+		t.Fatalf("unexpected influx hits=%d badAuth=%d", influxHits.Load(), badAuth.Load())
+	}
+
+	proj, err := st.CreateProject(&store.Project{Name: "sink-run"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiObj, err := st.CreateAPI(proj.ID, &store.API{
+		Name:    "ping",
+		Request: store.APIRequest{Method: "GET", URL: targetSrv.URL + "/ok"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sub := c.Subscribe()
+	defer sub.Close()
+	sub.SubscribeRun("*")
+
+	hitsBefore := influxHits.Load()
+	run, err := c.StartRun(ctx, proj.ID, StartRunRequest{
+		APIID: apiObj.ID,
+		Load: &scenario.Load{
+			Mode:   "vus",
+			Stages: []scenario.Stage{{Duration: scenario.Duration(1300 * time.Millisecond), Target: 1}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var sawPromRun bool
+	deadline := time.After(8 * time.Second)
+	for done := false; !done; {
+		select {
+		case ev := <-sub.C():
+			if ev.RunID == run.ID && ev.Type == EventSnapshot {
+				var sb strings.Builder
+				if err := exporter.WritePrometheus(&sb, c.MetricsState(ctx)); err == nil {
+					if strings.Contains(sb.String(), "tidegate_run_rps") && strings.Contains(sb.String(), "tidegate_agents_online") {
+						sawPromRun = true
+					}
+				}
+			}
+			if ev.RunID == run.ID && ev.Type == EventRunStatus && !ev.Status.Active() {
+				done = true
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for sink run")
+		}
+	}
+	if !sawPromRun {
+		t.Fatal("expected Prometheus state to contain active tidegate_run_rps during run")
+	}
+
+	pushDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(pushDeadline) {
+		if influxHits.Load() > hitsBefore {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if influxHits.Load() <= hitsBefore {
+		t.Fatal("expected live snapshot batch pushed to InfluxDB sink")
+	}
+	if bodyStr, _ := lastBody.Load().(string); !strings.Contains(bodyStr, "tidegate_run,") || !strings.Contains(bodyStr, "dc=local") {
+		t.Fatalf("unexpected InfluxDB Line Protocol batch:\n%s", bodyStr)
+	}
+
+	// Verify sink failure does not stall runs.
+	failSink.Store(true)
+	run2, err := c.StartRun(ctx, proj.ID, StartRunRequest{
+		APIID: apiObj.ID,
+		Load: &scenario.Load{
+			Mode:        "vus",
+			Stages:      []scenario.Stage{{Duration: scenario.Duration(400 * time.Millisecond), Target: 1}},
+			MaxRequests: 2,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	deadline2 := time.After(5 * time.Second)
+	for {
+		select {
+		case ev := <-sub.C():
+			if ev.RunID == run2.ID && ev.Type == EventRunStatus && !ev.Status.Active() {
+				return
+			}
+		case <-deadline2:
+			t.Fatal("run stalled while external sink was failing")
+		}
 	}
 }

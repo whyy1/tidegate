@@ -61,18 +61,108 @@ type DataSource struct {
 }
 
 // Step is one scenario step. Each step sets exactly one execution node:
-// Request, Group, Loop, If, or Weighted.
+// Request, WebSocket, GRPC, SSE, Script, Group, Loop, If, or Weighted.
 type Step struct {
-	ID       string        `yaml:"id" json:"id"`
-	Name     string        `yaml:"name,omitempty" json:"name,omitempty"`
-	Request  *Request      `yaml:"request,omitempty" json:"request,omitempty"`
-	Extract  []Extract     `yaml:"extract,omitempty" json:"extract,omitempty"`
-	Assert   []Assert      `yaml:"assert,omitempty" json:"assert,omitempty"`
-	Think    *Think        `yaml:"think,omitempty" json:"think,omitempty"`
-	Group    *GroupStep    `yaml:"group,omitempty" json:"group,omitempty"`
-	Loop     *LoopStep     `yaml:"loop,omitempty" json:"loop,omitempty"`
-	If       *IfStep       `yaml:"if,omitempty" json:"if,omitempty"`
-	Weighted *WeightedStep `yaml:"weighted,omitempty" json:"weighted,omitempty"`
+	ID        string         `yaml:"id" json:"id"`
+	Name      string         `yaml:"name,omitempty" json:"name,omitempty"`
+	Request   *Request       `yaml:"request,omitempty" json:"request,omitempty"`
+	WebSocket *WebSocketStep `yaml:"websocket,omitempty" json:"websocket,omitempty"`
+	GRPC      *GRPCStep      `yaml:"grpc,omitempty" json:"grpc,omitempty"`
+	SSE       *SSEStep       `yaml:"sse,omitempty" json:"sse,omitempty"`
+	Script    *ScriptStep    `yaml:"script,omitempty" json:"script,omitempty"`
+	Extract   []Extract      `yaml:"extract,omitempty" json:"extract,omitempty"`
+	Assert    []Assert       `yaml:"assert,omitempty" json:"assert,omitempty"`
+	Think     *Think         `yaml:"think,omitempty" json:"think,omitempty"`
+	Group     *GroupStep     `yaml:"group,omitempty" json:"group,omitempty"`
+	Loop      *LoopStep      `yaml:"loop,omitempty" json:"loop,omitempty"`
+	If        *IfStep        `yaml:"if,omitempty" json:"if,omitempty"`
+	Weighted  *WeightedStep  `yaml:"weighted,omitempty" json:"weighted,omitempty"`
+}
+
+// WSMessage defines one WebSocket client frame to transmit.
+type WSMessage struct {
+	Type string `yaml:"type,omitempty" json:"type,omitempty"` // "text" (default) or "binary" (base64)
+	Data string `yaml:"data" json:"data"`
+}
+
+// WebSocketStep defines a WebSocket handshake, message send/receive sequence, and close.
+type WebSocketStep struct {
+	URL          string            `yaml:"url" json:"url"`
+	Headers      map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	HeaderList   []NameValue       `yaml:"header_list,omitempty" json:"header_list,omitempty"`
+	Subprotocols []string          `yaml:"subprotocols,omitempty" json:"subprotocols,omitempty"`
+	Messages     []WSMessage       `yaml:"messages,omitempty" json:"messages,omitempty"`
+	RecvCount    int               `yaml:"recv_count,omitempty" json:"recv_count,omitempty"`
+	IdleTimeout  Duration          `yaml:"idle_timeout,omitempty" json:"idle_timeout,omitempty"`
+}
+
+// GRPCStep defines a unary gRPC call.
+type GRPCStep struct {
+	Target           string            `yaml:"target" json:"target"`
+	TLS              *bool             `yaml:"tls,omitempty" json:"tls,omitempty"`
+	Service          string            `yaml:"service" json:"service"`
+	Method           string            `yaml:"method" json:"method"`
+	Metadata         map[string]string `yaml:"metadata,omitempty" json:"metadata,omitempty"`
+	MetadataList     []NameValue       `yaml:"metadata_list,omitempty" json:"metadata_list,omitempty"`
+	Payload          string            `yaml:"payload,omitempty" json:"payload,omitempty"`
+	PayloadEncoding  string            `yaml:"payload_encoding,omitempty" json:"payload_encoding,omitempty"`
+	ResponseEncoding string            `yaml:"response_encoding,omitempty" json:"response_encoding,omitempty"`
+	ExpectedStatus   *int              `yaml:"expected_status,omitempty" json:"expected_status,omitempty"`
+	Timeout          Duration          `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+// SSEStep defines an HTTP Server-Sent Events stream consumption step.
+type SSEStep struct {
+	Method       string            `yaml:"method,omitempty" json:"method,omitempty"`
+	URL          string            `yaml:"url" json:"url"`
+	Headers      map[string]string `yaml:"headers,omitempty" json:"headers,omitempty"`
+	HeaderList   []NameValue       `yaml:"header_list,omitempty" json:"header_list,omitempty"`
+	Query        map[string]Scalar `yaml:"query,omitempty" json:"query,omitempty"`
+	QueryList    []NameValue       `yaml:"query_list,omitempty" json:"query_list,omitempty"`
+	BasicAuth    *BasicAuth        `yaml:"basic_auth,omitempty" json:"basic_auth,omitempty"`
+	OAuth2       *OAuth2Auth       `yaml:"oauth2,omitempty" json:"oauth2,omitempty"`
+	Body         *Body             `yaml:"body,omitempty" json:"body,omitempty"`
+	MaxEvents    int               `yaml:"max_events,omitempty" json:"max_events,omitempty"`
+	StopContains string            `yaml:"stop_contains,omitempty" json:"stop_contains,omitempty"`
+	Timeout      Duration          `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+// ScriptStep runs an inline sandboxed script against VU variables and data rows.
+type ScriptStep struct {
+	Code string `yaml:"code" json:"code"`
+}
+
+// UnmarshalYAML allows both scalar string (`script: "vars.x = 1"`) and `{ code: ... }`.
+func (s *ScriptStep) UnmarshalYAML(n *yaml.Node) error {
+	if n.Kind == yaml.ScalarNode {
+		s.Code = n.Value
+		return nil
+	}
+	type rawScript ScriptStep
+	var tmp rawScript
+	if err := n.Decode(&tmp); err != nil {
+		return err
+	}
+	*s = ScriptStep(tmp)
+	return nil
+}
+
+// UnmarshalJSON allows both JSON string and `{ "code": "..." }`.
+func (s *ScriptStep) UnmarshalJSON(b []byte) error {
+	trimmed := strings.TrimSpace(string(b))
+	if trimmed == "null" {
+		return nil
+	}
+	if strings.HasPrefix(trimmed, `"`) {
+		return json.Unmarshal(b, &s.Code)
+	}
+	type rawScript ScriptStep
+	var tmp rawScript
+	if err := json.Unmarshal(b, &tmp); err != nil {
+		return err
+	}
+	*s = ScriptStep(tmp)
+	return nil
 }
 
 // GroupStep wraps child steps as a measured transaction unit.

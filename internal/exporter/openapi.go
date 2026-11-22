@@ -103,6 +103,10 @@ func ExportOpenAPI(st *store.Store, projectID string, asYAML bool) ([]byte, erro
 			if err != nil {
 				return err
 			}
+			proto := strings.ToLower(strings.TrimSpace(a.Request.Protocol))
+			if proto == "ws" || proto == "grpc" {
+				continue
+			}
 			opPath := normalizeOpenAPIPath(a.Request.URL)
 			method := strings.ToLower(strings.TrimSpace(a.Request.Method))
 			if method == "" {
@@ -397,7 +401,23 @@ func registerSecurityScheme(schemes map[string]any, a *store.Auth) string {
 }
 
 func openAPIResponses(a *store.API) map[string]any {
+	defaultMediaType := "application/json"
+	if a != nil && strings.EqualFold(strings.TrimSpace(a.Request.Protocol), "sse") {
+		defaultMediaType = "text/event-stream"
+	}
 	if a == nil || (len(a.Examples) == 0 && len(a.ResponseFields) == 0) {
+		if defaultMediaType == "text/event-stream" {
+			return map[string]any{
+				"200": map[string]any{
+					"description": "成功",
+					"content": map[string]any{
+						defaultMediaType: map[string]any{
+							"schema": map[string]any{"type": "string"},
+						},
+					},
+				},
+			}
+		}
 		return map[string]any{
 			"200": map[string]any{"description": "成功"},
 		}
@@ -408,7 +428,7 @@ func openAPIResponses(a *store.API) map[string]any {
 			"200": map[string]any{
 				"description": "成功",
 				"content": map[string]any{
-					"application/json": map[string]any{
+					defaultMediaType: map[string]any{
 						"schema": schema,
 					},
 				},
@@ -438,7 +458,7 @@ func openAPIResponses(a *store.API) map[string]any {
 		for _, ex := range list {
 			ct := strings.TrimSpace(ex.ContentType)
 			if ct == "" {
-				ct = "application/json"
+				ct = defaultMediaType
 			}
 			byMedia[ct] = append(byMedia[ct], ex)
 		}

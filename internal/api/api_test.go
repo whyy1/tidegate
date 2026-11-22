@@ -20,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1602,5 +1603,239 @@ func TestRBACTokensSecurityPolicyAuditSecretsJTLAndK6(t *testing.T) {
 		if !seenAction[want] {
 			t.Fatalf("expected audit action %q in %+v", want, seenAction)
 		}
+	}
+}
+
+func TestM2CProtocolsScriptsAndMetricsExporters(t *testing.T) {
+	tsrv, err := testserver.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsrv.Start()
+	defer tsrv.Close()
+
+	var (
+		sinkHits atomic.Int64
+		badToken atomic.Int64
+	)
+	sinkSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Token prom-influx-api-tok" {
+			badToken.Add(1)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		sinkHits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer sinkSrv.Close()
+
+	env := newAPITestEnv(t, false)
+	adminCl := newCookieClient(t)
+
+	resp := doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/setup", map[string]string{
+		"username": "admin",
+		"password": "admin-strong-password-1",
+		"code":     env.setupCod,
+	}, true)
+	if resp.StatusCode != 201 {
+		t.Fatalf("setup = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Create viewer + Bearer token for Prometheus scrape.
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/users", map[string]string{
+		"username": "prom_scraper",
+		"password": "viewer-strong-password-1",
+		"role":     "viewer",
+	}, true)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create viewer = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	viewerCl := newCookieClient(t)
+	resp = doJSONReq(t, viewerCl, "POST", env.baseURL+"/api/v1/auth/login", map[string]string{
+		"username": "prom_scraper",
+		"password": "viewer-strong-password-1",
+	}, true)
+	if resp.StatusCode != 200 {
+		t.Fatalf("viewer login = %d", resp.StatusCode)
+	}
+	var tokOut struct {
+		Plaintext string `json:"plaintext"`
+	}
+	resp.Body.Close()
+	resp = doJSONReq(t, viewerCl, "POST", env.baseURL+"/api/v1/auth/tokens", map[string]any{
+		"name": "prom",
+		"role": "viewer",
+	}, true)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create viewer token = %d", resp.StatusCode)
+	}
+	decodeBody(t, resp, &tokOut)
+
+	// Non-admin viewer cannot PUT /settings/metrics-sink.
+	resp = doBearerReq(t, tokOut.Plaintext, "PUT", env.baseURL+"/api/v1/settings/metrics-sink", map[string]any{
+		"enabled": true,
+		"type":    "influxdb",
+		"url":     sinkSrv.URL,
+	})
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected viewer 403 on PUT metrics-sink, got %d", resp.StatusCode)
+	}
+
+	// Admin configures encrypted metrics sink, updates bucket sending back SecretMask (preserving token), and tests.
+	resp = doJSONReq(t, adminCl, "PUT", env.baseURL+"/api/v1/settings/metrics-sink", controller.MetricsSinkConfig{
+		Enabled: true,
+		Type:    "influxdb",
+		URL:     sinkSrv.URL,
+		Org:     "org1",
+		Bucket:  "b1",
+		Token:   "prom-influx-api-tok",
+	}, true)
+	if resp.StatusCode != 200 {
+		t.Fatalf("PUT metrics-sink = %d", resp.StatusCode)
+	}
+	var sinkCfg controller.MetricsSinkConfig
+	decodeBody(t, resp, &sinkCfg)
+	if sinkCfg.Token != store.SecretMask {
+		t.Fatalf("expected masked token, got %q", sinkCfg.Token)
+	}
+
+	resp = doJSONReq(t, adminCl, "PUT", env.baseURL+"/api/v1/settings/metrics-sink", controller.MetricsSinkConfig{
+		Enabled: true,
+		Type:    "influxdb",
+		URL:     sinkSrv.URL,
+		Org:     "org1",
+		Bucket:  "b2",
+		Token:   store.SecretMask,
+	}, true)
+	if resp.StatusCode != 200 {
+		t.Fatalf("PUT metrics-sink mask update = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/settings/metrics-sink/test", nil, true)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("POST metrics-sink/test = %d: %s", resp.StatusCode, b)
+	}
+	resp.Body.Close()
+	if sinkHits.Load() == 0 || badToken.Load() != 0 {
+		t.Fatalf("expected preserved token auth on TestMetricsSink, hits=%d bad=%d", sinkHits.Load(), badToken.Load())
+	}
+
+	// Create project + HTTP API + Scenario containing script step.
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/projects", map[string]string{"name": "M2CProj"}, true)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create project = %d", resp.StatusCode)
+	}
+	var pr store.Project
+	decodeBody(t, resp, &pr)
+
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/projects/"+pr.ID+"/apis", map[string]any{
+		"name":    "PingSigned",
+		"request": store.APIRequest{Method: "GET", URL: tsrv.URL() + "/ping?sig={{sig}}"},
+	}, true)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create api = %d", resp.StatusCode)
+	}
+	var pingAPI store.API
+	decodeBody(t, resp, &pingAPI)
+
+	scenBody := map[string]any{
+		"name": "ScriptFlow",
+		"steps": []store.ScenarioStep{
+			{ID: "sc", Type: "script", Script: `vars.sig = sha256("hello-m2c")`},
+			{ID: "call", Type: "http", APIID: pingAPI.ID},
+		},
+		"load": scenario.Load{
+			Mode:   "vus",
+			Stages: []scenario.Stage{{Duration: scenario.Duration(1300 * time.Millisecond), Target: 1}},
+		},
+	}
+
+	// Disable scripts globally -> HTTP 403 scripts_disabled.
+	resp = doJSONReq(t, adminCl, "PUT", env.baseURL+"/api/v1/settings/security", controller.SecurityPolicy{
+		ScriptsDisabled: true,
+	}, true)
+	if resp.StatusCode != 200 {
+		t.Fatalf("PUT security = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/projects/"+pr.ID+"/scenarios/debug", map[string]any{
+		"scenario": scenBody,
+	}, true)
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 scripts_disabled on scenarios/debug, got %d", resp.StatusCode)
+	}
+	errBytes, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(errBytes), `"scripts_disabled"`) {
+		t.Fatalf("expected error code scripts_disabled, got: %s", errBytes)
+	}
+
+	// Re-enable scripts, run scenario dry-run, launch run, and scrape Prometheus via viewer Bearer token.
+	resp = doJSONReq(t, adminCl, "PUT", env.baseURL+"/api/v1/settings/security", controller.SecurityPolicy{
+		ScriptsDisabled: false,
+	}, true)
+	resp.Body.Close()
+
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/projects/"+pr.ID+"/scenarios/debug", map[string]any{
+		"scenario": scenBody,
+	}, true)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("scenarios/debug = %d: %s", resp.StatusCode, b)
+	}
+	resp.Body.Close()
+
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/projects/"+pr.ID+"/scenarios", scenBody, true)
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("create scenario = %d: %s", resp.StatusCode, b)
+	}
+	var sc store.Scenario
+	decodeBody(t, resp, &sc)
+
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/projects/"+pr.ID+"/runs", map[string]any{
+		"scenario_id": sc.ID,
+	}, true)
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("start run = %d: %s", resp.StatusCode, b)
+	}
+	var runObj store.Run
+	decodeBody(t, resp, &runObj)
+
+	// Scrape Prometheus metrics with viewer API token.
+	resp = doBearerReq(t, tokOut.Plaintext, "GET", env.baseURL+"/api/v1/metrics/prometheus", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET metrics/prometheus = %d", resp.StatusCode)
+	}
+	if ct := resp.Header.Get("Content-Type"); !strings.Contains(ct, "text/plain") || !strings.Contains(ct, "version=0.0.4") {
+		resp.Body.Close()
+		t.Fatalf("unexpected Prometheus Content-Type: %q", ct)
+	}
+	promBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(promBody), "tidegate_agents_online") || !strings.Contains(string(promBody), "tidegate_run_active") {
+		t.Fatalf("unexpected Prometheus scrape body:\n%s", promBody)
+	}
+
+	// Wait for run completion cleanly before test env teardown.
+	deadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(deadline) {
+		r, _ := env.rdb.GetRun(context.Background(), runObj.ID)
+		if r != nil && !r.Status.Active() {
+			break
+		}
+		time.Sleep(40 * time.Millisecond)
 	}
 }

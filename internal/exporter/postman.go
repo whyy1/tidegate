@@ -171,9 +171,14 @@ func postmanURLObj(req store.APIRequest) map[string]any {
 	if raw == "" {
 		raw = "/"
 	}
-	if !strings.HasPrefix(strings.ToLower(raw), "http://") &&
-		!strings.HasPrefix(strings.ToLower(raw), "https://") &&
-		!strings.HasPrefix(raw, "{{") {
+	lower := strings.ToLower(raw)
+	hasScheme := strings.HasPrefix(lower, "http://") ||
+		strings.HasPrefix(lower, "https://") ||
+		strings.HasPrefix(lower, "ws://") ||
+		strings.HasPrefix(lower, "wss://") ||
+		strings.HasPrefix(lower, "grpc://") ||
+		strings.HasPrefix(lower, "grpcs://")
+	if !hasScheme && !strings.HasPrefix(raw, "{{") && !strings.EqualFold(strings.TrimSpace(req.Protocol), "grpc") {
 		if !strings.HasPrefix(raw, "/") {
 			raw = "/" + raw
 		}

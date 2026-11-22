@@ -146,6 +146,82 @@ func rewriteDataRefs(s string, renames map[string]string) string {
 	return out
 }
 
+func rewriteStringMap(m map[string]string, renames map[string]string) map[string]string {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		out[k] = rewriteDataRefs(v, renames)
+	}
+	return out
+}
+
+func rewriteScalarMap(m map[string]scenario.Scalar, renames map[string]string) map[string]scenario.Scalar {
+	if len(m) == 0 {
+		return nil
+	}
+	out := make(map[string]scenario.Scalar, len(m))
+	for k, v := range m {
+		out[k] = scenario.Scalar(rewriteDataRefs(string(v), renames))
+	}
+	return out
+}
+
+func rewriteNVSlice(in []scenario.NameValue, renames map[string]string) []scenario.NameValue {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]scenario.NameValue, len(in))
+	for j, h := range in {
+		out[j] = scenario.NameValue{Name: h.Name, Value: scenario.Scalar(rewriteDataRefs(string(h.Value), renames))}
+	}
+	return out
+}
+
+func rewriteBodyCopy(b *scenario.Body, renames map[string]string) *scenario.Body {
+	if b == nil {
+		return nil
+	}
+	bc := *b
+	bc.Content = rewriteDataRefs(bc.Content, renames)
+	bc.FieldList = rewriteNVSlice(bc.FieldList, renames)
+	return &bc
+}
+
+func rewriteBasicCopy(ba *scenario.BasicAuth, renames map[string]string) *scenario.BasicAuth {
+	if ba == nil {
+		return nil
+	}
+	cp := *ba
+	cp.Username = rewriteDataRefs(cp.Username, renames)
+	cp.Password = rewriteDataRefs(cp.Password, renames)
+	return &cp
+}
+
+func rewriteOAuthCopy(oa *scenario.OAuth2Auth, renames map[string]string) *scenario.OAuth2Auth {
+	if oa == nil {
+		return nil
+	}
+	cp := *oa
+	cp.TokenURL = rewriteDataRefs(cp.TokenURL, renames)
+	cp.ClientID = rewriteDataRefs(cp.ClientID, renames)
+	cp.ClientSecret = rewriteDataRefs(cp.ClientSecret, renames)
+	cp.Scope = rewriteDataRefs(cp.Scope, renames)
+	return &cp
+}
+
+func rewriteScriptDataRefs(code string, renames map[string]string) string {
+	if len(renames) == 0 || code == "" {
+		return code
+	}
+	out := code
+	for oldName, newName := range renames {
+		out = strings.ReplaceAll(out, "data."+oldName+".", "data."+newName+".")
+	}
+	return out
+}
+
 func rewriteScenarioSteps(idPrefix, namePrefix string, steps []scenario.Step, renames map[string]string) []scenario.Step {
 	out := make([]scenario.Step, len(steps))
 	for i, st := range steps {
@@ -159,61 +235,53 @@ func rewriteScenarioSteps(idPrefix, namePrefix string, steps []scenario.Step, re
 		if cp.Request != nil {
 			reqCopy := *cp.Request
 			reqCopy.URL = rewriteDataRefs(reqCopy.URL, renames)
-			if len(reqCopy.Headers) > 0 {
-				hdrs := make(map[string]string, len(reqCopy.Headers))
-				for k, v := range reqCopy.Headers {
-					hdrs[k] = rewriteDataRefs(v, renames)
-				}
-				reqCopy.Headers = hdrs
-			}
-			if len(reqCopy.HeaderList) > 0 {
-				hl := make([]scenario.NameValue, len(reqCopy.HeaderList))
-				for j, h := range reqCopy.HeaderList {
-					hl[j] = scenario.NameValue{Name: h.Name, Value: scenario.Scalar(rewriteDataRefs(string(h.Value), renames))}
-				}
-				reqCopy.HeaderList = hl
-			}
-			if len(reqCopy.Query) > 0 {
-				qm := make(map[string]scenario.Scalar, len(reqCopy.Query))
-				for k, v := range reqCopy.Query {
-					qm[k] = scenario.Scalar(rewriteDataRefs(string(v), renames))
-				}
-				reqCopy.Query = qm
-			}
-			if len(reqCopy.QueryList) > 0 {
-				ql := make([]scenario.NameValue, len(reqCopy.QueryList))
-				for j, q := range reqCopy.QueryList {
-					ql[j] = scenario.NameValue{Name: q.Name, Value: scenario.Scalar(rewriteDataRefs(string(q.Value), renames))}
-				}
-				reqCopy.QueryList = ql
-			}
-			if reqCopy.Body != nil {
-				bc := *reqCopy.Body
-				bc.Content = rewriteDataRefs(bc.Content, renames)
-				if len(bc.FieldList) > 0 {
-					fl := make([]scenario.NameValue, len(bc.FieldList))
-					for j, f := range bc.FieldList {
-						fl[j] = scenario.NameValue{Name: f.Name, Value: scenario.Scalar(rewriteDataRefs(string(f.Value), renames))}
-					}
-					bc.FieldList = fl
-				}
-				reqCopy.Body = &bc
-			}
-			if reqCopy.BasicAuth != nil {
-				ba := *reqCopy.BasicAuth
-				ba.Username = rewriteDataRefs(ba.Username, renames)
-				ba.Password = rewriteDataRefs(ba.Password, renames)
-				reqCopy.BasicAuth = &ba
-			}
-			if reqCopy.OAuth2 != nil {
-				oa := *reqCopy.OAuth2
-				oa.TokenURL = rewriteDataRefs(oa.TokenURL, renames)
-				oa.ClientID = rewriteDataRefs(oa.ClientID, renames)
-				oa.ClientSecret = rewriteDataRefs(oa.ClientSecret, renames)
-				oa.Scope = rewriteDataRefs(oa.Scope, renames)
-				reqCopy.OAuth2 = &oa
-			}
+			reqCopy.Headers = rewriteStringMap(reqCopy.Headers, renames)
+			reqCopy.HeaderList = rewriteNVSlice(reqCopy.HeaderList, renames)
+			reqCopy.Query = rewriteScalarMap(reqCopy.Query, renames)
+			reqCopy.QueryList = rewriteNVSlice(reqCopy.QueryList, renames)
+			reqCopy.Body = rewriteBodyCopy(reqCopy.Body, renames)
+			reqCopy.BasicAuth = rewriteBasicCopy(reqCopy.BasicAuth, renames)
+			reqCopy.OAuth2 = rewriteOAuthCopy(reqCopy.OAuth2, renames)
 			cp.Request = &reqCopy
+		}
+		if cp.WebSocket != nil {
+			wsCopy := *cp.WebSocket
+			wsCopy.URL = rewriteDataRefs(wsCopy.URL, renames)
+			wsCopy.Headers = rewriteStringMap(wsCopy.Headers, renames)
+			wsCopy.HeaderList = rewriteNVSlice(wsCopy.HeaderList, renames)
+			if len(wsCopy.Messages) > 0 {
+				msgs := make([]scenario.WSMessage, len(wsCopy.Messages))
+				for j, m := range wsCopy.Messages {
+					msgs[j] = scenario.WSMessage{Type: m.Type, Data: rewriteDataRefs(m.Data, renames)}
+				}
+				wsCopy.Messages = msgs
+			}
+			cp.WebSocket = &wsCopy
+		}
+		if cp.GRPC != nil {
+			gCopy := *cp.GRPC
+			gCopy.Target = rewriteDataRefs(gCopy.Target, renames)
+			gCopy.Metadata = rewriteStringMap(gCopy.Metadata, renames)
+			gCopy.MetadataList = rewriteNVSlice(gCopy.MetadataList, renames)
+			gCopy.Payload = rewriteDataRefs(gCopy.Payload, renames)
+			cp.GRPC = &gCopy
+		}
+		if cp.SSE != nil {
+			seCopy := *cp.SSE
+			seCopy.URL = rewriteDataRefs(seCopy.URL, renames)
+			seCopy.Headers = rewriteStringMap(seCopy.Headers, renames)
+			seCopy.HeaderList = rewriteNVSlice(seCopy.HeaderList, renames)
+			seCopy.Query = rewriteScalarMap(seCopy.Query, renames)
+			seCopy.QueryList = rewriteNVSlice(seCopy.QueryList, renames)
+			seCopy.Body = rewriteBodyCopy(seCopy.Body, renames)
+			seCopy.BasicAuth = rewriteBasicCopy(seCopy.BasicAuth, renames)
+			seCopy.OAuth2 = rewriteOAuthCopy(seCopy.OAuth2, renames)
+			cp.SSE = &seCopy
+		}
+		if cp.Script != nil {
+			scCopy := *cp.Script
+			scCopy.Code = rewriteScriptDataRefs(scCopy.Code, renames)
+			cp.Script = &scCopy
 		}
 		if cp.Group != nil {
 			cp.Group = &scenario.GroupStep{

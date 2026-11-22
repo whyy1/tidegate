@@ -59,6 +59,7 @@ type vu struct {
 	eng      *Engine
 	rec      *metrics.Recorder
 	client   vuClient
+	sseVU    *stdVU
 	env      scenario.Env
 	rng      *rand.Rand
 	quit     chan struct{}
@@ -111,6 +112,24 @@ func newVU(e *Engine, id int) *vu {
 	v.headerFn = v.resp.header
 	v.client = e.client.newVU(v)
 	return v
+}
+
+func (v *vu) closeAll() {
+	if v.client != nil {
+		v.client.closeAll()
+	}
+	if v.sseVU != nil {
+		v.sseVU.closeAll()
+	}
+}
+
+func (v *vu) abortAll() {
+	if v.client != nil {
+		v.client.abort()
+	}
+	if v.sseVU != nil {
+		v.sseVU.abort()
+	}
 }
 
 // stop asks the virtual user to finish at its next step boundary.
@@ -232,6 +251,46 @@ func (v *vu) execNodes(nodes []scenario.Node, planned *int64, stepErr *metrics.E
 		case *scenario.HTTPStep:
 			rt := v.eng.stepByIndex[st.Index]
 			ok, k := v.runHTTP(rt, *planned)
+			*planned = 0
+			if k != metrics.ErrNone && *stepErr == metrics.ErrNone {
+				*stepErr = k
+			}
+			if !ok {
+				return false
+			}
+			think = st.Think
+		case *scenario.WSStep:
+			ok, k := v.runWS(st, *planned)
+			*planned = 0
+			if k != metrics.ErrNone && *stepErr == metrics.ErrNone {
+				*stepErr = k
+			}
+			if !ok {
+				return false
+			}
+			think = st.Think
+		case *scenario.GRPCStepPlan:
+			ok, k := v.runGRPC(st, *planned)
+			*planned = 0
+			if k != metrics.ErrNone && *stepErr == metrics.ErrNone {
+				*stepErr = k
+			}
+			if !ok {
+				return false
+			}
+			think = st.Think
+		case *scenario.SSEStepPlan:
+			ok, k := v.runSSE(st, *planned)
+			*planned = 0
+			if k != metrics.ErrNone && *stepErr == metrics.ErrNone {
+				*stepErr = k
+			}
+			if !ok {
+				return false
+			}
+			think = st.Think
+		case *scenario.ScriptStepPlan:
+			ok, k := v.runScript(st, *planned)
 			*planned = 0
 			if k != metrics.ErrNone && *stepErr == metrics.ErrNone {
 				*stepErr = k

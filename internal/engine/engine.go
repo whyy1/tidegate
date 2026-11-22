@@ -78,6 +78,8 @@ type Engine struct {
 	shards       int
 	dialer       *dialer
 	client       clientFactory
+	sseClient    *stdClient
+	grpc         *grpcPool
 	oauth2       *oauth2Cache
 	data         []*dataState
 	seed         uint64
@@ -253,15 +255,50 @@ func New(plan *scenario.Plan, opts Options) (*Engine, error) {
 	}
 	e.dialer = newDialer(e, &plan.HTTP, targetCheck)
 	e.oauth2 = newOAuth2Cache(&plan.HTTP, e.dialer)
+	e.grpc = newGRPCPool(&plan.HTTP, e.dialer)
 	switch opts.Client {
 	case ClientStd:
-		e.client = newStdClient(e, e.dialer)
+		sc := newStdClient(e, e.dialer)
+		e.client = sc
+		e.sseClient = sc
 	default:
 		e.client = newFastClient(e, e.dialer)
+		if hasStepKind(plan.Steps, scenario.NodeSSE) {
+			e.sseClient = newStdClient(e, e.dialer)
+		}
 	}
 	e.queue.notify = make(chan struct{}, 1)
 	go e.queue.forward(e.out)
 	return e, nil
+}
+
+func hasStepKind(nodes []scenario.Node, kind scenario.NodeKind) bool {
+	for _, n := range nodes {
+		if n.Kind() == kind {
+			return true
+		}
+		switch st := n.(type) {
+		case *scenario.GroupNode:
+			if hasStepKind(st.Children, kind) {
+				return true
+			}
+		case *scenario.LoopNode:
+			if hasStepKind(st.Children, kind) {
+				return true
+			}
+		case *scenario.IfNode:
+			if hasStepKind(st.Then, kind) || hasStepKind(st.Else, kind) {
+				return true
+			}
+		case *scenario.WeightedNode:
+			for _, br := range st.Branches {
+				if hasStepKind(br.Steps, kind) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (e *Engine) initStepRTs(nodes []scenario.Node) error {
@@ -272,6 +309,22 @@ func (e *Engine) initStepRTs(nodes []scenario.Node) error {
 				return fmt.Errorf("engine: step %d has invalid flat index %d", i, st.Index)
 			}
 			e.stepByIndex[st.Index] = newStepRT(st)
+		case *scenario.WSStep:
+			if st.Index < 0 || st.Index >= len(e.stepByIndex) {
+				return fmt.Errorf("engine: step %d has invalid flat index %d", i, st.Index)
+			}
+		case *scenario.GRPCStepPlan:
+			if st.Index < 0 || st.Index >= len(e.stepByIndex) {
+				return fmt.Errorf("engine: step %d has invalid flat index %d", i, st.Index)
+			}
+		case *scenario.SSEStepPlan:
+			if st.Index < 0 || st.Index >= len(e.stepByIndex) {
+				return fmt.Errorf("engine: step %d has invalid flat index %d", i, st.Index)
+			}
+		case *scenario.ScriptStepPlan:
+			if st.Index < 0 || st.Index >= len(e.stepByIndex) {
+				return fmt.Errorf("engine: step %d has invalid flat index %d", i, st.Index)
+			}
 		case *scenario.GroupNode:
 			if err := e.initStepRTs(st.Children); err != nil {
 				return err
@@ -332,7 +385,7 @@ func (e *Engine) Abort() {
 	e.hardCancel()
 	e.vusMu.Lock()
 	for v := range e.vus {
-		v.client.abort()
+		v.abortAll()
 	}
 	e.vusMu.Unlock()
 }
@@ -384,8 +437,7 @@ func (e *Engine) Run(ctx context.Context) error {
 		waitTimeout(&e.wg, 10*time.Second)
 	}
 	stopWatch()
-	e.client.close()
-	e.oauth2.close()
+	e.closeProtocols()
 	close(e.aggStop)
 	<-aggDone
 	e.hardCancel()
@@ -412,14 +464,22 @@ func waitTimeout(wg *sync.WaitGroup, d time.Duration) bool {
 
 func (e *Engine) setTarget(v float64) { e.target.Store(math.Float64bits(v)) }
 
-// newVU creates and registers a virtual user with the given id.
+func (e *Engine) closeProtocols() {
+	e.client.close()
+	if e.sseClient != nil && e.client != e.sseClient {
+		e.sseClient.close()
+	}
+	e.grpc.close()
+	e.oauth2.close()
+}
+
 func (e *Engine) newVU(id int) *vu {
 	v := newVU(e, id)
 	e.vusMu.Lock()
 	e.vus[v] = struct{}{}
 	e.vusMu.Unlock()
 	if e.aborted.Load() {
-		v.client.abort()
+		v.abortAll()
 	}
 	e.wg.Add(1)
 	e.activeVUs.Add(1)
@@ -427,7 +487,7 @@ func (e *Engine) newVU(id int) *vu {
 }
 
 func (e *Engine) vuExited(v *vu) {
-	v.client.closeAll()
+	v.closeAll()
 	e.vusMu.Lock()
 	delete(e.vus, v)
 	e.vusMu.Unlock()

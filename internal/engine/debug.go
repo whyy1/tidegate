@@ -137,7 +137,7 @@ func RunDebug(ctx context.Context, plan *scenario.Plan, opts DebugOptions) (*Deb
 	defer func() {
 		stopWatch()
 		if v != nil {
-			v.client.closeAll()
+			v.closeAll()
 			if v.timer != nil {
 				v.timer.Stop()
 			}
@@ -148,8 +148,7 @@ func RunDebug(ctx context.Context, plan *scenario.Plan, opts DebugOptions) (*Deb
 			delete(e.vus, v)
 			e.vusMu.Unlock()
 		}
-		e.client.close()
-		e.oauth2.close()
+		e.closeProtocols()
 		e.hardCancel()
 		e.queue.close()
 	}()
@@ -158,7 +157,7 @@ func RunDebug(ctx context.Context, plan *scenario.Plan, opts DebugOptions) (*Deb
 	e.vusMu.Lock()
 	e.vus[v] = struct{}{}
 	if e.aborted.Load() {
-		v.client.abort()
+		v.abortAll()
 	}
 	e.vusMu.Unlock()
 
@@ -224,6 +223,46 @@ func runDebugNodes(
 		case *scenario.HTTPStep:
 			rt := e.stepByIndex[st.Index]
 			stepRes := v.runStepDebug(rt, maxBody)
+			out.Steps = append(out.Steps, stepRes)
+			if !stepRes.Passed {
+				out.Passed = false
+				if opts.StopOnError {
+					return false, nil
+				}
+			}
+			think = st.Think
+		case *scenario.WSStep:
+			stepRes := v.runWSDebug(st, maxBody)
+			out.Steps = append(out.Steps, stepRes)
+			if !stepRes.Passed {
+				out.Passed = false
+				if opts.StopOnError {
+					return false, nil
+				}
+			}
+			think = st.Think
+		case *scenario.GRPCStepPlan:
+			stepRes := v.runGRPCDebug(st, maxBody)
+			out.Steps = append(out.Steps, stepRes)
+			if !stepRes.Passed {
+				out.Passed = false
+				if opts.StopOnError {
+					return false, nil
+				}
+			}
+			think = st.Think
+		case *scenario.SSEStepPlan:
+			stepRes := v.runSSEDebug(st, maxBody)
+			out.Steps = append(out.Steps, stepRes)
+			if !stepRes.Passed {
+				out.Passed = false
+				if opts.StopOnError {
+					return false, nil
+				}
+			}
+			think = st.Think
+		case *scenario.ScriptStepPlan:
+			stepRes := v.runScriptDebug(st)
 			out.Steps = append(out.Steps, stepRes)
 			if !stepRes.Passed {
 				out.Passed = false
@@ -570,6 +609,8 @@ func extractSourceName(src scenario.ExtractSource) string {
 		return "regex"
 	case scenario.ExtractHeader:
 		return "header"
+	case scenario.ExtractXPath:
+		return "xpath"
 	default:
 		return "unknown"
 	}

@@ -9,6 +9,7 @@ import (
 
 	"tidegate/internal/auth"
 	"tidegate/internal/controller"
+	"tidegate/internal/exporter"
 	"tidegate/internal/store"
 )
 
@@ -269,4 +270,59 @@ func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, list)
+}
+
+// ---------------------------------------------------------------------------
+// Prometheus & Real-Time Metrics Sink
+
+func (s *Server) handlePrometheusMetrics(w http.ResponseWriter, r *http.Request) {
+	st := s.ctrl.MetricsState(r.Context())
+	h := w.Header()
+	h.Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	h.Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	if err := exporter.WritePrometheus(w, st); err != nil {
+		s.log.Warn("输出 Prometheus 指标失败", "err", err)
+	}
+}
+
+func (s *Server) handleGetMetricsSink(w http.ResponseWriter, r *http.Request) {
+	cfg, err := s.ctrl.GetMetricsSinkConfig(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, cfg)
+}
+
+func (s *Server) handlePutMetricsSink(w http.ResponseWriter, r *http.Request) {
+	var in controller.MetricsSinkConfig
+	if err := decodeJSON(w, r, &in); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.ctrl.SetMetricsSinkConfig(r.Context(), in)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "metrics_sink.update", "metrics_sink", "default", out)
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleTestMetricsSink(w http.ResponseWriter, r *http.Request) {
+	var draft *controller.MetricsSinkConfig
+	if r.ContentLength != 0 {
+		var in controller.MetricsSinkConfig
+		if err := decodeJSON(w, r, &in); err != nil {
+			writeError(w, err)
+			return
+		}
+		draft = &in
+	}
+	if err := s.ctrl.TestMetricsSink(r.Context(), draft); err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }

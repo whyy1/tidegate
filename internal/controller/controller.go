@@ -18,6 +18,7 @@ import (
 
 	"tidegate/internal/cluster"
 	"tidegate/internal/engine"
+	"tidegate/internal/exporter"
 	"tidegate/internal/metrics"
 	"tidegate/internal/scenario"
 	"tidegate/internal/store"
@@ -87,6 +88,7 @@ type Controller struct {
 	startDelay    time.Duration
 
 	hub    *eventHub
+	sink   *metricsSink
 	lis    net.Listener
 	srv    *cluster.Server
 	sup    *localSupervisor
@@ -231,6 +233,11 @@ func New(ctx context.Context, opts Options) (*Controller, error) {
 	c.bgWG.Add(1)
 	go c.agentsBroadcastLoop()
 
+	c.sink = newMetricsSink(c)
+	c.reloadMetricsSink(ctx)
+	c.bgWG.Add(1)
+	go c.sink.run()
+
 	if opts.StartLocalAgent || opts.InProcessLocalAgent {
 		sup, err := startLocalAgentSupervisor(
 			bgCtx,
@@ -277,6 +284,7 @@ func (c *Controller) Close() error {
 	_ = c.lis.Close()
 	c.srvWG.Wait()
 	c.bgWG.Wait()
+	c.sink.close()
 	c.hub.closeAll()
 	return nil
 }
@@ -723,7 +731,7 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 	}
 
 	egress := inspectTargetEgress(ctx, resolved.Definition)
-	ar := newActiveRun(c, runMeta.ID, plan.Load.Mode, egress, resolved.Definition.Load.Thresholds)
+	ar := newActiveRun(c, runMeta.ID, runMeta.ProjectID, runMeta.ScenarioName, plan.Load.Mode, egress, resolved.Definition.Load.Thresholds)
 
 	c.mu.Lock()
 	if c.active != nil {
@@ -1030,11 +1038,13 @@ type seqBucket struct {
 }
 
 type activeRun struct {
-	ctrl       *Controller
-	id         string
-	loadMode   scenario.LoadMode
-	alerts     *alertEvaluator
-	thresholds []scenario.Threshold
+	ctrl         *Controller
+	id           string
+	projectID    string
+	scenarioName string
+	loadMode     scenario.LoadMode
+	alerts       *alertEvaluator
+	thresholds   []scenario.Threshold
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
@@ -1048,18 +1058,71 @@ type activeRun struct {
 	buckets           map[int64]*seqBucket
 	nextFlushSeq      int64
 	finalized         bool
+
+	latestView  *metrics.SnapshotView
+	totalReqs   int64
+	totalErrors int64
+	stepReqs    map[string]int64
+	stepErrors  map[string]int64
 }
 
-func newActiveRun(ctrl *Controller, id string, loadMode scenario.LoadMode, egress targetEgress, thresholds []scenario.Threshold) *activeRun {
+func newActiveRun(ctrl *Controller, id, projectID, scenarioName string, loadMode scenario.LoadMode, egress targetEgress, thresholds []scenario.Threshold) *activeRun {
 	return &activeRun{
-		ctrl:       ctrl,
-		id:         id,
-		loadMode:   loadMode,
-		alerts:     newAlertEvaluator(id, ctrl.results, ctrl.hub, egress),
-		thresholds: append([]scenario.Threshold(nil), thresholds...),
-		stopCh:     make(chan struct{}),
-		nodes:      make(map[string]*runNodeState),
-		buckets:    make(map[int64]*seqBucket),
+		ctrl:         ctrl,
+		id:           id,
+		projectID:    projectID,
+		scenarioName: scenarioName,
+		loadMode:     loadMode,
+		alerts:       newAlertEvaluator(id, ctrl.results, ctrl.hub, egress),
+		thresholds:   append([]scenario.Threshold(nil), thresholds...),
+		stopCh:       make(chan struct{}),
+		nodes:        make(map[string]*runNodeState),
+		buckets:      make(map[int64]*seqBucket),
+		stepReqs:     make(map[string]int64),
+		stepErrors:   make(map[string]int64),
+	}
+}
+
+func (r *activeRun) recordPrometheusTick(view *metrics.SnapshotView) exporter.PrometheusRun {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if view != nil {
+		r.latestView = view
+		r.totalReqs += view.Requests
+		r.totalErrors += view.Errors
+		for _, step := range view.Steps {
+			r.stepReqs[step.ID] += step.Requests
+			r.stepErrors[step.ID] += step.Errors
+		}
+	}
+	return r.prometheusRunLocked()
+}
+
+func (r *activeRun) prometheusRun() exporter.PrometheusRun {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.prometheusRunLocked()
+}
+
+func (r *activeRun) prometheusRunLocked() exporter.PrometheusRun {
+	stepReqs := make(map[string]int64, len(r.stepReqs))
+	for k, v := range r.stepReqs {
+		stepReqs[k] = v
+	}
+	stepErrs := make(map[string]int64, len(r.stepErrors))
+	for k, v := range r.stepErrors {
+		stepErrs[k] = v
+	}
+	return exporter.PrometheusRun{
+		Active:            !r.finalized,
+		RunID:             r.id,
+		ProjectID:         r.projectID,
+		ScenarioName:      r.scenarioName,
+		Snapshot:          r.latestView,
+		RequestsTotal:     r.totalReqs,
+		ErrorsTotal:       r.totalErrors,
+		StepRequestsTotal: stepReqs,
+		StepErrorsTotal:   stepErrs,
 	}
 }
 
@@ -1218,6 +1281,20 @@ func (r *activeRun) persistAndPublish(snaps []*metrics.Snapshot) {
 			r.ctrl.log.Warn("保存每秒快照失败", "run_id", r.id, "seq", s.Seq, "err", err)
 		}
 		r.alerts.evaluateSnapshot(r.ctrl.ctx, s)
+		promRun := r.recordPrometheusTick(view)
+		if r.ctrl.sink != nil {
+			if cfg := r.ctrl.sink.cfg.Load(); cfg != nil && cfg.Enabled {
+				r.ctrl.sink.enqueue(sinkBatch{
+					runID:        r.id,
+					projectID:    r.projectID,
+					scenarioName: r.scenarioName,
+					view:         view,
+					totalReqs:    promRun.RequestsTotal,
+					totalErrors:  promRun.ErrorsTotal,
+					promState:    exporter.PrometheusState{Run: promRun},
+				})
+			}
+		}
 		r.ctrl.hub.publish(Event{
 			Type:     EventSnapshot,
 			RunID:    r.id,

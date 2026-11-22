@@ -299,6 +299,29 @@ func writeK6Steps(b *strings.Builder, steps []scenario.Step, data []scenario.Dat
 		case st.Request != nil:
 			writeK6HTTPRequest(b, &st, dataSet, envVars, indent, seq)
 			writeK6Sleep(b, indent, st.Think)
+
+		case st.WebSocket != nil:
+			label := firstString(st.Name, st.ID)
+			b.WriteString(fmt.Sprintf("%s// WebSocket 步骤 %s: %s（k6 请使用 k6/ws 模块扩展）\n", indent, label, st.WebSocket.URL))
+			writeK6Sleep(b, indent, st.Think)
+
+		case st.GRPC != nil:
+			label := firstString(st.Name, st.ID)
+			b.WriteString(fmt.Sprintf("%s// gRPC 步骤 %s: %s /%s/%s（k6 请使用 k6/net/grpc 模块扩展）\n", indent, label, st.GRPC.Target, st.GRPC.Service, st.GRPC.Method))
+			writeK6Sleep(b, indent, st.Think)
+
+		case st.SSE != nil:
+			label := firstString(st.Name, st.ID)
+			b.WriteString(fmt.Sprintf("%s// SSE 流式步骤 %s: %s\n", indent, label, st.SSE.URL))
+			writeK6Sleep(b, indent, st.Think)
+
+		case st.Script != nil:
+			label := firstString(st.Name, st.ID)
+			b.WriteString(fmt.Sprintf("%s// Tidegate 沙箱脚本步骤 %s:\n", indent, label))
+			for _, ln := range strings.Split(strings.TrimSpace(st.Script.Code), "\n") {
+				b.WriteString(fmt.Sprintf("%s// %s\n", indent, ln))
+			}
+			writeK6Sleep(b, indent, st.Think)
 		}
 	}
 }

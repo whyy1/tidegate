@@ -94,6 +94,8 @@ func writeError(w http.ResponseWriter, err error) {
 		writeErrorDetail(w, http.StatusServiceUnavailable, apiErrorDetail{Code: "no_agents", Message: err.Error()})
 	case errors.Is(err, controller.ErrTargetNotAllowed):
 		writeErrorDetail(w, http.StatusForbidden, apiErrorDetail{Code: "target_not_allowed", Message: err.Error()})
+	case errors.Is(err, controller.ErrScriptsDisabled):
+		writeErrorDetail(w, http.StatusForbidden, apiErrorDetail{Code: "scripts_disabled", Message: err.Error()})
 	case errors.Is(err, controller.ErrScaleLimitExceeded):
 		writeErrorDetail(w, http.StatusForbidden, apiErrorDetail{Code: "scale_limit_exceeded", Message: err.Error()})
 	default:

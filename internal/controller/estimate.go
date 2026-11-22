@@ -112,14 +112,29 @@ func (c *Controller) EstimateRun(ctx context.Context, projectID string, req Star
 	}, nil
 }
 
-func estimateNodesProfile(nodes []scenario.Node) (float64, []*scenario.HTTPStep) {
+type estLeaf struct {
+	reqBytes int64
+}
+
+func estimateNodesProfile(nodes []scenario.Node) (float64, []estLeaf) {
 	var expectedReqs float64
-	var leaves []*scenario.HTTPStep
+	var leaves []estLeaf
 	for _, node := range nodes {
 		switch st := node.(type) {
 		case *scenario.HTTPStep:
 			expectedReqs += 1
-			leaves = append(leaves, st)
+			leaves = append(leaves, estLeaf{reqBytes: estimateHTTPStepBytes(st.Method, st.URL, st.Headers, st.BasicUser != nil || st.BasicPass != nil || st.OAuth2 != nil, st.Body)})
+		case *scenario.WSStep:
+			expectedReqs += 1
+			leaves = append(leaves, estLeaf{reqBytes: estimateWSStepBytes(st)})
+		case *scenario.GRPCStepPlan:
+			expectedReqs += 1
+			leaves = append(leaves, estLeaf{reqBytes: estimateGRPCStepBytes(st)})
+		case *scenario.SSEStepPlan:
+			expectedReqs += 1
+			leaves = append(leaves, estLeaf{reqBytes: estimateHTTPStepBytes(st.Method, st.URL, st.Headers, st.BasicUser != nil || st.BasicPass != nil || st.OAuth2 != nil, st.Body)})
+		case *scenario.ScriptStepPlan:
+			// Sandboxed script steps perform no network I/O.
 		case *scenario.GroupNode:
 			r, sub := estimateNodesProfile(st.Children)
 			expectedReqs += r
@@ -153,51 +168,69 @@ func estimateNodesProfile(nodes []scenario.Node) (float64, []*scenario.HTTPStep)
 	return expectedReqs, leaves
 }
 
-func estimateLeafAvgRequestBytes(leaves []*scenario.HTTPStep) int64 {
+func estimateLeafAvgRequestBytes(leaves []estLeaf) int64 {
 	if len(leaves) == 0 {
 		return 1
 	}
 	var total int64
-	for _, hs := range leaves {
-		methodLen := int64(len(hs.Method))
-		if methodLen == 0 {
-			methodLen = 3
-		}
-		var uriLen, hostLen int64
-		switch {
-		case hs.URL.Static != nil:
-			uriLen = int64(len(hs.URL.Static.RequestURI))
-			hostLen = int64(len(hs.URL.Static.Host))
-		case hs.URL.Path != nil:
-			uriLen = int64(templateEstLen(hs.URL.Path))
-			if hs.URL.Origin != nil {
-				hostLen = int64(len(hs.URL.Origin.Host))
-			}
-		case hs.URL.Full != nil:
-			uriLen = int64(templateEstLen(hs.URL.Full))
-		}
-		if uriLen == 0 {
-			uriLen = 1
-		}
-
-		// Request line + Host header + default client headers overhead.
-		stepBytes := methodLen + 1 + uriLen + int64(len(" HTTP/1.1\r\n")) + int64(len("Host: ")) + hostLen + 2 + 64
-		for _, h := range hs.Headers {
-			stepBytes += int64(len(h.Name) + 2 + templateEstLen(h.Value) + 2)
-		}
-		if hs.BasicUser != nil || hs.BasicPass != nil || hs.OAuth2 != nil {
-			stepBytes += 48
-		}
-		if hs.Body != nil {
-			stepBytes += int64(templateEstLen(hs.Body)) + 24
-		}
-		total += stepBytes
+	for _, l := range leaves {
+		total += l.reqBytes
 	}
 	avg := total / int64(len(leaves))
 	if avg < 1 {
 		return 1
 	}
 	return avg
+}
+
+func estimateHTTPStepBytes(method string, u scenario.URLTemplate, hdrs []scenario.HeaderTemplate, hasDynAuth bool, body *scenario.Template) int64 {
+	methodLen := int64(len(method))
+	if methodLen == 0 {
+		methodLen = 3
+	}
+	var uriLen, hostLen int64
+	switch {
+	case u.Static != nil:
+		uriLen = int64(len(u.Static.RequestURI))
+		hostLen = int64(len(u.Static.Host))
+	case u.Path != nil:
+		uriLen = int64(templateEstLen(u.Path))
+		if u.Origin != nil {
+			hostLen = int64(len(u.Origin.Host))
+		}
+	case u.Full != nil:
+		uriLen = int64(templateEstLen(u.Full))
+	}
+	if uriLen == 0 {
+		uriLen = 1
+	}
+	stepBytes := methodLen + 1 + uriLen + int64(len(" HTTP/1.1\r\n")) + int64(len("Host: ")) + hostLen + 2 + 64
+	for _, h := range hdrs {
+		stepBytes += int64(len(h.Name) + 2 + templateEstLen(h.Value) + 2)
+	}
+	if hasDynAuth {
+		stepBytes += 48
+	}
+	if body != nil {
+		stepBytes += int64(templateEstLen(body)) + 24
+	}
+	return max(1, stepBytes)
+}
+
+func estimateWSStepBytes(s *scenario.WSStep) int64 {
+	total := estimateHTTPStepBytes("GET", s.URL, s.Headers, false, nil) + 96
+	for _, m := range s.Messages {
+		total += int64(templateEstLen(m.Data)) + 8
+	}
+	return max(1, total)
+}
+
+func estimateGRPCStepBytes(s *scenario.GRPCStepPlan) int64 {
+	total := int64(len(s.FullMethod) + templateEstLen(s.Payload) + 64)
+	for _, h := range s.Metadata {
+		total += int64(len(h.Name) + templateEstLen(h.Value) + 4)
+	}
+	return max(1, total)
 }
 
 func templateEstLen(t *scenario.Template) int {

@@ -151,16 +151,46 @@ type Folder struct {
 	Version  string `yaml:"-" json:"version"`
 }
 
-// APIRequest is the UI-friendly HTTP request stored inside .api.yaml.
+// APIWebSocket configures protocol-specific WebSocket options on an API.
+type APIWebSocket struct {
+	Subprotocols []string             `yaml:"subprotocols,omitempty" json:"subprotocols,omitempty"`
+	Messages     []scenario.WSMessage `yaml:"messages,omitempty" json:"messages,omitempty"`
+	RecvCount    int                  `yaml:"recv_count,omitempty" json:"recv_count,omitempty"`
+	IdleTimeout  scenario.Duration    `yaml:"idle_timeout,omitempty" json:"idle_timeout,omitempty"`
+}
+
+// APIGRPC configures unary gRPC options on an API.
+type APIGRPC struct {
+	Service          string            `yaml:"service" json:"service"`
+	Method           string            `yaml:"method" json:"method"`
+	TLS              *bool             `yaml:"tls,omitempty" json:"tls,omitempty"`
+	PayloadEncoding  string            `yaml:"payload_encoding,omitempty" json:"payload_encoding,omitempty"`
+	ResponseEncoding string            `yaml:"response_encoding,omitempty" json:"response_encoding,omitempty"`
+	ExpectedStatus   *int              `yaml:"expected_status,omitempty" json:"expected_status,omitempty"`
+	Timeout          scenario.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+// APISSE configures Server-Sent Events stream options on an API.
+type APISSE struct {
+	MaxEvents    int               `yaml:"max_events,omitempty" json:"max_events,omitempty"`
+	StopContains string            `yaml:"stop_contains,omitempty" json:"stop_contains,omitempty"`
+	Timeout      scenario.Duration `yaml:"timeout,omitempty" json:"timeout,omitempty"`
+}
+
+// APIRequest is the UI-friendly request stored inside .api.yaml.
 // Templates ({{variables}}) and disabled/draft fields are preserved as
-// written; resolve converts active items into scenario.Request.
+// written; resolve converts active items into scenario steps.
 type APIRequest struct {
-	Method     string       `yaml:"method,omitempty" json:"method,omitempty"`
-	URL        string       `yaml:"url" json:"url"`
-	PathParams KeyValueList `yaml:"path_params,omitempty" json:"path_params,omitempty"`
-	Query      KeyValueList `yaml:"query,omitempty" json:"query,omitempty"`
-	Headers    KeyValueList `yaml:"headers,omitempty" json:"headers,omitempty"`
-	Body       *APIBody     `yaml:"body,omitempty" json:"body,omitempty"`
+	Protocol   string        `yaml:"protocol,omitempty" json:"protocol,omitempty"`
+	Method     string        `yaml:"method,omitempty" json:"method,omitempty"`
+	URL        string        `yaml:"url" json:"url"`
+	PathParams KeyValueList  `yaml:"path_params,omitempty" json:"path_params,omitempty"`
+	Query      KeyValueList  `yaml:"query,omitempty" json:"query,omitempty"`
+	Headers    KeyValueList  `yaml:"headers,omitempty" json:"headers,omitempty"`
+	Body       *APIBody      `yaml:"body,omitempty" json:"body,omitempty"`
+	WS         *APIWebSocket `yaml:"ws,omitempty" json:"ws,omitempty"`
+	GRPC       *APIGRPC      `yaml:"grpc,omitempty" json:"grpc,omitempty"`
+	SSE        *APISSE       `yaml:"sse,omitempty" json:"sse,omitempty"`
 }
 
 // APIBody stores the request payload along with drafts for inactive body
@@ -245,8 +275,8 @@ type ScenarioWeightedBranch struct {
 	Steps  []ScenarioStep `yaml:"steps,omitempty" json:"steps,omitempty"`
 }
 
-// ScenarioStep runs one API or control-flow construct ("http", "group", "loop",
-// "if", or "weighted").
+// ScenarioStep runs one API, script, or control-flow construct ("http", "ws",
+// "grpc", "sse", "script", "group", "loop", "if", or "weighted").
 type ScenarioStep struct {
 	// ID is the step ID in the resolved scenario; one is assigned on save
 	// when empty.
@@ -255,6 +285,7 @@ type ScenarioStep struct {
 	Name          string                   `yaml:"name,omitempty" json:"name,omitempty"`
 	Type          string                   `yaml:"type,omitempty" json:"type,omitempty"`
 	APIID         string                   `yaml:"api_id,omitempty" json:"api_id,omitempty"`
+	Script        string                   `yaml:"script,omitempty" json:"script,omitempty"`
 	Disabled      bool                     `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 	Override      *StepOverride            `yaml:"override,omitempty" json:"override,omitempty"`
 	Think         *scenario.Think          `yaml:"think,omitempty" json:"think,omitempty"`
@@ -394,11 +425,41 @@ func validateAuthDraft(field string, a *Auth) error {
 }
 
 func validateRequest(field string, r *APIRequest) error {
+	r.Protocol = strings.ToLower(strings.TrimSpace(r.Protocol))
+	if r.Protocol == "websocket" {
+		r.Protocol = "ws"
+	}
+	switch r.Protocol {
+	case "", "http", "ws", "grpc", "sse":
+	default:
+		return invalid(field+".protocol", "协议类型 %q 无效，支持 http、ws、grpc 或 sse", r.Protocol)
+	}
 	if m := strings.TrimSpace(r.Method); m != "" && !tokenRe.MatchString(m) {
 		return invalid(field+".method", "请求方法 %q 无效", r.Method)
 	}
 	if strings.ContainsAny(r.URL, "\r\n") {
 		return invalid(field+".url", "不能包含换行")
+	}
+	if r.WS != nil {
+		if r.WS.RecvCount < 0 {
+			return invalid(field+".ws.recv_count", "不能为负数")
+		}
+		if r.WS.IdleTimeout < 0 {
+			return invalid(field+".ws.idle_timeout", "不能为负数")
+		}
+	}
+	if r.GRPC != nil {
+		if r.GRPC.Timeout < 0 {
+			return invalid(field+".grpc.timeout", "不能为负数")
+		}
+	}
+	if r.SSE != nil {
+		if r.SSE.MaxEvents < 0 {
+			return invalid(field+".sse.max_events", "不能为负数")
+		}
+		if r.SSE.Timeout < 0 {
+			return invalid(field+".sse.timeout", "不能为负数")
+		}
 	}
 	return validateHeadersList(field+".headers", r.Headers)
 }
@@ -437,8 +498,13 @@ func (e *Environment) normalize() error {
 	e.BaseURL = strings.TrimSpace(e.BaseURL)
 	if e.BaseURL != "" && !strings.Contains(e.BaseURL, "{{") {
 		u, err := url.Parse(e.BaseURL)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return invalid("base_url", "基础地址 %q 无效，需要以 http:// 或 https:// 开头", e.BaseURL)
+		scheme := ""
+		if u != nil {
+			scheme = strings.ToLower(u.Scheme)
+		}
+		allowedScheme := scheme == "http" || scheme == "https" || scheme == "ws" || scheme == "wss" || scheme == "grpc" || scheme == "grpcs"
+		if err != nil || !allowedScheme || u.Host == "" {
+			return invalid("base_url", "基础地址 %q 无效，需要以 http://、https://、ws://、wss://、grpc:// 或 grpcs:// 开头", e.BaseURL)
 		}
 	}
 	return validateVariablesList("variables", e.Variables)
@@ -542,7 +608,7 @@ func normalizeScenarioSteps(prefix string, steps []ScenarioStep, used, seen map[
 		seen[st.ID] = true
 
 		switch st.Type {
-		case "", "http":
+		case "", "http", "ws", "grpc", "sse":
 			id, ok := normalizeID(st.APIID)
 			if !ok {
 				return invalid(field+".api_id", "接口 ID %q 无效", st.APIID)
@@ -558,6 +624,10 @@ func normalizeScenarioSteps(prefix string, steps []ScenarioStep, used, seen map[
 				if err := validateAuthDraft(field+".override.auth", o.Auth); err != nil {
 					return err
 				}
+			}
+		case "script":
+			if strings.TrimSpace(st.Script) == "" {
+				return invalid(field+".script", "脚本文本不能为空")
 			}
 		case "group":
 			if err := normalizeScenarioSteps(field+".children", st.Children, used, seen, next); err != nil {
@@ -597,7 +667,7 @@ func normalizeScenarioSteps(prefix string, steps []ScenarioStep, used, seen map[
 				}
 			}
 		default:
-			return invalid(field+".type", "步骤类型 %q 无效，只能是 http、group、loop、if 或 weighted", st.Type)
+			return invalid(field+".type", "步骤类型 %q 无效，只能是 http、ws、grpc、sse、script、group、loop、if 或 weighted", st.Type)
 		}
 	}
 	return nil

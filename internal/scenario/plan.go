@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -56,6 +57,14 @@ const (
 	NodeIf
 	// NodeWeighted randomly selects one weighted branch per execution.
 	NodeWeighted
+	// NodeWS executes a WebSocket request/exchange step.
+	NodeWS
+	// NodeGRPC executes a unary gRPC call step.
+	NodeGRPC
+	// NodeSSE executes a Server-Sent Events stream consumption step.
+	NodeSSE
+	// NodeScript executes a bounded sandboxed script step.
+	NodeScript
 )
 
 // StepInfo identifies a step.
@@ -158,14 +167,30 @@ type Origin struct {
 
 // NewOrigin builds an origin from a scheme and an authority (host[:port]).
 func NewOrigin(scheme, authority string) (*Origin, error) {
-	o := &Origin{Scheme: scheme}
-	switch scheme {
+	switch strings.ToLower(scheme) {
 	case "http":
+		return buildOrigin("http", false, "80", authority)
 	case "https":
-		o.TLS = true
+		return buildOrigin("https", true, "443", authority)
 	default:
 		return nil, fmt.Errorf("不支持的协议 %q，只支持 http 和 https", scheme)
 	}
+}
+
+// NewWSOrigin builds a WebSocket origin from a scheme (ws, wss, http, https) and authority.
+func NewWSOrigin(scheme, authority string) (*Origin, error) {
+	switch strings.ToLower(scheme) {
+	case "ws", "http":
+		return buildOrigin("ws", false, "80", authority)
+	case "wss", "https":
+		return buildOrigin("wss", true, "443", authority)
+	default:
+		return nil, fmt.Errorf("不支持的 WebSocket 协议 %q，只支持 ws 和 wss", scheme)
+	}
+}
+
+func buildOrigin(scheme string, useTLS bool, defPort, authority string) (*Origin, error) {
+	o := &Origin{Scheme: scheme, TLS: useTLS}
 	if authority == "" {
 		return nil, fmt.Errorf("URL 缺少主机名")
 	}
@@ -174,10 +199,6 @@ func NewOrigin(scheme, authority string) (*Origin, error) {
 	o.Port = u.Port()
 	if o.HostName == "" {
 		return nil, fmt.Errorf("URL 缺少主机名")
-	}
-	defPort := "80"
-	if o.TLS {
-		defPort = "443"
 	}
 	if o.Port == "" {
 		o.Port = defPort
@@ -190,6 +211,48 @@ func NewOrigin(scheme, authority string) (*Origin, error) {
 	}
 	o.Addr = joinHostPort(o.HostName, o.Port)
 	return o, nil
+}
+
+// ParseGRPCTarget parses host[:port], grpc://host[:port], or grpcs://host[:port].
+func ParseGRPCTarget(raw string, tlsOverride *bool) (*Origin, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, fmt.Errorf("gRPC 目标地址不能为空")
+	}
+	useTLS := false
+	scheme := "grpc"
+	authority := s
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err != nil || u.Host == "" {
+			return nil, fmt.Errorf("gRPC 目标地址 %q 无效", raw)
+		}
+		if u.User != nil {
+			return nil, fmt.Errorf("gRPC 目标地址 %q 不支持用户名密码", raw)
+		}
+		switch strings.ToLower(u.Scheme) {
+		case "grpc", "http":
+			scheme, useTLS = "grpc", false
+		case "grpcs", "https":
+			scheme, useTLS = "grpcs", true
+		default:
+			return nil, fmt.Errorf("不支持的 gRPC 协议 %q，请使用 host:port、grpc:// 或 grpcs://", u.Scheme)
+		}
+		authority = u.Host
+	}
+	if tlsOverride != nil {
+		useTLS = *tlsOverride
+		if useTLS {
+			scheme = "grpcs"
+		} else {
+			scheme = "grpc"
+		}
+	}
+	defPort := "80"
+	if useTLS {
+		defPort = "443"
+	}
+	return buildOrigin(scheme, useTLS, defPort, authority)
 }
 
 func trimDefaultPort(authority, port string) string {
@@ -216,24 +279,34 @@ type Target struct {
 	URL        *url.URL
 }
 
-// ParseTarget parses an absolute http or https URL.
-func ParseTarget(raw string) (*Target, error) {
+func parseTargetWithOrigin(raw string, build func(scheme, authority string) (*Origin, error), example string) (*Target, error) {
 	u, err := url.Parse(raw)
 	if err != nil {
 		return nil, fmt.Errorf("URL %q 无效：%v", raw, err)
 	}
 	if u.Scheme == "" || u.Host == "" {
-		return nil, fmt.Errorf("URL %q 必须是带协议和主机名的完整地址，例如 http://127.0.0.1:8080/path", raw)
+		return nil, fmt.Errorf("URL %q 必须是带协议和主机名的完整地址，例如 %s", raw, example)
 	}
 	if u.User != nil {
 		return nil, fmt.Errorf("URL %q 不支持用户名密码写法，请改用 Authorization 请求头", raw)
 	}
-	o, err := NewOrigin(u.Scheme, u.Host)
+	o, err := build(u.Scheme, u.Host)
 	if err != nil {
 		return nil, fmt.Errorf("URL %q：%v", raw, err)
 	}
+	u.Scheme = o.Scheme
 	u.Fragment, u.RawFragment = "", ""
 	return &Target{Origin: o, RequestURI: u.RequestURI(), URL: u}, nil
+}
+
+// ParseTarget parses an absolute http or https URL.
+func ParseTarget(raw string) (*Target, error) {
+	return parseTargetWithOrigin(raw, NewOrigin, "http://127.0.0.1:8080/path")
+}
+
+// ParseWSTarget parses an absolute ws or wss URL (http/https are normalized to ws/wss).
+func ParseWSTarget(raw string) (*Target, error) {
+	return parseTargetWithOrigin(raw, NewWSOrigin, "ws://127.0.0.1:8080/ws")
 }
 
 // SplitURL splits a rendered absolute URL into scheme, authority and
@@ -320,6 +393,102 @@ func (s *HTTPStep) Kind() NodeKind { return NodeHTTP }
 
 // Info implements Node.
 func (s *HTTPStep) Info() StepInfo { return s.StepInfo }
+
+// WSMessagePlan is one compiled WebSocket frame payload.
+type WSMessagePlan struct {
+	Binary bool
+	Data   *Template
+}
+
+// WSStep is a compiled WebSocket step.
+type WSStep struct {
+	StepInfo
+	URL             URLTemplate
+	Headers         []HeaderTemplate
+	Subprotocols    []string
+	Messages        []WSMessagePlan
+	RecvCount       int
+	IdleTimeout     time.Duration
+	Extract         []Extractor
+	Assert          []Assertion
+	Think           ThinkTime
+	HasStatusAssert bool
+	HasUserAgent    bool
+	HasHost         bool
+}
+
+// Kind implements Node.
+func (s *WSStep) Kind() NodeKind { return NodeWS }
+
+// Info implements Node.
+func (s *WSStep) Info() StepInfo { return s.StepInfo }
+
+// GRPCStepPlan is a compiled unary gRPC call step.
+type GRPCStepPlan struct {
+	StepInfo
+	Origin           *Origin
+	Target           *Template
+	TLS              bool
+	HasTLSOverride   bool
+	FullMethod       string
+	Metadata         []HeaderTemplate
+	Payload          *Template
+	PayloadEncoding  string
+	ResponseEncoding string
+	ExpectedStatus   *int
+	Timeout          time.Duration
+	Extract          []Extractor
+	Assert           []Assertion
+	HasStatusAssert  bool
+	Think            ThinkTime
+}
+
+// Kind implements Node.
+func (s *GRPCStepPlan) Kind() NodeKind { return NodeGRPC }
+
+// Info implements Node.
+func (s *GRPCStepPlan) Info() StepInfo { return s.StepInfo }
+
+// SSEStepPlan is a compiled HTTP Server-Sent Events step.
+type SSEStepPlan struct {
+	StepInfo
+	Method          string
+	URL             URLTemplate
+	Headers         []HeaderTemplate
+	BasicUser       *Template
+	BasicPass       *Template
+	OAuth2          *OAuth2Plan
+	Body            *Template
+	ContentType     string
+	MaxEvents       int
+	StopContains    []byte
+	Timeout         time.Duration
+	Extract         []Extractor
+	Assert          []Assertion
+	Think           ThinkTime
+	HasStatusAssert bool
+	HasUserAgent    bool
+	HasHost         bool
+}
+
+// Kind implements Node.
+func (s *SSEStepPlan) Kind() NodeKind { return NodeSSE }
+
+// Info implements Node.
+func (s *SSEStepPlan) Info() StepInfo { return s.StepInfo }
+
+// ScriptStepPlan is a compiled sandboxed script step.
+type ScriptStepPlan struct {
+	StepInfo
+	Prog  *ScriptProgram
+	Think ThinkTime
+}
+
+// Kind implements Node.
+func (s *ScriptStepPlan) Kind() NodeKind { return NodeScript }
+
+// Info implements Node.
+func (s *ScriptStepPlan) Info() StepInfo { return s.StepInfo }
 
 // GroupNode executes its children in sequence and records aggregate transaction metrics.
 type GroupNode struct {

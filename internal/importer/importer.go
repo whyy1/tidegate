@@ -556,13 +556,17 @@ func remapScenarioSteps(steps []store.ScenarioStep, apiIDMap map[string]string) 
 	for _, step := range steps {
 		stType := strings.ToLower(strings.TrimSpace(step.Type))
 		switch stType {
-		case "", "http":
+		case "", "http", "ws", "grpc", "sse":
 			mapped, ok := apiIDMap[step.APIID]
 			if !ok {
 				continue
 			}
 			step.APIID = mapped
 			out = append(out, step)
+		case "script":
+			if strings.TrimSpace(step.Script) != "" {
+				out = append(out, step)
+			}
 		case "group", "loop":
 			step.Children = remapScenarioSteps(step.Children, apiIDMap)
 			if len(step.Children) > 0 {

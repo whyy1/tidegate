@@ -220,3 +220,46 @@ func TestFormatAndFormatAPI(t *testing.T) {
 	}
 	_ = scenario.Scalar("")
 }
+
+func TestFormatAPIMultiProtocol(t *testing.T) {
+	preview := &store.EffectivePreview{
+		BaseURL: "https://api.example.com",
+	}
+
+	sseCmd, err := FormatAPI(&store.API{
+		Request: store.APIRequest{
+			Protocol: "sse",
+			Method:   "GET",
+			URL:      "/events",
+		},
+	}, preview, ModeExpanded, ShellBash, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(sseCmd, "curl -N -X GET") || !strings.Contains(sseCmd, "Accept: text/event-stream") || !strings.Contains(sseCmd, "https://api.example.com/events") {
+		t.Fatalf("unexpected SSE curl command:\n%s", sseCmd)
+	}
+
+	wsCmd, err := FormatAPI(&store.API{
+		Request: store.APIRequest{
+			Protocol: "ws",
+			URL:      "/stream",
+		},
+	}, &store.EffectivePreview{BaseURL: "http://localhost:8080"}, ModeExpanded, ShellBash, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(wsCmd, "ws://localhost:8080/stream") {
+		t.Fatalf("unexpected WS curl URL:\n%s", wsCmd)
+	}
+
+	if _, err := FormatAPI(&store.API{
+		Request: store.APIRequest{
+			Protocol: "grpc",
+			URL:      "127.0.0.1:50051",
+			GRPC:     &store.APIGRPC{Service: "echo.Echo", Method: "Ping"},
+		},
+	}, preview, ModeExpanded, ShellBash, true); err == nil {
+		t.Fatal("expected error formatting gRPC API as cURL")
+	}
+}
