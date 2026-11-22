@@ -10,8 +10,10 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"syscall"
@@ -22,6 +24,7 @@ import (
 	"tidegate/internal/controller"
 	"tidegate/internal/engine"
 	"tidegate/internal/store"
+	"tidegate/internal/webui"
 )
 
 type serveConfig struct {
@@ -248,6 +251,7 @@ func serveWithContext(
 		lis = tls.NewListener(rawLis, tlsCfg)
 	}
 
+	webHandler := webui.Handler()
 	apiSrv, err := api.NewServer(api.Options{
 		Controller:     ctrl,
 		Store:          st,
@@ -258,6 +262,7 @@ func serveWithContext(
 		TLS:            useTLS,
 		ListenLoopback: listenLoopback,
 		AllowedOrigins: cfg.AllowedOrigins,
+		WebHandler:     webHandler,
 		Logger:         log,
 	})
 	if err != nil {
@@ -304,8 +309,8 @@ func serveWithContext(
 	}
 
 	fmt.Fprintf(stdout, "Tidegate %s 已启动：访问地址 %s/（集群端口 %s）\n", version, baseURL, ctrl.ClusterAddr())
-	if !cfg.NoOpen {
-		// Web UI bundle will be embedded in S3; skip external browser launch in S2.
+	if !cfg.NoOpen && webHandler != nil {
+		go openBrowser(baseURL)
 	}
 
 	if onReady != nil {
@@ -356,4 +361,17 @@ func displayHostPort(addr string) string {
 		host = "127.0.0.1"
 	}
 	return net.JoinHostPort(host, port)
+}
+
+func openBrowser(rawURL string) {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL)
+	case "darwin":
+		cmd = exec.Command("open", rawURL)
+	default:
+		cmd = exec.Command("xdg-open", rawURL)
+	}
+	_ = cmd.Start()
 }
