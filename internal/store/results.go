@@ -107,6 +107,25 @@ CREATE TABLE project_secrets (
 	PRIMARY KEY (project_id, scope, name)
 ) WITHOUT ROWID;
 `,
+}, {
+	Version: 2,
+	Name:    "audit logs",
+	SQL: `
+CREATE TABLE audit_logs (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	created_at  INTEGER NOT NULL,
+	user_id     INTEGER NOT NULL DEFAULT 0,
+	username    TEXT    NOT NULL DEFAULT '',
+	role        TEXT    NOT NULL DEFAULT '',
+	action      TEXT    NOT NULL,
+	resource    TEXT    NOT NULL DEFAULT '',
+	resource_id TEXT    NOT NULL DEFAULT '',
+	remote_addr TEXT    NOT NULL DEFAULT '',
+	detail_json TEXT    NOT NULL DEFAULT '{}'
+);
+CREATE INDEX audit_logs_created ON audit_logs (created_at DESC, id DESC);
+CREATE INDEX audit_logs_action ON audit_logs (action, created_at DESC);
+`,
 }}
 
 // RunStatus is the life cycle state of a run.
@@ -1095,5 +1114,17 @@ func (r *ResultDB) ProjectSecrets(ctx context.Context, projectID, scope string) 
 // DeleteProjectSecret deletes a stored secret.
 func (r *ResultDB) DeleteProjectSecret(ctx context.Context, projectID, scope, name string) error {
 	_, err := r.db.ExecContext(ctx, `DELETE FROM project_secrets WHERE project_id = ? AND scope = ? AND name = ?`, projectID, scope, name)
+	return err
+}
+
+// DeleteScopeProjectSecrets deletes all secrets for a project scope.
+func (r *ResultDB) DeleteScopeProjectSecrets(ctx context.Context, projectID, scope string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM project_secrets WHERE project_id = ? AND scope = ?`, projectID, scope)
+	return err
+}
+
+// DeleteAllProjectSecrets deletes every secret belonging to projectID.
+func (r *ResultDB) DeleteAllProjectSecrets(ctx context.Context, projectID string) error {
+	_, err := r.db.ExecContext(ctx, `DELETE FROM project_secrets WHERE project_id = ?`, projectID)
 	return err
 }

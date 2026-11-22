@@ -31,6 +31,13 @@ const (
 	CodeCSRFHeaderMissing  Code = "csrf_header_missing"
 	CodeOriginNotAllowed   Code = "origin_not_allowed"
 	CodeInsecureTransport  Code = "insecure_transport"
+	CodeForbidden          Code = "forbidden"
+	CodeTokenExpired       Code = "token_expired"
+	CodeTokenNotFound      Code = "token_not_found"
+	CodeUserExists         Code = "user_exists"
+	CodeLastAdmin          Code = "last_admin"
+	CodeInvalidRole        Code = "invalid_role"
+	CodeInvalidTokenInput  Code = "invalid_token_input"
 	CodeInternal           Code = "internal_error"
 )
 
@@ -71,7 +78,14 @@ var (
 	ErrUserNotFound       = &Error{Code: CodeUserNotFound, Status: http.StatusNotFound, Message: "用户不存在"}
 	ErrCSRFHeaderMissing  = &Error{Code: CodeCSRFHeaderMissing, Status: http.StatusForbidden, Message: "请求缺少 " + RequestHeader + " 请求头"}
 	ErrOriginNotAllowed   = &Error{Code: CodeOriginNotAllowed, Status: http.StatusForbidden, Message: "请求来源不受信任"}
-	ErrInsecureTransport  = &Error{Code: CodeInsecureTransport, Status: http.StatusForbidden, Message: "当前连接未加密，为保护密码只允许从本机登录。请启用 TLS，或用 --allow-insecure-remote 启动"}
+	ErrInsecureTransport = &Error{Code: CodeInsecureTransport, Status: http.StatusForbidden, Message: "当前连接未加密，为保护密码只允许从本机登录。请启用 TLS，或用 --allow-insecure-remote 启动"}
+	ErrForbidden         = &Error{Code: CodeForbidden, Status: http.StatusForbidden, Message: "无权执行此操作"}
+	ErrTokenExpired      = &Error{Code: CodeTokenExpired, Status: http.StatusUnauthorized, Message: "访问令牌已过期"}
+	ErrTokenNotFound     = &Error{Code: CodeTokenNotFound, Status: http.StatusNotFound, Message: "访问令牌不存在"}
+	ErrUserExists        = &Error{Code: CodeUserExists, Status: http.StatusConflict, Message: "用户名已存在"}
+	ErrLastAdmin         = &Error{Code: CodeLastAdmin, Status: http.StatusConflict, Message: "不能删除或降级最后一个管理员账户"}
+	ErrInvalidRole       = &Error{Code: CodeInvalidRole, Status: http.StatusBadRequest, Message: "角色只能是 admin、member 或 viewer"}
+	ErrInvalidTokenInput = &Error{Code: CodeInvalidTokenInput, Status: http.StatusBadRequest, Message: "访问令牌名称不能为空且不能超过 100 个字符"}
 
 	errInternal = &Error{Code: CodeInternal, Status: http.StatusInternalServerError, Message: "服务器内部错误"}
 )

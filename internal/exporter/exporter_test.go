@@ -2,8 +2,10 @@ package exporter
 
 import (
 	"bytes"
+	"encoding/csv"
 	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -643,4 +645,164 @@ func TestExportOpenAPIOAuth2ExamplesAndResponseFields(t *testing.T) {
 	if userProps["id"] == nil || userProps["age"] == nil || len(reqList) != 1 || reqList[0] != "id" {
 		t.Fatalf("unexpected ResponseFields schema: %+v", schema)
 	}
+}
+
+func TestExportJTLAndK6(t *testing.T) {
+	// 1. ExportRunJTL 17-column output, non-group filter, and query secret redaction.
+	now := time.Unix(1700000100, 0).UTC()
+	sv := metrics.SnapshotView{
+		Seq:        0,
+		Time:       now,
+		DurationMs: 1000,
+		ActiveVUs:  4,
+		Steps: []metrics.StepView{
+			{ID: "tx", Name: "下单事务", IsGroup: true, Requests: 10, Errors: 0, Latency: metrics.LatencyStats{Mean: 42}},
+			{ID: "pay", Name: "支付请求", IsGroup: false, Requests: 10, Errors: 1, BytesSent: 1200, BytesReceived: 3400, Latency: metrics.LatencyStats{Mean: 25}, Phases: map[string]metrics.PhaseView{"first_byte": {Count: 10, AvgMs: 18}, "connect": {Count: 2, AvgMs: 5}}},
+		},
+	}
+	snapJSON, _ := json.Marshal(&sv)
+	smpJSON, _ := json.Marshal(metrics.SampleView{
+		Kind:        "error",
+		Step:        "支付请求",
+		Time:        now.Add(100 * time.Millisecond),
+		Method:      "POST",
+		URL:         "https://pay.example.com/charge?token=secret-tok&order=123",
+		Status:      500,
+		Error:       "status 500",
+		DurationMs:  35,
+		RequestBody: `{"amount":1}`,
+		Body:        `{"err":"fail"}`,
+	})
+	var jtlBuf bytes.Buffer
+	err := ExportRunJTL(&store.Run{ID: "run-jtl", ScenarioName: "PayFlow"}, []store.SnapshotRecord{
+		{Seq: 0, Time: now, Data: snapJSON},
+	}, []store.SampleRecord{
+		{ID: 1, Seq: 0, Kind: "error", Step: "支付请求", Time: now.Add(100 * time.Millisecond), Data: smpJSON},
+	}, &jtlBuf)
+	if err != nil {
+		t.Fatalf("ExportRunJTL: %v", err)
+	}
+	if strings.Contains(jtlBuf.String(), "secret-tok") {
+		t.Fatalf("ExportRunJTL leaked sensitive query token: %s", jtlBuf.String())
+	}
+	rows, err := csv.NewReader(bytes.NewReader(jtlBuf.Bytes())).ReadAll()
+	if err != nil {
+		t.Fatalf("parse JTL CSV: %v", err)
+	}
+	if len(rows) != 3 || len(rows[0]) != 17 || rows[0][0] != "timeStamp" || rows[0][16] != "Connect" {
+		t.Fatalf("unexpected JTL rows (%d): %+v", len(rows), rows)
+	}
+	for _, r := range rows[1:] {
+		if r[2] == "下单事务" {
+			t.Fatalf("IsGroup step should not appear in JTL rows: %+v", r)
+		}
+	}
+
+	// 2. ExportScenarioK6 with SecretVault + control flow + thresholds + data source.
+	dir := t.TempDir()
+	st, err := store.Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db, err := store.OpenDB(filepath.Join(dir, store.DBFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rdb := store.NewResultDB(db)
+	box, err := store.LoadOrCreateMasterKey(filepath.Join(dir, "master.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetSecretVault(store.NewSecretVault(rdb, box))
+
+	pr, err := st.CreateProject(&store.Project{
+		Name: "k6-export",
+		Variables: store.KeyValueList{
+			{Name: "api_secret", Value: "plain-k6-never-embed", Secret: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	env, err := st.CreateEnvironment(pr.ID, &store.Environment{
+		Name:    "Staging",
+		BaseURL: "https://api.example.com",
+		Variables: store.KeyValueList{
+			{Name: "env_token", Value: "env-k6-never-embed", Secret: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SaveFile(pr.ID, "users.csv", strings.NewReader("uid\nu1\n"), ""); err != nil {
+		t.Fatal(err)
+	}
+	apiObj, err := st.CreateAPI(pr.ID, &store.API{
+		Name: "GetUser",
+		Request: store.APIRequest{
+			Method: "GET",
+			URL:    "/users/{{users.uid}}",
+			Headers: store.KeyValueList{
+				{Name: "X-API-Secret", Value: "{{api_secret}}"},
+				{Name: "Authorization", Value: "Bearer {{env_token}}"},
+			},
+		},
+		Extract: []scenario.Extract{{Name: "flag", From: "jsonpath", Expr: "$.ok"}},
+		Assert:  []scenario.Assert{{Type: "status", Equals: ptrScalar("200")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scen, err := st.CreateScenario(pr.ID, &store.Scenario{
+		Name:          "flow",
+		EnvironmentID: env.ID,
+		Data:          []scenario.DataSource{{Name: "users", File: "users.csv", Mode: "sequential"}},
+		Steps: []store.ScenarioStep{
+			{
+				ID:   "tx",
+				Type: "group",
+				Name: "UserFlow",
+				Children: []store.ScenarioStep{
+					{ID: "lp", Type: "loop", LoopCount: 2, Children: []store.ScenarioStep{{ID: "s1", APIID: apiObj.ID}}},
+					{ID: "cond", Type: "if", Expr: `{{flag}} == "true"`, Children: []store.ScenarioStep{{ID: "s2", APIID: apiObj.ID}}},
+				},
+			},
+		},
+		Load: scenario.Load{
+			Mode:       "vus",
+			Stages:     []scenario.Stage{{Duration: scenario.Duration(10 * time.Second), Target: 5}},
+			Thresholds: []scenario.Threshold{{Metric: "p95_ms", Value: 250}, {Metric: "error_rate", Value: 0.05}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	scriptBytes, err := ExportScenarioK6(st, pr.ID, scen.ID, store.ResolveOptions{})
+	if err != nil {
+		t.Fatalf("ExportScenarioK6: %v", err)
+	}
+	script := string(scriptBytes)
+	if strings.Contains(script, "plain-k6-never-embed") || strings.Contains(script, "env-k6-never-embed") {
+		t.Fatalf("exported k6 script leaked secret plaintext:\n%s", script)
+	}
+	for _, want := range []string{
+		"import http from 'k6/http';",
+		"thresholds:",
+		"group('UserFlow'",
+		"for (let i = 0; i < 2; i++)",
+		"check(",
+		"${__ENV.API_SECRET}",
+		"${__ENV.ENV_TOKEN}",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("exported k6 script missing %q:\n%s", want, script)
+		}
+	}
+}
+
+func ptrScalar(s string) *scenario.Scalar {
+	v := scenario.Scalar(s)
+	return &v
 }

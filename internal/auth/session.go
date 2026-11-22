@@ -244,8 +244,8 @@ func (s *Service) RevokeOtherSessions(ctx context.Context, userID int64, keepID 
 	return res.RowsAffected()
 }
 
-// CleanupExpired deletes expired sessions and forgets stale rate limit
-// entries. It returns the number of sessions deleted.
+// CleanupExpired deletes expired sessions and API tokens and forgets stale rate
+// limit entries. It returns the number of removed session and token rows.
 func (s *Service) CleanupExpired(ctx context.Context) (int64, error) {
 	now := s.clock()
 	res, err := s.db.ExecContext(ctx,
@@ -254,10 +254,18 @@ func (s *Service) CleanupExpired(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, fmt.Errorf("auth: cleanup sessions: %w", err)
 	}
+	removed, _ := res.RowsAffected()
+	if tres, err := s.db.ExecContext(ctx,
+		`DELETE FROM auth_tokens WHERE expires_at IS NOT NULL AND expires_at <= ?`,
+		now.UnixMilli()); err != nil {
+		return removed, fmt.Errorf("auth: cleanup tokens: %w", err)
+	} else if n, err := tres.RowsAffected(); err == nil {
+		removed += n
+	}
 	s.loginByUser.prune()
 	s.loginByAddr.prune()
 	s.setupLimiter.prune()
-	return res.RowsAffected()
+	return removed, nil
 }
 
 // RunCleanup calls CleanupExpired every interval until ctx is done. Run it

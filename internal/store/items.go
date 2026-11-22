@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -94,8 +95,12 @@ func (s *Store) ListEnvironments(projectID string) ([]*Environment, error) {
 		if err != nil {
 			return err
 		}
+		vault := p.secretVault()
 		for _, id := range ids {
 			if e, err := p.readEnvironment(id); err == nil {
+				if vault != nil {
+					e.Variables = vault.MaskVariables(context.Background(), p.id, e.ID, e.Variables)
+				}
 				out = append(out, e)
 			}
 		}
@@ -109,7 +114,13 @@ func (s *Store) GetEnvironment(projectID, id string) (*Environment, error) {
 	var out *Environment
 	err := s.with(projectID, func(p *project) (err error) {
 		out, err = p.readEnvironment(id)
-		return err
+		if err != nil {
+			return err
+		}
+		if vault := p.secretVault(); vault != nil {
+			out.Variables = vault.MaskVariables(context.Background(), p.id, out.ID, out.Variables)
+		}
+		return nil
 	})
 	return out, err
 }
@@ -119,15 +130,30 @@ func (s *Store) CreateEnvironment(projectID string, in *Environment) (*Environme
 	var out *Environment
 	err := s.with(projectID, func(p *project) error {
 		e := *in
+		e.Variables = append(KeyValueList(nil), in.Variables...)
 		if err := e.normalize(); err != nil {
 			return err
 		}
 		e.ID = newID()
+		viewVars := e.Variables
+		vault := p.secretVault()
+		if vault != nil {
+			diskVars, maskedVars, err := vault.SyncVariables(context.Background(), p.id, e.ID, e.Variables)
+			if err != nil {
+				return err
+			}
+			e.Variables = diskVars
+			viewVars = maskedVars
+		}
 		v, err := p.writeItem(environmentsDir, e.ID, &e)
 		if err != nil {
+			if vault != nil {
+				_ = vault.DeleteScope(context.Background(), p.id, e.ID)
+			}
 			return err
 		}
 		e.Version = v
+		e.Variables = viewVars
 		out = &e
 		return nil
 	})
@@ -147,13 +173,24 @@ func (s *Store) UpdateEnvironment(projectID string, in *Environment) (*Environme
 			return err
 		}
 		e := *in
+		e.Variables = append(KeyValueList(nil), in.Variables...)
 		if err := e.normalize(); err != nil {
 			return err
 		}
 		e.ID = cur.ID
+		viewVars := e.Variables
+		if vault := p.secretVault(); vault != nil {
+			diskVars, maskedVars, err := vault.SyncVariables(context.Background(), p.id, e.ID, e.Variables)
+			if err != nil {
+				return err
+			}
+			e.Variables = diskVars
+			viewVars = maskedVars
+		}
 		if e.Version, err = p.writeItem(environmentsDir, e.ID, &e); err != nil {
 			return err
 		}
+		e.Variables = viewVars
 		out = &e
 		return nil
 	})
@@ -171,7 +208,13 @@ func (s *Store) DeleteEnvironment(projectID, id, version string) error {
 		if err := checkDeleteVersion(KindEnvironment, cur.ID, version, cur.Version); err != nil {
 			return err
 		}
-		return p.removeItem(KindEnvironment, environmentsDir, cur.ID)
+		if err := p.removeItem(KindEnvironment, environmentsDir, cur.ID); err != nil {
+			return err
+		}
+		if vault := p.secretVault(); vault != nil {
+			_ = vault.DeleteScope(context.Background(), p.id, cur.ID)
+		}
+		return nil
 	})
 }
 

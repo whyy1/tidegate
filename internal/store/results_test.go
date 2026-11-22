@@ -4,12 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"tidegate/internal/auth"
 	"tidegate/internal/metrics"
+	"tidegate/internal/scenario"
 )
 
 func openTestResultDB(t *testing.T) *ResultDB {
@@ -203,5 +206,206 @@ func TestResultDBDebugHistorySecretsAndSettings(t *testing.T) {
 	}
 	if v, ok, err := rdb.Setting(ctx, "k1"); err != nil || !ok || v != "v1" {
 		t.Fatalf("Setting = (%q, %v, %v)", v, ok, err)
+	}
+}
+
+func TestAuditLogsAndSecretVault(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	db, err := OpenDB(filepath.Join(dir, DBFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	rdb := NewResultDB(db)
+
+	// 1. Audit log persistence & filtering.
+	if err := rdb.RecordAudit(ctx, AuditEntry{
+		UserID:     1,
+		Username:   "admin",
+		Role:       "admin",
+		Action:     "run.start",
+		Resource:   "run",
+		ResourceID: "run-1",
+		RemoteAddr: "127.0.0.1",
+		Detail:     json.RawMessage(`{"target":"https://api.example.com"}`),
+	}); err != nil {
+		t.Fatalf("RecordAudit 1: %v", err)
+	}
+	if err := rdb.RecordAudit(ctx, AuditEntry{
+		UserID:   2,
+		Username: "bob",
+		Role:     "member",
+		Action:   "user.login",
+		Resource: "auth",
+	}); err != nil {
+		t.Fatalf("RecordAudit 2: %v", err)
+	}
+	allAudit, err := rdb.ListAuditLogs(ctx, AuditQuery{Limit: 10})
+	if err != nil || len(allAudit) != 2 || allAudit[0].Action != "user.login" {
+		t.Fatalf("ListAuditLogs = %+v, err=%v", allAudit, err)
+	}
+	filteredAudit, err := rdb.ListAuditLogs(ctx, AuditQuery{Action: "run.start", Username: "ADMIN"})
+	if err != nil || len(filteredAudit) != 1 || filteredAudit[0].ResourceID != "run-1" {
+		t.Fatalf("filtered ListAuditLogs = %+v, err=%v", filteredAudit, err)
+	}
+
+	// 2. Master key & SecretBox AEAD + AAD tamper detection.
+	keyPath := filepath.Join(dir, "master.key")
+	box, err := LoadOrCreateMasterKey(keyPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreateMasterKey(create): %v", err)
+	}
+	boxReloaded, err := LoadOrCreateMasterKey(keyPath)
+	if err != nil {
+		t.Fatalf("LoadOrCreateMasterKey(reload): %v", err)
+	}
+	ct, err := box.Seal("proj1", "env1", "api_key", "super-secret-value")
+	if err != nil {
+		t.Fatal(err)
+	}
+	plain, err := boxReloaded.Open("proj1", "env1", "api_key", ct)
+	if err != nil || plain != "super-secret-value" {
+		t.Fatalf("Open = (%q, %v)", plain, err)
+	}
+	if _, err := boxReloaded.Open("proj1", "env1", "other_key", ct); err == nil {
+		t.Fatal("expected AAD mismatch error when swapping variable name")
+	}
+
+	// 3. Store + SecretVault leaves zero secret plaintext in YAML while resolving at runtime.
+	st, err := Open(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetSecretVault(NewSecretVault(rdb, boxReloaded))
+
+	pr, err := st.CreateProject(&Project{
+		Name: "vault-proj",
+		Variables: KeyValueList{
+			{Name: "proj_pub", Value: "visible"},
+			{Name: "proj_sec", Value: "proj-secret-raw", Secret: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pr.Variables[1].Value != SecretMask {
+		t.Fatalf("expected SecretMask on CreateProject view, got %q", pr.Variables[1].Value)
+	}
+	projYAML, err := os.ReadFile(filepath.Join(st.Root(), pr.ID, projectFile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(projYAML), "proj-secret-raw") {
+		t.Fatalf("project.yaml leaked plaintext secret: %s", projYAML)
+	}
+
+	env, err := st.CreateEnvironment(pr.ID, &Environment{
+		Name:    "prod",
+		BaseURL: "https://example.com",
+		Variables: KeyValueList{
+			{Name: "env_sec", Value: "env-secret-raw", Secret: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	envYAML, err := os.ReadFile(filepath.Join(st.Root(), pr.ID, environmentsDir, env.ID+".yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(envYAML), "env-secret-raw") {
+		t.Fatalf("env yaml leaked plaintext secret: %s", envYAML)
+	}
+
+	// Updating project with SecretMask preserves existing ciphertext without re-typing secret.
+	prUpdated, err := st.UpdateProject(&Project{
+		ID:      pr.ID,
+		Name:    "vault-proj-2",
+		Version: pr.Version,
+		Variables: KeyValueList{
+			{Name: "proj_pub", Value: "visible-2"},
+			{Name: "proj_sec", Value: SecretMask, Secret: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prUpdated.Variables[1].Value != SecretMask {
+		t.Fatalf("expected SecretMask preserved after UpdateProject, got %q", prUpdated.Variables[1].Value)
+	}
+
+	apiObj, err := st.CreateAPI(pr.ID, &API{
+		Name: "call",
+		Request: APIRequest{
+			Method: "GET",
+			URL:    "/check",
+			Headers: KeyValueList{
+				{Name: "X-Proj-Sec", Value: "{{proj_sec}}"},
+				{Name: "X-Env-Sec", Value: "{{env_sec}}"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// PreviewEffectiveAPI masks secrets by default and decrypts only with IncludeSecrets.
+	pvMasked, err := st.PreviewEffectiveAPI(pr.ID, apiObj, ResolveOptions{EnvironmentID: env.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rv := range pvMasked.Variables {
+		if rv.Secret && rv.Value != SecretMask {
+			t.Fatalf("PreviewEffectiveAPI leaked secret variable %+v", rv)
+		}
+	}
+	pvPlain, err := st.PreviewEffectiveAPI(pr.ID, apiObj, ResolveOptions{EnvironmentID: env.ID, IncludeSecrets: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var gotPlainProj, gotPlainEnv bool
+	for _, rv := range pvPlain.Variables {
+		if rv.Name == "proj_sec" && rv.Value == "proj-secret-raw" {
+			gotPlainProj = true
+		}
+		if rv.Name == "env_sec" && rv.Value == "env-secret-raw" {
+			gotPlainEnv = true
+		}
+	}
+	if !gotPlainProj || !gotPlainEnv {
+		t.Fatalf("IncludeSecrets did not decrypt variables: %+v", pvPlain.Variables)
+	}
+
+	// ResolveAPI decrypts real secret values into compiled execution plan.
+	res, err := st.ResolveAPI(pr.ID, apiObj.ID, APIRunOptions{ResolveOptions: ResolveOptions{EnvironmentID: env.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := res.Compile()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := plan.Steps[0].(*scenario.HTTPStep)
+	var foundProjHdr, foundEnvHdr bool
+	for _, h := range hs.Headers {
+		if h.Name == "X-Proj-Sec" && h.Value.Literal() == "proj-secret-raw" {
+			foundProjHdr = true
+		}
+		if h.Name == "X-Env-Sec" && h.Value.Literal() == "env-secret-raw" {
+			foundEnvHdr = true
+		}
+	}
+	if !foundProjHdr || !foundEnvHdr {
+		t.Fatalf("compiled request headers missing decrypted secrets: %+v", hs.Headers)
+	}
+
+	// SkipSecretDecrypt skips SQLite decryption (used by k6 script export).
+	resNoSec, err := st.ResolveAPI(pr.ID, apiObj.ID, APIRunOptions{ResolveOptions: ResolveOptions{EnvironmentID: env.ID, SkipSecretDecrypt: true}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(resNoSec.Definition.Variables["proj_sec"]) == "proj-secret-raw" || string(resNoSec.Definition.Variables["env_sec"]) == "env-secret-raw" {
+		t.Fatalf("SkipSecretDecrypt still leaked plaintext: %+v", resNoSec.Definition.Variables)
 	}
 }

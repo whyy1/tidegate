@@ -32,6 +32,7 @@ type serveConfig struct {
 	Listen              string
 	ClusterListen       string
 	ClusterToken        string
+	MasterKeyFile       string
 	TLSCert             string
 	TLSKey              string
 	TLSSelfSigned       bool
@@ -81,6 +82,7 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 	listen := fs.String("listen", envOr("TIDEGATE_LISTEN", "127.0.0.1:8080"), "HTTP/WebSocket 监听地址")
 	clusterListen := fs.String("cluster-listen", envOr("TIDEGATE_CLUSTER_LISTEN", "127.0.0.1:7443"), "集群节点 gRPC 监听地址")
 	clusterToken := fs.String("cluster-token", envOr("TIDEGATE_CLUSTER_TOKEN", ""), "远程发压节点认证令牌")
+	masterKeyFile := fs.String("master-key-file", envOr("TIDEGATE_MASTER_KEY_FILE", ""), "敏感变量加密主密钥文件（默认 <data>/master.key）")
 	tlsCert := fs.String("tls-cert", envOr("TIDEGATE_TLS_CERT", ""), "TLS 证书文件（PEM）")
 	tlsKey := fs.String("tls-key", envOr("TIDEGATE_TLS_KEY", ""), "TLS 私钥文件（PEM）")
 	tlsSelfSigned := fs.Bool("tls-self-signed", envBool("TIDEGATE_TLS_SELF_SIGNED", false), "自动生成自签名 TLS 证书")
@@ -107,6 +109,7 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		Listen:              *listen,
 		ClusterListen:       *clusterListen,
 		ClusterToken:        *clusterToken,
+		MasterKeyFile:       *masterKeyFile,
 		TLSCert:             *tlsCert,
 		TLSKey:              *tlsKey,
 		TLSSelfSigned:       *tlsSelfSigned,
@@ -190,6 +193,16 @@ func serveWithContext(
 		return 1
 	}
 	rdb := store.NewResultDB(db)
+	masterKeyPath := strings.TrimSpace(cfg.MasterKeyFile)
+	if masterKeyPath == "" {
+		masterKeyPath = filepath.Join(cfg.DataDir, "master.key")
+	}
+	box, err := store.LoadOrCreateMasterKey(masterKeyPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "加载敏感变量主密钥失败：%v\n", err)
+		return 1
+	}
+	st.SetSecretVault(store.NewSecretVault(rdb, box))
 
 	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	authSvc, err := auth.New(db, auth.Options{Logger: log})

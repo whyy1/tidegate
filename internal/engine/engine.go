@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -61,6 +62,9 @@ type Options struct {
 	LoadShare float64
 	// DataSlice is this engine's share of data rows. Reserved for cluster mode.
 	DataSlice DataSlice
+	// TargetCheck validates each outbound dial target (host and resolved IP)
+	// before opening a TCP socket.
+	TargetCheck func(host string, ip net.IP) error
 }
 
 // Engine runs one plan once.
@@ -239,7 +243,15 @@ func New(plan *scenario.Plan, opts Options) (*Engine, error) {
 		e.data = append(e.data, st)
 	}
 
-	e.dialer = newDialer(e, &plan.HTTP)
+	targetCheck := opts.TargetCheck
+	if targetCheck == nil && len(plan.HTTP.AllowedTargets) > 0 {
+		tc, err := scenario.CompileTargetMatcher(plan.HTTP.AllowedTargets)
+		if err != nil {
+			return nil, fmt.Errorf("engine: invalid allowed_targets: %w", err)
+		}
+		targetCheck = tc
+	}
+	e.dialer = newDialer(e, &plan.HTTP, targetCheck)
 	e.oauth2 = newOAuth2Cache(&plan.HTTP, e.dialer)
 	switch opts.Client {
 	case ClientStd:

@@ -24,11 +24,51 @@ import (
 	"time"
 )
 
-// Role is a user's role. Only RoleAdmin exists for now.
+// Role controls what actions an account or API token may perform.
 type Role string
 
-// RoleAdmin can do everything.
-const RoleAdmin Role = "admin"
+// Supported roles from highest to lowest privilege.
+const (
+	RoleAdmin  Role = "admin"
+	RoleMember Role = "member"
+	RoleViewer Role = "viewer"
+)
+
+// Valid reports whether r is a recognized role.
+func (r Role) Valid() bool {
+	return r == RoleAdmin || r == RoleMember || r == RoleViewer
+}
+
+// IsAdmin reports whether r grants administrative privileges.
+func (r Role) IsAdmin() bool { return r == RoleAdmin }
+
+// CanWrite reports whether r permits modifying resources and running tests.
+func (r Role) CanWrite() bool { return r == RoleAdmin || r == RoleMember }
+
+func roleRank(r Role) int {
+	switch r {
+	case RoleAdmin:
+		return 3
+	case RoleMember:
+		return 2
+	case RoleViewer:
+		return 1
+	default:
+		return 0
+	}
+}
+
+// EffectiveRole returns the lower privilege of userRole and tokenRole.
+func EffectiveRole(userRole, tokenRole Role) Role {
+	ur, tr := roleRank(userRole), roleRank(tokenRole)
+	if ur == 0 || tr == 0 {
+		return RoleViewer
+	}
+	if tr < ur {
+		return tokenRole
+	}
+	return userRole
+}
 
 // User is an account.
 type User struct {
@@ -726,6 +766,183 @@ func (s *Service) User(ctx context.Context, id int64) (*User, error) {
 	u, _, err := s.userByID(ctx, id)
 	return u, err
 }
+
+// CreateUserRequest creates an additional user account (admin-only at the API layer).
+type CreateUserRequest struct {
+	Username string
+	Password string
+	Role     Role
+}
+
+// ListUsers returns all accounts sorted by creation order.
+func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id, username, role, created_at, password_changed_at FROM auth_users ORDER BY id ASC`)
+	if err != nil {
+		return nil, fmt.Errorf("auth: list users: %w", err)
+	}
+	defer rows.Close()
+	out := []User{}
+	for rows.Next() {
+		var (
+			u                  User
+			role               string
+			created, pwChanged int64
+		)
+		if err := rows.Scan(&u.ID, &u.Username, &role, &created, &pwChanged); err != nil {
+			return nil, fmt.Errorf("auth: scan user: %w", err)
+		}
+		u.Role = Role(role)
+		u.CreatedAt = time.UnixMilli(created)
+		u.PasswordChangedAt = time.UnixMilli(pwChanged)
+		out = append(out, u)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("auth: list users: %w", err)
+	}
+	return out, nil
+}
+
+// CreateUser creates a new user with the requested role (defaulting empty role
+// to RoleMember).
+func (s *Service) CreateUser(ctx context.Context, req CreateUserRequest) (*User, error) {
+	role := req.Role
+	if role == "" {
+		role = RoleMember
+	}
+	if !role.Valid() {
+		return nil, ErrInvalidRole
+	}
+	username, err := normalizeUsername(req.Username)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkPasswordPolicy(req.Password, username, s.minPassLen); err != nil {
+		return nil, err
+	}
+	existing, _, err := s.userByName(ctx, username)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil {
+		return nil, ErrUserExists
+	}
+	hash, err := s.hash(ctx, req.Password)
+	if err != nil {
+		return nil, err
+	}
+	now := s.clock()
+	ms := now.UnixMilli()
+	res, err := s.db.ExecContext(ctx,
+		`INSERT INTO auth_users (username, password_hash, role, created_at, updated_at, password_changed_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		username, hash, string(role), ms, ms, ms)
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			return nil, ErrUserExists
+		}
+		return nil, fmt.Errorf("auth: create user: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return nil, fmt.Errorf("auth: create user: %w", err)
+	}
+	return &User{
+		ID:                id,
+		Username:          username,
+		Role:              role,
+		CreatedAt:         now,
+		PasswordChangedAt: now,
+	}, nil
+}
+
+// UpdateUserRole changes target user's role, guarding against demoting the last admin.
+func (s *Service) UpdateUserRole(ctx context.Context, userID int64, role Role) (*User, error) {
+	if !role.Valid() {
+		return nil, ErrInvalidRole
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("auth: update user role: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		u                  User
+		curRole            string
+		created, pwChanged int64
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, username, role, created_at, password_changed_at FROM auth_users WHERE id = ?`, userID).
+		Scan(&u.ID, &u.Username, &curRole, &created, &pwChanged)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("auth: load user: %w", err)
+	}
+	if Role(curRole) == RoleAdmin && role != RoleAdmin {
+		var admins int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM auth_users WHERE role = ?`, string(RoleAdmin)).Scan(&admins); err != nil {
+			return nil, fmt.Errorf("auth: count admins: %w", err)
+		}
+		if admins <= 1 {
+			return nil, ErrLastAdmin
+		}
+	}
+	now := s.clock()
+	if _, err := tx.ExecContext(ctx, `UPDATE auth_users SET role = ?, updated_at = ? WHERE id = ?`,
+		string(role), now.UnixMilli(), userID); err != nil {
+		return nil, fmt.Errorf("auth: update user role: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("auth: update user role: %w", err)
+	}
+	u.Role = role
+	u.CreatedAt = time.UnixMilli(created)
+	u.PasswordChangedAt = time.UnixMilli(pwChanged)
+	return &u, nil
+}
+
+// DeleteUser deletes targetUserID unless it would delete the caller themselves
+// or remove the final admin account.
+func (s *Service) DeleteUser(ctx context.Context, actorUserID, targetUserID int64) error {
+	if actorUserID != 0 && actorUserID == targetUserID {
+		return &Error{Code: CodeForbidden, Status: httpStatusForbidden(), Message: "不能删除当前正在使用的账户"}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("auth: delete user: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var curRole string
+	err = tx.QueryRowContext(ctx, `SELECT role FROM auth_users WHERE id = ?`, targetUserID).Scan(&curRole)
+	if errors.Is(err, sql.ErrNoRows) {
+		return ErrUserNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("auth: load user: %w", err)
+	}
+	if Role(curRole) == RoleAdmin {
+		var admins int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM auth_users WHERE role = ?`, string(RoleAdmin)).Scan(&admins); err != nil {
+			return fmt.Errorf("auth: count admins: %w", err)
+		}
+		if admins <= 1 {
+			return ErrLastAdmin
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_users WHERE id = ?`, targetUserID); err != nil {
+		return fmt.Errorf("auth: delete user: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("auth: delete user: %w", err)
+	}
+	return nil
+}
+
+func httpStatusForbidden() int { return 403 }
 
 // randomText returns 32 random bytes as text, for throwaway passwords.
 func randomText() string {

@@ -27,6 +27,8 @@ const (
 	FormatHAR      = "har"
 	FormatCurl     = "curl"
 	FormatTidegate = "tidegate"
+	FormatJMeter   = "jmeter"
+	FormatApifox   = "apifox"
 )
 
 // Conflict resolution strategies for Apply.
@@ -162,9 +164,19 @@ func DetectFormat(content []byte, filename string) (string, error) {
 		return FormatCurl, nil
 	}
 
+	if strings.HasPrefix(trimmed, "<") && strings.Contains(trimmed[:min(len(trimmed), 512)], "<jmeterTestPlan") {
+		return FormatJMeter, nil
+	}
+
 	if strings.HasPrefix(trimmed, "{") {
 		var top map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(trimmed), &top); err == nil {
+			if _, ok := top["apifoxProject"]; ok {
+				return FormatApifox, nil
+			}
+			if _, ok := top["apiCollection"]; ok {
+				return FormatApifox, nil
+			}
 			if _, ok := top["openapi"]; ok {
 				return FormatOpenAPI3, nil
 			}
@@ -205,11 +217,13 @@ func DetectFormat(content []byte, filename string) (string, error) {
 	switch ext {
 	case ".har":
 		return FormatHAR, nil
+	case ".jmx":
+		return FormatJMeter, nil
 	case ".tidegate", ".zip":
 		return FormatTidegate, nil
 	}
 
-	return "", errors.New("无法识别导入内容的格式，目前支持 OpenAPI 3.x / Swagger 2.0、Postman Collection v2.1、HAR、cURL 与 .tidegate 包")
+	return "", errors.New("无法识别导入内容的格式，目前支持 OpenAPI 3.x / Swagger 2.0、Postman Collection v2.1、HAR、JMeter (.jmx)、Apifox、cURL 与 .tidegate 包")
 }
 
 func parseBundle(in PreviewInput) (*parsedBundle, error) {
@@ -236,6 +250,10 @@ func parseBundle(in PreviewInput) (*parsedBundle, error) {
 		b, err = parsePostman(in.Content)
 	case FormatHAR:
 		b, err = parseHAR(in.Content)
+	case FormatJMeter:
+		b, err = parseJMeter(in.Content)
+	case FormatApifox:
+		b, err = parseApifox(in.Content)
 	case FormatCurl:
 		api, cerr := curl.Parse(string(in.Content))
 		if cerr != nil {
@@ -501,7 +519,7 @@ func Apply(st *store.Store, projectID string, in PreviewInput) (*ApplyResult, er
 		report.APIsCreated++
 	}
 
-	// 6. Import scenarios when present (e.g. .tidegate archives).
+	// 6. Import scenarios when present (e.g. .tidegate archives or .jmx thread groups).
 	for _, ps := range bundle.Scenarios {
 		sc := ps.Scenario
 		sc.ID = ""
@@ -513,14 +531,7 @@ func Apply(st *store.Store, projectID string, in PreviewInput) (*ApplyResult, er
 				sc.EnvironmentID = ""
 			}
 		}
-		validSteps := make([]store.ScenarioStep, 0, len(sc.Steps))
-		for _, step := range sc.Steps {
-			if mapped, ok := apiIDMap[step.APIID]; ok {
-				step.APIID = mapped
-				validSteps = append(validSteps, step)
-			}
-		}
-		sc.Steps = validSteps
+		sc.Steps = remapScenarioSteps(sc.Steps, apiIDMap)
 		if len(sc.Steps) == 0 {
 			continue
 		}
@@ -535,6 +546,49 @@ func Apply(st *store.Store, projectID string, in PreviewInput) (*ApplyResult, er
 		Report: report,
 		Diffs:  diffs,
 	}, nil
+}
+
+func remapScenarioSteps(steps []store.ScenarioStep, apiIDMap map[string]string) []store.ScenarioStep {
+	if len(steps) == 0 {
+		return nil
+	}
+	out := make([]store.ScenarioStep, 0, len(steps))
+	for _, step := range steps {
+		stType := strings.ToLower(strings.TrimSpace(step.Type))
+		switch stType {
+		case "", "http":
+			mapped, ok := apiIDMap[step.APIID]
+			if !ok {
+				continue
+			}
+			step.APIID = mapped
+			out = append(out, step)
+		case "group", "loop":
+			step.Children = remapScenarioSteps(step.Children, apiIDMap)
+			if len(step.Children) > 0 {
+				out = append(out, step)
+			}
+		case "if":
+			step.Children = remapScenarioSteps(step.Children, apiIDMap)
+			step.Else = remapScenarioSteps(step.Else, apiIDMap)
+			if len(step.Children) > 0 {
+				out = append(out, step)
+			}
+		case "weighted":
+			branches := make([]store.ScenarioWeightedBranch, 0, len(step.Branches))
+			for _, br := range step.Branches {
+				br.Steps = remapScenarioSteps(br.Steps, apiIDMap)
+				if len(br.Steps) > 0 {
+					branches = append(branches, br)
+				}
+			}
+			if len(branches) > 0 {
+				step.Branches = branches
+				out = append(out, step)
+			}
+		}
+	}
+	return out
 }
 
 type existingIndex struct {

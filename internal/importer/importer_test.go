@@ -348,3 +348,244 @@ func TestArchiveZipSecurity(t *testing.T) {
 		}
 	}
 }
+
+func TestJMeterAndApifoxImport(t *testing.T) {
+	st, err := store.Open(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := st.CreateProject(&store.Project{Name: "ecosystem-import"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1. JMeter .jmx XXE/ENTITY rejection.
+	if _, err := Preview(st, pr.ID, PreviewInput{
+		Filename: "evil.jmx",
+		Content:  []byte(`<!DOCTYPE foo [<!ENTITY xxe "boom">]><jmeterTestPlan><hashTree/></jmeterTestPlan>`),
+	}); err == nil {
+		t.Fatal("expected XML ENTITY declaration rejection")
+	}
+
+	// 2. Full JMeter .jmx import -> resolve -> compile end-to-end.
+	jmx := `<?xml version="1.0" encoding="UTF-8"?>
+<jmeterTestPlan version="1.2" properties="5.0">
+  <hashTree>
+    <TestPlan guiclass="TestPlanGui" testname="订单测试计划" enabled="true">
+      <elementProp name="TestPlan.user_defined_variables" elementType="Arguments">
+        <collectionProp name="Arguments.arguments">
+          <elementProp name="tenant" elementType="Argument">
+            <stringProp name="Argument.name">tenant</stringProp>
+            <stringProp name="Argument.value">acme</stringProp>
+          </elementProp>
+        </collectionProp>
+      </elementProp>
+    </TestPlan>
+    <hashTree>
+      <ConfigTestElement guiclass="HttpDefaultsGui" testname="HTTP Request Defaults" enabled="true">
+        <stringProp name="HTTPSampler.protocol">https</stringProp>
+        <stringProp name="HTTPSampler.domain">shop.example.com</stringProp>
+        <stringProp name="HTTPSampler.port">8443</stringProp>
+        <stringProp name="HTTPSampler.path">/v1</stringProp>
+      </ConfigTestElement>
+      <hashTree/>
+      <HeaderManager guiclass="HeaderPanel" testname="Global Headers" enabled="true">
+        <collectionProp name="HeaderManager.headers">
+          <elementProp name="" elementType="Header">
+            <stringProp name="Header.name">X-Tenant</stringProp>
+            <stringProp name="Header.value">${tenant}</stringProp>
+          </elementProp>
+        </collectionProp>
+      </HeaderManager>
+      <hashTree/>
+      <CSVDataSet testname="CSV Users" enabled="true">
+        <stringProp name="filename">/tmp/users.csv</stringProp>
+        <stringProp name="variableNames">username,password</stringProp>
+      </CSVDataSet>
+      <hashTree/>
+      <ThreadGroup testname="下单主链路" enabled="true">
+        <stringProp name="ThreadGroup.num_threads">5</stringProp>
+        <stringProp name="ThreadGroup.ramp_time">2</stringProp>
+        <boolProp name="ThreadGroup.scheduler">true</boolProp>
+        <stringProp name="ThreadGroup.duration">10</stringProp>
+      </ThreadGroup>
+      <hashTree>
+        <TransactionController testname="交易事务" enabled="true"/>
+        <hashTree>
+          <HTTPSamplerProxy testname="用户登录" enabled="true">
+            <stringProp name="HTTPSampler.method">POST</stringProp>
+            <stringProp name="HTTPSampler.path">/login</stringProp>
+            <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+            <elementProp name="HTTPsampler.Arguments" elementType="Arguments">
+              <collectionProp name="Arguments.arguments">
+                <elementProp name="" elementType="HTTPArgument">
+                  <stringProp name="Argument.value">{"user":"${username}","pass":"${password}"}</stringProp>
+                </elementProp>
+              </collectionProp>
+            </elementProp>
+          </HTTPSamplerProxy>
+          <hashTree>
+            <JSONPostProcessor testname="Extract Token" enabled="true">
+              <stringProp name="JSONPostProcessor.referenceNames">token</stringProp>
+              <stringProp name="JSONPostProcessor.jsonPathExprs">$.data.token</stringProp>
+            </JSONPostProcessor>
+            <hashTree/>
+            <ResponseAssertion testname="Status 200" enabled="true">
+              <stringProp name="Assertion.test_field">Assertion.response_code</stringProp>
+              <collectionProp name="Asserion.test_strings">
+                <stringProp name="49586">200</stringProp>
+              </collectionProp>
+            </ResponseAssertion>
+            <hashTree/>
+            <ConstantTimer testname="Think" enabled="true">
+              <stringProp name="ConstantTimer.delay">100</stringProp>
+            </ConstantTimer>
+            <hashTree/>
+          </hashTree>
+          <LoopController testname="查询详情循环" enabled="true">
+            <stringProp name="LoopController.loops">2</stringProp>
+          </LoopController>
+          <hashTree>
+            <HTTPSamplerProxy testname="查订单XML" enabled="true">
+              <stringProp name="HTTPSampler.method">GET</stringProp>
+              <stringProp name="HTTPSampler.path">/orders?tok=${token}</stringProp>
+            </HTTPSamplerProxy>
+            <hashTree>
+              <XPathExtractor testname="Order ID XPath" enabled="true">
+                <stringProp name="XPathExtractor.refname">order_id</stringProp>
+                <stringProp name="XPathExtractor.xpathQuery">/res/id/text()</stringProp>
+              </XPathExtractor>
+              <hashTree/>
+              <DurationAssertion testname="SLA" enabled="true">
+                <stringProp name="DurationAssertion.duration">500</stringProp>
+              </DurationAssertion>
+              <hashTree/>
+              <UniformRandomTimer testname="RandThink" enabled="true">
+                <stringProp name="ConstantTimer.delay">50</stringProp>
+                <stringProp name="RandomTimer.range">50</stringProp>
+              </UniformRandomTimer>
+              <hashTree/>
+            </hashTree>
+          </hashTree>
+          <JSR223PreProcessor testname="Custom Groovy" enabled="true"/>
+          <hashTree/>
+        </hashTree>
+      </hashTree>
+    </hashTree>
+  </hashTree>
+</jmeterTestPlan>`
+
+	prevJMX, err := Preview(st, pr.ID, PreviewInput{Filename: "order.jmx", Content: []byte(jmx)})
+	if err != nil {
+		t.Fatalf("Preview(JMX): %v", err)
+	}
+	if prevJMX.Report.Format != FormatJMeter || prevJMX.Report.APIsFound != 2 || prevJMX.Report.ScenariosFound != 1 || len(prevJMX.Report.Skipped) != 1 {
+		t.Fatalf("unexpected JMX preview report: %+v", prevJMX.Report)
+	}
+	applyJMX, err := Apply(st, pr.ID, PreviewInput{Filename: "order.jmx", Content: []byte(jmx)})
+	if err != nil {
+		t.Fatalf("Apply(JMX): %v", err)
+	}
+	if applyJMX.Report.APIsCreated != 2 || applyJMX.Report.ScenariosCreated != 1 || applyJMX.Report.FilesImported != 1 {
+		t.Fatalf("unexpected JMX apply report: %+v", applyJMX.Report)
+	}
+	scens, err := st.ListScenarios(pr.ID)
+	if err != nil || len(scens) != 1 {
+		t.Fatalf("ListScenarios = %+v, err=%v", scens, err)
+	}
+	resJMX, err := st.ResolveScenario(pr.ID, scens[0].ID, store.ResolveOptions{})
+	if err != nil {
+		t.Fatalf("ResolveScenario(JMX): %v", err)
+	}
+	plan, err := resJMX.Compile()
+	if err != nil {
+		t.Fatalf("Compile(JMX): %v", err)
+	}
+	if len(plan.FlatSteps) != 3 || !plan.FlatSteps[0].IsGroup {
+		t.Fatalf("expected Transaction Group + 2 HTTP FlatSteps, got %+v", plan.FlatSteps)
+	}
+
+	// 3. Apifox project JSON import.
+	prApifox, err := st.CreateProject(&store.Project{Name: "apifox-import"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apifoxJSON := `{
+		"apifoxProject": "1.0.0",
+		"info": {"name": "支付网关", "description": "Apifox 导出"},
+		"environments": [
+			{
+				"name": "Sandbox",
+				"baseUrl": "https://sandbox.pay.example.com",
+				"variables": [
+					{"name": "app_secret", "value": "af-sec-123", "type": "secret"}
+				]
+			}
+		],
+		"apiCollection": [
+			{
+				"name": "Payments",
+				"auth": {"type": "oauth2", "oauth2": {"accessTokenUrl": "https://auth.pay.example.com/token", "clientId": "c1", "scope": "pay"}},
+				"items": [
+					{
+						"api": {
+							"id": "af-1",
+							"name": "Query Order",
+							"method": "GET",
+							"path": "/orders/{id}",
+							"parameters": {
+								"path": [{"name": "id", "value": "ord-9"}],
+								"query": [{"name": "detail", "value": "1"}],
+								"header": [{"name": "X-App", "value": "web"}]
+							},
+							"preProcessors": [{"type": "customScript", "name": "sign"}],
+							"responses": [
+								{
+									"name": "OK",
+									"code": 200,
+									"jsonSchema": {
+										"type": "object",
+										"required": ["id"],
+										"properties": {
+											"id": {"type": "string", "description": "订单号"},
+											"amount": {"type": "number", "description": "金额"}
+										}
+									}
+								}
+							],
+							"responseExamples": [
+								{"name": "paid", "responseCode": 200, "data": {"id": "ord-9", "amount": 99.5}}
+							]
+						}
+					}
+				]
+			}
+		]
+	}`
+
+	prevAF, err := Preview(st, prApifox.ID, PreviewInput{Content: []byte(apifoxJSON)})
+	if err != nil {
+		t.Fatalf("Preview(Apifox): %v", err)
+	}
+	if prevAF.Report.Format != FormatApifox || prevAF.Report.APIsFound != 1 || prevAF.Report.EnvsFound != 1 || len(prevAF.Report.Skipped) != 1 {
+		t.Fatalf("unexpected Apifox preview report: %+v", prevAF.Report)
+	}
+	if _, err := Apply(st, prApifox.ID, PreviewInput{Content: []byte(apifoxJSON)}); err != nil {
+		t.Fatalf("Apply(Apifox): %v", err)
+	}
+	afEnvs, _ := st.ListEnvironments(prApifox.ID)
+	if len(afEnvs) != 1 || afEnvs[0].BaseURL != "https://sandbox.pay.example.com" || !afEnvs[0].Variables[0].Secret {
+		t.Fatalf("unexpected Apifox environments: %+v", afEnvs)
+	}
+	tree, _ := st.Tree(prApifox.ID)
+	if len(tree.Children) != 1 || tree.Children[0].Name != "Payments" || len(tree.Children[0].Children) != 1 {
+		t.Fatalf("unexpected Apifox tree: %+v", tree)
+	}
+	afAPI, err := st.GetAPI(prApifox.ID, tree.Children[0].Children[0].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if afAPI.Request.URL != "/orders/:id" || len(afAPI.Examples) != 1 || len(afAPI.ResponseFields) != 2 {
+		t.Fatalf("unexpected Apifox API: %+v", afAPI)
+	}
+}

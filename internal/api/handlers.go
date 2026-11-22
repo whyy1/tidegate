@@ -73,6 +73,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 	if _, err := s.ctrl.EnsureDefaultProject(); err != nil {
 		s.log.Warn("初始化默认项目失败", "err", err)
 	}
+	s.auditAs(r, res.User, "user.setup", "user", strconv.FormatInt(res.User.ID, 10), map[string]any{"username": res.User.Username})
 	auth.SetSessionCookie(w, res, s.guard.SecureCookies(r))
 	writeJSON(w, http.StatusCreated, map[string]any{"user": toUserDTO(res.User)})
 }
@@ -93,9 +94,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		UserAgent:  r.UserAgent(),
 	})
 	if err != nil {
+		s.audit(r, "user.login_failed", "auth", body.Username, map[string]any{"username": body.Username})
 		writeError(w, err)
 		return
 	}
+	s.auditAs(r, res.User, "user.login", "auth", strconv.FormatInt(res.User.ID, 10), nil)
 	auth.SetSessionCookie(w, res, s.guard.SecureCookies(r))
 	writeJSON(w, http.StatusOK, map[string]any{"user": toUserDTO(res.User)})
 }
@@ -106,6 +109,7 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "user.logout", "auth", "", nil)
 	auth.ClearSessionCookie(w, s.guard.SecureCookies(r))
 	w.WriteHeader(http.StatusNoContent)
 }
@@ -148,6 +152,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "user.password_change", "user", strconv.FormatInt(u.ID, 10), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -244,6 +249,7 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "project.create", "project", out.ID, map[string]any{"name": out.Name})
 	writeJSON(w, http.StatusCreated, out)
 }
 
@@ -310,6 +316,7 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	if err := s.results.ClearDebugHistory(r.Context(), pid); err != nil {
 		s.log.Warn("清理项目调试历史失败", "project_id", pid, "err", err)
 	}
+	s.audit(r, "project.delete", "project", pid, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -481,6 +488,7 @@ func (s *Server) handleImportProjectArchive(w http.ResponseWriter, r *http.Reque
 		writeImportError(w, err)
 		return
 	}
+	s.audit(r, "project.import", "project", pr.ID, map[string]any{"name": pr.Name})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"project": pr,
 		"report":  report,
@@ -976,15 +984,19 @@ func (s *Server) handleAPIToCurl(w http.ResponseWriter, r *http.Request) {
 		api = &cp
 	}
 
+	u, _ := auth.UserFromContext(r.Context())
+	redact := body.RedactSecrets || u == nil || !u.Role.CanWrite()
+
 	preview, err := s.store.PreviewEffectiveAPI(pid, api, store.ResolveOptions{
-		EnvironmentID: body.EnvironmentID,
-		Variables:     body.Variables,
+		EnvironmentID:  body.EnvironmentID,
+		Variables:      body.Variables,
+		IncludeSecrets: !redact,
 	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	out, err := curl.FormatAPI(api, preview, body.Mode, body.Shell, body.RedactSecrets)
+	out, err := curl.FormatAPI(api, preview, body.Mode, body.Shell, redact)
 	if err != nil {
 		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", err.Error()))
 		return
@@ -1059,11 +1071,19 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	if u, ok := auth.UserFromContext(r.Context()); ok {
+		req.ActorRole = string(u.Role)
+	}
 	out, err := s.ctrl.StartRun(r.Context(), r.PathValue("pid"), req)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "run.start", "run", out.ID, map[string]any{
+		"project_id":    r.PathValue("pid"),
+		"scenario_id":   req.ScenarioID,
+		"scenario_name": out.ScenarioName,
+	})
 	writeJSON(w, http.StatusCreated, out)
 }
 
@@ -1208,6 +1228,7 @@ func (s *Server) handleStopRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "run.stop", "run", r.PathValue("id"), map[string]any{"abort": abort})
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -1219,10 +1240,15 @@ func (s *Server) handleSetRunTarget(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if err := s.ctrl.SetRunTarget(r.Context(), r.PathValue("id"), body.Target); err != nil {
+	var actorRole string
+	if u, ok := auth.UserFromContext(r.Context()); ok {
+		actorRole = string(u.Role)
+	}
+	if err := s.ctrl.SetRunTargetWithRole(r.Context(), r.PathValue("id"), body.Target, actorRole); err != nil {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "run.target", "run", r.PathValue("id"), map[string]any{"target": body.Target})
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1241,6 +1267,7 @@ func (s *Server) handleDeleteRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "run.delete", "run", id, nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -1266,6 +1293,7 @@ func (s *Server) handlePatchAgent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	s.audit(r, "agent.update", "agent", r.PathValue("id"), map[string]any{"bandwidth_bps": body.BandwidthBps})
 	writeJSON(w, http.StatusOK, out)
 }
 

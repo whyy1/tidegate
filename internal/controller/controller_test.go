@@ -612,3 +612,342 @@ func TestControllerMixAndEstimate(t *testing.T) {
 		}
 	}
 }
+
+func TestSecurityPolicyAllowlistAndRoleScaleLimits(t *testing.T) {
+	ctx := context.Background()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ok":
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"ok":true}`))
+		case "/redir":
+			http.Redirect(w, r, "http://169.254.169.254/latest/meta-data", http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c, st, _ := newTestController(t, nil)
+	waitForAgents(t, c, 1)
+
+	proj, err := c.EnsureDefaultProject()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Reject wildcard "*" rule.
+	if _, err := c.SetSecurityPolicy(ctx, SecurityPolicy{
+		AllowlistEnabled: true,
+		AllowedTargets:   []string{"*"},
+	}); !errors.Is(err, ErrInvalidInput) {
+		t.Fatalf("expected ErrInvalidInput for '*', got %v", err)
+	}
+
+	pol, err := c.SetSecurityPolicy(ctx, SecurityPolicy{
+		AllowlistEnabled: true,
+		AllowedTargets:   []string{"127.0.0.1/32", "allowed.tidegate.test"},
+		MemberMaxVUs:     2,
+		MemberMaxRPS:     10,
+	})
+	if err != nil {
+		t.Fatalf("SetSecurityPolicy: %v", err)
+	}
+	loaded, err := c.GetSecurityPolicy(ctx)
+	if err != nil || !loaded.AllowlistEnabled || loaded.MemberMaxVUs != 2 || len(loaded.AllowedTargets) != 2 || pol.MemberMaxRPS != 10 {
+		t.Fatalf("GetSecurityPolicy mismatch: %+v err=%v", loaded, err)
+	}
+
+	// Allowed target works.
+	okRes, err := c.DebugAPI(ctx, proj.ID, DebugAPIRequest{
+		API: &store.API{
+			Name:    "allowed",
+			Request: store.APIRequest{Method: "GET", URL: srv.URL + "/ok"},
+		},
+	})
+	if err != nil || !okRes.Result.Passed || okRes.Result.Status != 200 {
+		t.Fatalf("expected allowed DebugAPI to pass, got %+v err=%v", okRes, err)
+	}
+
+	// Disallowed host rejected pre-flight.
+	if _, err := c.DebugAPI(ctx, proj.ID, DebugAPIRequest{
+		API: &store.API{
+			Name:    "blocked",
+			Request: store.APIRequest{Method: "GET", URL: "http://evil.invalid/test"},
+		},
+	}); !errors.Is(err, ErrTargetNotAllowed) {
+		t.Fatalf("expected ErrTargetNotAllowed for evil.invalid, got %v", err)
+	}
+
+	// DNS override pointing an allowed domain at metadata IP is blocked pre-flight.
+	if _, err := c.DebugAPI(ctx, proj.ID, DebugAPIRequest{
+		API: &store.API{
+			Name:    "dns-bypass",
+			Request: store.APIRequest{Method: "GET", URL: "https://allowed.tidegate.test/v1"},
+		},
+		HTTP: &scenario.HTTPOptions{
+			DNSOverrides: map[string]string{"allowed.tidegate.test": "169.254.169.254"},
+		},
+	}); !errors.Is(err, ErrTargetNotAllowed) {
+		t.Fatalf("expected ErrTargetNotAllowed for metadata DNSOverride, got %v", err)
+	}
+
+	// Redirect to disallowed metadata IP is blocked at dial time before opening socket.
+	redirRes, err := c.DebugAPI(ctx, proj.ID, DebugAPIRequest{
+		API: &store.API{
+			Name:    "ssrf-redir",
+			Request: store.APIRequest{Method: "GET", URL: srv.URL + "/redir"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("unexpected outer error on redirect debug: %v", err)
+	}
+	if redirRes.Result.Passed || !strings.Contains(redirRes.Result.Error, ErrTargetNotAllowed.Error()) {
+		t.Fatalf("expected redirect dial blocked with allowlist message, got %+v", redirRes.Result)
+	}
+
+	// Role scale enforcement on StartRun and SetRunTargetWithRole.
+	scen, err := st.CreateScenario(proj.ID, &store.Scenario{
+		Name: "scale-check",
+		Load: scenario.Load{
+			Mode:   "vus",
+			Stages: []scenario.Stage{{Duration: scenario.Duration(800 * time.Millisecond), Target: 5}},
+		},
+		Steps: []store.ScenarioStep{
+			{ID: "s1", APIID: func() string {
+				a, err := st.CreateAPI(proj.ID, &store.API{Name: "ok", Request: store.APIRequest{Method: "GET", URL: srv.URL + "/ok"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return a.ID
+			}()},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := c.StartRun(ctx, proj.ID, StartRunRequest{
+		ScenarioID: scen.ID,
+		ActorRole:  "member",
+	}); !errors.Is(err, ErrScaleLimitExceeded) {
+		t.Fatalf("expected ErrScaleLimitExceeded for member VUs=5 > 2, got %v", err)
+	}
+	if _, err := c.StartRun(ctx, proj.ID, StartRunRequest{
+		ScenarioID: scen.ID,
+		ActorRole:  "viewer",
+		Load: &scenario.Load{
+			Mode:   "vus",
+			Stages: []scenario.Stage{{Duration: scenario.Duration(400 * time.Millisecond), Target: 1}},
+		},
+	}); !errors.Is(err, ErrScaleLimitExceeded) {
+		t.Fatalf("expected ErrScaleLimitExceeded for viewer, got %v", err)
+	}
+
+	sub := c.Subscribe()
+	defer sub.Close()
+	sub.SubscribeRun("*")
+
+	run, err := c.StartRun(ctx, proj.ID, StartRunRequest{
+		ScenarioID: scen.ID,
+		ActorRole:  "member",
+		Load: &scenario.Load{
+			Mode:   "vus",
+			Stages: []scenario.Stage{{Duration: scenario.Duration(600 * time.Millisecond), Target: 2}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartRun within member limit failed: %v", err)
+	}
+	if err := c.SetRunTargetWithRole(ctx, run.ID, 5, "member"); !errors.Is(err, ErrScaleLimitExceeded) {
+		t.Fatalf("expected ErrScaleLimitExceeded when member scales to 5, got %v", err)
+	}
+	if err := c.SetRunTargetWithRole(ctx, run.ID, 3, "admin"); err != nil {
+		t.Fatalf("admin SetRunTargetWithRole failed: %v", err)
+	}
+
+	deadline := time.After(6 * time.Second)
+	for {
+		select {
+		case ev := <-sub.C():
+			if ev.RunID == run.ID && ev.Type == EventRunStatus && !ev.Status.Active() {
+				return
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for scale-check run completion")
+		}
+	}
+}
+
+func TestStartRunScrubsPersistedSecrets(t *testing.T) {
+	var seenHeader atomic.Value
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenHeader.Store(r.Header.Get("X-Api-Key"))
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c, st, _ := newTestController(t, func(o *Options) {
+		box, err := store.LoadOrCreateMasterKey(filepath.Join(t.TempDir(), "master.key"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		o.Store.SetSecretVault(store.NewSecretVault(o.Results, box))
+	})
+	ctx := context.Background()
+	waitForAgents(t, c, 1)
+
+	proj, err := st.CreateProject(&store.Project{
+		Name: "secret-run",
+		Variables: store.KeyValueList{
+			{Name: "api_secret", Value: "super-secret-value", Secret: true},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiObj, err := st.CreateAPI(proj.ID, &store.API{
+		Name: "secret-call",
+		Request: store.APIRequest{
+			Method: "GET",
+			URL:    srv.URL + "/check",
+			Headers: store.KeyValueList{
+				{Name: "X-Api-Key", Value: "{{api_secret}}"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sub := c.Subscribe()
+	defer sub.Close()
+	sub.SubscribeRun("*")
+
+	run, err := c.StartRun(ctx, proj.ID, StartRunRequest{
+		APIID: apiObj.ID,
+		Load: &scenario.Load{
+			Mode:        "vus",
+			Stages:      []scenario.Stage{{Duration: scenario.Duration(2 * time.Second), Target: 1}},
+			MaxRequests: 1,
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartRun failed: %v", err)
+	}
+
+	deadline := time.After(6 * time.Second)
+	for done := false; !done; {
+		select {
+		case ev := <-sub.C():
+			if ev.RunID == run.ID && ev.Type == EventRunStatus && !ev.Status.Active() {
+				done = true
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for secret-run completion")
+		}
+	}
+
+	if got, _ := seenHeader.Load().(string); got != "super-secret-value" {
+		t.Fatalf("target server X-Api-Key = %q, want %q", got, "super-secret-value")
+	}
+
+	stored, err := c.results.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(stored.Scenario), "super-secret-value") {
+		t.Fatalf("persisted run scenario leaked plaintext secret: %s", stored.Scenario)
+	}
+	if !strings.Contains(string(stored.Scenario), store.SecretMask) {
+		t.Fatalf("expected persisted run scenario to contain %s mask, got: %s", store.SecretMask, stored.Scenario)
+	}
+}
+
+func TestStartRunEnforcesDialTimeRedirectAllowlist(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, "http://127.0.0.2:1/ssrf", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	c, st, _ := newTestController(t, nil)
+	ctx := context.Background()
+	waitForAgents(t, c, 1)
+
+	if _, err := c.SetSecurityPolicy(ctx, SecurityPolicy{
+		AllowlistEnabled: true,
+		AllowedTargets:   []string{"127.0.0.1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	proj, err := st.CreateProject(&store.Project{Name: "redir-allowlist"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	apiObj, err := st.CreateAPI(proj.ID, &store.API{
+		Name: "redir",
+		Request: store.APIRequest{
+			Method: "GET",
+			URL:    srv.URL + "/start",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	sub := c.Subscribe()
+	defer sub.Close()
+	sub.SubscribeRun("*")
+
+	run, err := c.StartRun(ctx, proj.ID, StartRunRequest{
+		APIID: apiObj.ID,
+		Load: &scenario.Load{
+			Mode:        "vus",
+			Stages:      []scenario.Stage{{Duration: scenario.Duration(2 * time.Second), Target: 1}},
+			MaxRequests: 2,
+		},
+	})
+	if err != nil {
+		t.Fatalf("StartRun failed: %v", err)
+	}
+
+	deadline := time.After(6 * time.Second)
+	done := false
+	for !done {
+		select {
+		case ev := <-sub.C():
+			if ev.RunID == run.ID && ev.Type == EventRunStatus && !ev.Status.Active() {
+				done = true
+			}
+		case <-deadline:
+			t.Fatal("timed out waiting for redirect-allowlist run completion")
+		}
+	}
+
+	stored, err := c.results.GetRun(ctx, run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sum metrics.SnapshotView
+	if err := json.Unmarshal(stored.Summary, &sum); err != nil {
+		t.Fatal(err)
+	}
+	if sum.Errors == 0 {
+		t.Fatalf("expected redirect to 127.0.0.2 to be blocked with error, summary = %+v", sum)
+	}
+	samples, err := c.results.Samples(ctx, run.ID, store.SampleQuery{Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundBlockMsg := false
+	for _, s := range samples {
+		if strings.Contains(string(s.Data), ErrTargetNotAllowed.Error()) {
+			foundBlockMsg = true
+			break
+		}
+	}
+	if !foundBlockMsg {
+		t.Fatalf("expected sample error containing %q, got %+v", ErrTargetNotAllowed.Error(), samples)
+	}
+}

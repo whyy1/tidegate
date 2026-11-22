@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/base64"
+	"net"
 	"strconv"
 	"time"
 	"unicode/utf8"
@@ -21,6 +22,7 @@ type DebugOptions struct {
 	MaxBodyBytes int64
 	SkipThink    bool
 	StopOnError  bool
+	TargetCheck  func(host string, ip net.IP) error
 }
 
 // DebugActualRequest is the concrete HTTP request rendered for a debug step.
@@ -123,6 +125,7 @@ func RunDebug(ctx context.Context, plan *scenario.Plan, opts DebugOptions) (*Deb
 		Client:          opts.Client,
 		Shards:          1,
 		SampleBodyBytes: int(min(maxBody, 64<<10)),
+		TargetCheck:     opts.TargetCheck,
 	}
 	e, err := New(plan, engOpts)
 	if err != nil {

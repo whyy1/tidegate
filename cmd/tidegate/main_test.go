@@ -76,14 +76,14 @@ func TestRunPingWithOutputs(t *testing.T) {
 	srv := startServer(t)
 	file := writeExample(t, "ping.yaml", srv.URL())
 	dir := t.TempDir()
-	out, csvPath, htmlPath := filepath.Join(dir, "r.json"), filepath.Join(dir, "r.csv"), filepath.Join(dir, "r.html")
+	out, csvPath, htmlPath, jtlPath := filepath.Join(dir, "r.json"), filepath.Join(dir, "r.csv"), filepath.Join(dir, "r.html"), filepath.Join(dir, "r.jtl")
 	var stdout, stderr bytes.Buffer
-	code := runMain([]string{"run", file, "--out", out, "--csv", csvPath, "--html", htmlPath}, &stdout, &stderr)
+	code := runMain([]string{"run", file, "--out", out, "--csv", csvPath, "--html", htmlPath, "--jtl", jtlPath}, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("exit %d\nstdout:\n%s\nstderr:\n%s", code, &stdout, &stderr)
 	}
 	text := stdout.String()
-	for _, want := range []string{"场景：单接口压测（/ping）", "请求/秒", "P99", "上行", "========== 汇总 ==========", "按步骤", "ping 心跳", "200×", "已写出结果", "已写出 CSV", "已写出 HTML 报告"} {
+	for _, want := range []string{"场景：单接口压测（/ping）", "请求/秒", "P99", "上行", "========== 汇总 ==========", "按步骤", "ping 心跳", "200×", "已写出结果", "已写出 CSV", "已写出 HTML 报告", "已写出 JTL 日志"} {
 		if !strings.Contains(text, want) {
 			t.Errorf("stdout lacks %q:\n%s", want, text)
 		}
@@ -165,6 +165,15 @@ func TestRunPingWithOutputs(t *testing.T) {
 	}
 	if !strings.Contains(string(htmlBytes), "<!DOCTYPE html>") || !strings.Contains(string(htmlBytes), "单接口压测（/ping）") {
 		t.Fatalf("unexpected html report content")
+	}
+	jf, err := os.Open(jtlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer jf.Close()
+	jtlRows, err := csv.NewReader(jf).ReadAll()
+	if err != nil || len(jtlRows) < 2 || len(jtlRows[0]) != 17 || jtlRows[0][0] != "timeStamp" {
+		t.Fatalf("unexpected JTL rows (%d): %+v err=%v", len(jtlRows), jtlRows, err)
 	}
 }
 

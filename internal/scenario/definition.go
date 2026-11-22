@@ -41,6 +41,7 @@ type HTTPOptions struct {
 	DNSOverrides       map[string]string `yaml:"dns_overrides,omitempty" json:"dns_overrides,omitempty"`
 	ProxyURL           string            `yaml:"proxy_url,omitempty" json:"proxy_url,omitempty"`
 	ConnectBackoff     *Duration         `yaml:"connect_backoff,omitempty" json:"connect_backoff,omitempty"`
+	AllowedTargets     []string          `yaml:"allowed_targets,omitempty" json:"allowed_targets,omitempty"`
 }
 
 // Timeouts are the four request timeouts. Zero means the default.

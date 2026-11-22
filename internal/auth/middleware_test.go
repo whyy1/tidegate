@@ -370,3 +370,56 @@ func TestHTTPFlow(t *testing.T) {
 		t.Fatalf("/me after logout: %d", code)
 	}
 }
+
+func TestBearerTokenAndCSRFBypass(t *testing.T) {
+	ctx := context.Background()
+	s, _, setup := newSetupService(t, nil)
+	g, err := NewGuard(s, GuardConfig{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, bearer, err := s.CreateAPIToken(ctx, CreateTokenRequest{
+		UserID: setup.User.ID,
+		Name:   "ci",
+		Role:   RoleMember,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	handler := g.CSRF(g.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		u, ok := UserFromContext(r.Context())
+		tok, hasTok := TokenFromContext(r.Context())
+		if !ok || !hasTok || u.Role != RoleMember || tok.Name != "ci" {
+			t.Errorf("unexpected context principal u=%+v tok=%+v", u, tok)
+		}
+		w.WriteHeader(http.StatusNoContent)
+	})))
+
+	// Cookie POST without X-Tidegate-Request still fails CSRF check.
+	cookieReq := httptest.NewRequest(http.MethodPost, "/api/v1/projects", nil)
+	cookieReq.AddCookie(&http.Cookie{Name: CookieName, Value: setup.Token})
+	rec1 := httptest.NewRecorder()
+	handler.ServeHTTP(rec1, cookieReq)
+	if rec1.Code != http.StatusForbidden || errorCode(t, rec1.Body) != CodeCSRFHeaderMissing {
+		t.Fatalf("cookie POST without CSRF header got %d (%s)", rec1.Code, rec1.Body.String())
+	}
+
+	// Bearer POST succeeds without X-Tidegate-Request or Origin header.
+	bearerReq := httptest.NewRequest(http.MethodPost, "/api/v1/projects", nil)
+	bearerReq.Header.Set("Authorization", "Bearer "+bearer)
+	rec2 := httptest.NewRecorder()
+	handler.ServeHTTP(rec2, bearerReq)
+	if rec2.Code != http.StatusNoContent {
+		t.Fatalf("bearer POST got %d (%s)", rec2.Code, rec2.Body.String())
+	}
+
+	// Invalid bearer token returns 401 and does not set clearing cookie.
+	badReq := httptest.NewRequest(http.MethodGet, "/api/v1/projects", nil)
+	badReq.Header.Set("Authorization", "Bearer tg_invalidtokenvaluehere0000")
+	rec3 := httptest.NewRecorder()
+	handler.ServeHTTP(rec3, badReq)
+	if rec3.Code != http.StatusUnauthorized || rec3.Header().Get("Set-Cookie") != "" {
+		t.Fatalf("bad bearer got %d cookie=%q", rec3.Code, rec3.Header().Get("Set-Cookie"))
+	}
+}

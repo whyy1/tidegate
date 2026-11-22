@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -19,6 +20,12 @@ type ResolveOptions struct {
 	EnvironmentID string
 	// Variables override project, environment and scenario variables.
 	Variables map[string]scenario.Scalar
+	// IncludeSecrets permits decrypting Secret:true variables inside
+	// PreviewEffectiveAPI (used when generating unredacted cURL).
+	IncludeSecrets bool
+	// SkipSecretDecrypt prevents decrypting encrypted secrets from SQLite
+	// during ResolveScenario/ResolveAPI (used by code exporters such as k6).
+	SkipSecretDecrypt bool
 }
 
 // APIRunOptions configure a scenario built from a single API (one-click
@@ -48,6 +55,8 @@ type Resolved struct {
 	BaseDir string
 	// Files lists the referenced data files in order of first use.
 	Files []ResolvedFile
+	// SecretNames lists variable names marked Secret:true from project or environment scopes.
+	SecretNames map[string]bool
 }
 
 // CompileOptions returns the options for scenario.Compile.
@@ -101,24 +110,55 @@ type EffectivePreview struct {
 
 // resolver builds scenario steps from stored APIs.
 type resolver struct {
-	p        *project
-	baseURL  string
-	vars     map[string]scenario.Scalar
-	mutable  map[string]bool // variables written by extractors
-	filesDir string
-	files    map[string]bool
-	out      []ResolvedFile
+	p           *project
+	baseURL     string
+	vars        map[string]scenario.Scalar
+	mutable     map[string]bool // variables written by extractors
+	secretNames map[string]bool
+	filesDir    string
+	files       map[string]bool
+	out         []ResolvedFile
 }
 
 // newResolver merges variables (project < scenario < environment < overrides)
 // and loads the environment.
 func (p *project) newResolver(envID string, scenarioVars KeyValueList, opts ResolveOptions) (*resolver, error) {
 	r := &resolver{p: p, vars: map[string]scenario.Scalar{}, mutable: map[string]bool{}, filesDir: p.filesDir(), files: map[string]bool{}}
+	vault := p.secretVault()
+	if opts.SkipSecretDecrypt {
+		vault = nil
+	}
 	if pr, err := p.readProject(); err == nil {
-		for _, v := range pr.Variables {
-			if !v.Disabled && strings.TrimSpace(v.Name) != "" {
-				r.vars[strings.TrimSpace(v.Name)] = v.Value
+		var projSecs map[string]string
+		if vault != nil {
+			projSecs, err = vault.ResolveVariables(context.Background(), p.id, "project")
+			if err != nil {
+				return nil, err
 			}
+		}
+		for _, v := range pr.Variables {
+			if v.Disabled {
+				continue
+			}
+			name := strings.TrimSpace(v.Name)
+			if name == "" {
+				continue
+			}
+			val := v.Value
+			if v.Secret {
+				if r.secretNames == nil {
+					r.secretNames = map[string]bool{}
+				}
+				r.secretNames[name] = true
+			}
+			if v.Secret && projSecs != nil {
+				if plain, ok := projSecs[name]; ok {
+					val = scenario.Scalar(plain)
+				} else if string(val) == SecretMask {
+					val = ""
+				}
+			}
+			r.vars[name] = val
 		}
 	}
 	for _, v := range scenarioVars {
@@ -135,10 +175,36 @@ func (p *project) newResolver(envID string, scenarioVars KeyValueList, opts Reso
 			return nil, err
 		}
 		r.baseURL = env.BaseURL
-		for _, v := range env.Variables {
-			if !v.Disabled && strings.TrimSpace(v.Name) != "" {
-				r.vars[strings.TrimSpace(v.Name)] = v.Value
+		var envSecs map[string]string
+		if vault != nil {
+			envSecs, err = vault.ResolveVariables(context.Background(), p.id, envID)
+			if err != nil {
+				return nil, err
 			}
+		}
+		for _, v := range env.Variables {
+			if v.Disabled {
+				continue
+			}
+			name := strings.TrimSpace(v.Name)
+			if name == "" {
+				continue
+			}
+			val := v.Value
+			if v.Secret {
+				if r.secretNames == nil {
+					r.secretNames = map[string]bool{}
+				}
+				r.secretNames[name] = true
+			}
+			if v.Secret && envSecs != nil {
+				if plain, ok := envSecs[name]; ok {
+					val = scenario.Scalar(plain)
+				} else if string(val) == SecretMask {
+					val = ""
+				}
+			}
+			r.vars[name] = val
 		}
 	}
 	if err := validateVariablesMap("variables", opts.Variables); err != nil {
@@ -660,7 +726,7 @@ func (r *resolver) result(def *scenario.Definition) *Resolved {
 	if files == nil {
 		files = []ResolvedFile{}
 	}
-	return &Resolved{Definition: def, BaseDir: r.filesDir, Files: files}
+	return &Resolved{Definition: def, BaseDir: r.filesDir, Files: files, SecretNames: r.secretNames}
 }
 
 // singleIteration is the load used when a single API run has no stages:
@@ -1025,10 +1091,29 @@ func (s *Store) PreviewEffectiveAPI(projectID string, in *API, opts ResolveOptio
 				Name: name, Value: val, Source: source, Description: desc, Secret: secret,
 			}
 		}
+		vault := p.secretVault()
 		if pr, err := p.readProject(); err == nil {
-			for _, v := range pr.Variables {
+			var projPlain map[string]string
+			if vault != nil && opts.IncludeSecrets {
+				projPlain, err = vault.ResolveVariables(context.Background(), p.id, "project")
+				if err != nil {
+					return err
+				}
+			}
+			vars := pr.Variables
+			if vault != nil && !opts.IncludeSecrets {
+				vars = vault.MaskVariables(context.Background(), p.id, "project", vars)
+			}
+			for _, v := range vars {
 				if !v.Disabled && strings.TrimSpace(v.Name) != "" {
-					setVar(strings.TrimSpace(v.Name), string(v.Value), "project", v.Description, v.Secret)
+					name := strings.TrimSpace(v.Name)
+					val := string(v.Value)
+					if v.Secret && projPlain != nil {
+						if plain, ok := projPlain[name]; ok {
+							val = plain
+						}
+					}
+					setVar(name, val, "project", v.Description, v.Secret)
 				}
 			}
 		}
@@ -1042,9 +1127,27 @@ func (s *Store) PreviewEffectiveAPI(projectID string, in *API, opts ResolveOptio
 				return err
 			}
 			baseURL = env.BaseURL
-			for _, v := range env.Variables {
+			var envPlain map[string]string
+			if vault != nil && opts.IncludeSecrets {
+				envPlain, err = vault.ResolveVariables(context.Background(), p.id, env.ID)
+				if err != nil {
+					return err
+				}
+			}
+			vars := env.Variables
+			if vault != nil && !opts.IncludeSecrets {
+				vars = vault.MaskVariables(context.Background(), p.id, env.ID, vars)
+			}
+			for _, v := range vars {
 				if !v.Disabled && strings.TrimSpace(v.Name) != "" {
-					setVar(strings.TrimSpace(v.Name), string(v.Value), "environment", v.Description, v.Secret)
+					name := strings.TrimSpace(v.Name)
+					val := string(v.Value)
+					if v.Secret && envPlain != nil {
+						if plain, ok := envPlain[name]; ok {
+							val = plain
+						}
+					}
+					setVar(name, val, "environment", v.Description, v.Secret)
 				}
 			}
 		}

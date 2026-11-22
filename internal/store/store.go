@@ -20,6 +20,7 @@
 package store
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -44,13 +45,32 @@ type Store struct {
 
 	mu       sync.Mutex
 	projects map[string]*project
+
+	vaultMu sync.RWMutex
+	vault   *SecretVault
+}
+
+// SetSecretVault attaches an optional encrypted vault for Secret:true variables.
+func (s *Store) SetSecretVault(v *SecretVault) {
+	s.vaultMu.Lock()
+	s.vault = v
+	s.vaultMu.Unlock()
+}
+
+// SecretVault returns the attached SecretVault, or nil if encryption is unset.
+func (s *Store) SecretVault() *SecretVault {
+	s.vaultMu.RLock()
+	v := s.vault
+	s.vaultMu.RUnlock()
+	return v
 }
 
 // project is the in-memory state of one project directory. All fields
 // except id and dir are guarded by mu.
 type project struct {
-	id  string
-	dir string
+	id    string
+	dir   string
+	store *Store
 
 	mu      sync.Mutex
 	deleted bool
@@ -95,7 +115,7 @@ func (s *Store) acquire(id string) (*project, error) {
 			s.mu.Unlock()
 			return nil, notFound(KindProject, id)
 		}
-		p = &project{id: nid, dir: dir}
+		p = &project{id: nid, dir: dir, store: s}
 		s.projects[nid] = p
 	}
 	s.mu.Unlock()
@@ -109,6 +129,13 @@ func (s *Store) acquire(id string) (*project, error) {
 		return nil, notFound(KindProject, id)
 	}
 	return p, nil
+}
+
+func (p *project) secretVault() *SecretVault {
+	if p == nil || p.store == nil {
+		return nil
+	}
+	return p.store.SecretVault()
 }
 
 // with runs fn with the project lock held.
@@ -166,7 +193,13 @@ func (s *Store) GetProject(id string) (*Project, error) {
 	var pr *Project
 	err := s.with(id, func(p *project) (err error) {
 		pr, err = p.readProject()
-		return err
+		if err != nil {
+			return err
+		}
+		if v := p.secretVault(); v != nil {
+			pr.Variables = v.MaskVariables(context.Background(), p.id, "project", pr.Variables)
+		}
+		return nil
 	})
 	return pr, err
 }
@@ -189,25 +222,45 @@ func (s *Store) CreateProject(in *Project) (*Project, error) {
 		return nil, err
 	}
 	pr.ID = newID()
+	viewVars := pr.Variables
+	vault := s.SecretVault()
+	if vault != nil {
+		diskVars, maskedVars, err := vault.SyncVariables(context.Background(), pr.ID, "project", pr.Variables)
+		if err != nil {
+			return nil, err
+		}
+		pr.Variables = diskVars
+		viewVars = maskedVars
+	}
 	// Build the skeleton under a hidden name and rename it into place so
 	// that a half created project is never listed.
 	tmp := filepath.Join(s.root, tempPrefix+pr.ID)
 	for _, sub := range []string{environmentsDir, apisDir, scenariosDir, filesDir} {
 		if err := os.MkdirAll(filepath.Join(tmp, sub), dirPerm); err != nil {
 			os.RemoveAll(tmp)
+			if vault != nil {
+				_ = vault.DeleteProject(context.Background(), pr.ID)
+			}
 			return nil, fmt.Errorf("创建项目目录失败：%w", err)
 		}
 	}
 	v, err := writeYAML(filepath.Join(tmp, projectFile), &pr)
 	if err != nil {
 		os.RemoveAll(tmp)
+		if vault != nil {
+			_ = vault.DeleteProject(context.Background(), pr.ID)
+		}
 		return nil, err
 	}
 	if err := renameRetry(tmp, filepath.Join(s.root, pr.ID)); err != nil {
 		os.RemoveAll(tmp)
+		if vault != nil {
+			_ = vault.DeleteProject(context.Background(), pr.ID)
+		}
 		return nil, fmt.Errorf("创建项目目录失败：%w", err)
 	}
 	pr.Version = v
+	pr.Variables = viewVars
 	return &pr, nil
 }
 
@@ -227,9 +280,19 @@ func (s *Store) UpdateProject(in *Project) (*Project, error) {
 		if err := pr.normalize(); err != nil {
 			return err
 		}
+		viewVars := pr.Variables
+		if vault := p.secretVault(); vault != nil {
+			diskVars, maskedVars, err := vault.SyncVariables(context.Background(), p.id, "project", pr.Variables)
+			if err != nil {
+				return err
+			}
+			pr.Variables = diskVars
+			viewVars = maskedVars
+		}
 		if pr.Version, err = writeYAML(filepath.Join(p.dir, projectFile), &pr); err != nil {
 			return err
 		}
+		pr.Variables = viewVars
 		out = &pr
 		return nil
 	})
@@ -253,6 +316,9 @@ func (s *Store) DeleteProject(id, version string) error {
 	}
 	if err := removeAllRenamed(p.dir); err != nil {
 		return err
+	}
+	if vault := p.secretVault(); vault != nil {
+		_ = vault.DeleteProject(context.Background(), p.id)
 	}
 	p.deleted = true
 	s.mu.Lock()

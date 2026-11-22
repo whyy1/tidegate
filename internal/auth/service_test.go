@@ -23,8 +23,8 @@ func TestMigrateIdempotentAndVersioned(t *testing.T) {
 	if err := db.QueryRow(`SELECT value FROM auth_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != "1" {
-		t.Fatalf("schema version = %q, want 1", v)
+	if v != "2" {
+		t.Fatalf("schema version = %q, want 2", v)
 	}
 	if _, err := db.Exec(`UPDATE auth_meta SET value = '99' WHERE key = 'schema_version'`); err != nil {
 		t.Fatal(err)
@@ -583,5 +583,110 @@ func TestResetPassword(t *testing.T) {
 	wantErr(t, err, ErrInvalidCredentials)
 	if _, err := login(s, testAdmin, nextPass, testAddr); err != nil {
 		t.Fatalf("login with reset password: %v", err)
+	}
+}
+
+func TestRolesUsersAndAPITokens(t *testing.T) {
+	ctx := context.Background()
+	s, clk, setup := newSetupService(t, nil)
+
+	// Last admin cannot be demoted or deleted.
+	wantErr(t, func() error { _, err := s.UpdateUserRole(ctx, setup.User.ID, RoleMember); return err }(), ErrLastAdmin)
+	wantErr(t, s.DeleteUser(ctx, 0, setup.User.ID), ErrLastAdmin)
+	wantErr(t, s.DeleteUser(ctx, setup.User.ID, setup.User.ID), ErrForbidden)
+
+	member, err := s.CreateUser(ctx, CreateUserRequest{
+		Username: "bob_member",
+		Password: "bob-strong-password-1",
+		Role:     RoleMember,
+	})
+	if err != nil {
+		t.Fatalf("CreateUser(member): %v", err)
+	}
+	viewer, err := s.CreateUser(ctx, CreateUserRequest{
+		Username: "carol_viewer",
+		Password: "carol-strong-password-1",
+		Role:     RoleViewer,
+	})
+	if err != nil {
+		t.Fatalf("CreateUser(viewer): %v", err)
+	}
+	// Duplicate username rejected.
+	if _, err := s.CreateUser(ctx, CreateUserRequest{Username: "BOB_MEMBER", Password: "bob-strong-password-1"}); !errors.Is(err, ErrUserExists) {
+		t.Fatalf("expected ErrUserExists, got %v", err)
+	}
+
+	users, err := s.ListUsers(ctx)
+	if err != nil || len(users) != 3 {
+		t.Fatalf("ListUsers = %+v, err=%v", users, err)
+	}
+
+	// Token role is capped to owner's role.
+	tokMeta, rawSecret, err := s.CreateAPIToken(ctx, CreateTokenRequest{
+		UserID: member.ID,
+		Name:   "ci-runner",
+		Role:   RoleAdmin, // capped to RoleMember
+		TTL:    2 * time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("CreateAPIToken: %v", err)
+	}
+	if !strings.HasPrefix(rawSecret, "tg_") || tokMeta.Role != RoleMember || tokMeta.Prefix != rawSecret[:11] {
+		t.Fatalf("unexpected token metadata=%+v secret=%q", tokMeta, rawSecret)
+	}
+
+	// Verify only hash is persisted, never plaintext.
+	var storedHash []byte
+	if err := s.db.QueryRow(`SELECT token_hash FROM auth_tokens WHERE id = ?`, tokMeta.ID).Scan(&storedHash); err != nil {
+		t.Fatal(err)
+	}
+	wantHash := sha256.Sum256([]byte(rawSecret))
+	if string(storedHash) != string(wantHash[:]) {
+		t.Fatal("stored token_hash does not match SHA-256 of raw token")
+	}
+
+	// Authenticating bearer works and respects EffectiveRole.
+	authUser, authTok, err := s.AuthenticateBearer(ctx, rawSecret)
+	if err != nil || authUser.ID != member.ID || authUser.Role != RoleMember || authTok.ID != tokMeta.ID {
+		t.Fatalf("AuthenticateBearer = (%+v, %+v, %v)", authUser, authTok, err)
+	}
+
+	// Demoting owner dynamically restricts token's EffectiveRole.
+	if _, err := s.UpdateUserRole(ctx, member.ID, RoleViewer); err != nil {
+		t.Fatal(err)
+	}
+	authUser, _, err = s.AuthenticateBearer(ctx, rawSecret)
+	if err != nil || authUser.Role != RoleViewer {
+		t.Fatalf("expected EffectiveRole downgraded to RoleViewer, got %+v err=%v", authUser, err)
+	}
+
+	// Expired token is deleted and rejected with ErrTokenExpired.
+	clk.Advance(3 * time.Hour)
+	_, _, err = s.AuthenticateBearer(ctx, rawSecret)
+	wantErr(t, err, ErrTokenExpired)
+
+	// Admin can delete viewer and member, and revoke tokens.
+	_, adminRaw, err := s.CreateAPIToken(ctx, CreateTokenRequest{UserID: setup.User.ID, Name: "admin-cli"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminTokList, err := s.ListAPITokens(ctx, setup.User.ID)
+	if err != nil || len(adminTokList) != 1 {
+		t.Fatalf("ListAPITokens = %+v, err=%v", adminTokList, err)
+	}
+	if err := s.RevokeAPIToken(ctx, viewer.ID, adminTokList[0].ID, false); !errors.Is(err, ErrTokenNotFound) {
+		t.Fatalf("non-owner revoke should fail with ErrTokenNotFound, got %v", err)
+	}
+	if err := s.RevokeAPIToken(ctx, setup.User.ID, adminTokList[0].ID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := s.AuthenticateBearer(ctx, adminRaw); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("revoked bearer token should be unauthenticated, got %v", err)
+	}
+	if err := s.DeleteUser(ctx, setup.User.ID, viewer.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.DeleteUser(ctx, setup.User.ID, member.ID); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -183,6 +183,20 @@ func (c *compiler) compileHTTP() {
 			h.DNSOverrides[host] = addr.String()
 		}
 	}
+	if len(o.AllowedTargets) > 0 {
+		h.AllowedTargets = make([]string, 0, len(o.AllowedTargets))
+		for _, pat := range o.AllowedTargets {
+			trimmed := strings.TrimSpace(pat)
+			if trimmed == "" {
+				continue
+			}
+			if _, err := ParseTargetRule(trimmed); err != nil {
+				c.fail("http.allowed_targets", "%v", err)
+				continue
+			}
+			h.AllowedTargets = append(h.AllowedTargets, trimmed)
+		}
+	}
 	if o.MaxRedirects != nil {
 		h.MaxRedirects = *o.MaxRedirects
 		if h.MaxRedirects < 0 {

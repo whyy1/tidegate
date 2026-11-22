@@ -38,6 +38,21 @@ var migrations = [][]string{
 		`CREATE INDEX IF NOT EXISTS auth_sessions_user_idx ON auth_sessions(user_id)`,
 		`CREATE INDEX IF NOT EXISTS auth_sessions_expires_idx ON auth_sessions(expires_at)`,
 	},
+	// Version 2: API access tokens for CLI and CI automation.
+	{
+		`CREATE TABLE IF NOT EXISTS auth_tokens (
+			id           TEXT    PRIMARY KEY,
+			user_id      INTEGER NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+			name         TEXT    NOT NULL,
+			token_prefix TEXT    NOT NULL,
+			token_hash   BLOB    NOT NULL UNIQUE,
+			role         TEXT    NOT NULL,
+			created_at   INTEGER NOT NULL,
+			last_used_at INTEGER,
+			expires_at   INTEGER
+		)`,
+		`CREATE INDEX IF NOT EXISTS auth_tokens_user_idx ON auth_tokens(user_id)`,
+	},
 }
 
 const schemaVersionKey = "schema_version"

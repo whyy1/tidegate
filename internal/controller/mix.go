@@ -59,9 +59,13 @@ func (c *Controller) resolveMixRun(projectID string, req StartRunRequest) (*stor
 	var files []store.ResolvedFile
 	seenFiles := map[string]bool{}
 	seenData := map[string]scenario.DataSource{}
+	secretNames := map[string]bool{}
 	branches := make([]scenario.WeightedBranch, 0, len(resolvedItems))
 
 	for idx, res := range resolvedItems {
+		for k := range res.SecretNames {
+			secretNames[k] = true
+		}
 		def := res.Definition
 		for _, rf := range res.Files {
 			if !seenFiles[rf.Name] {
@@ -112,10 +116,14 @@ func (c *Controller) resolveMixRun(projectID string, req StartRunRequest) (*stor
 	if files == nil {
 		files = []store.ResolvedFile{}
 	}
+	if len(secretNames) == 0 {
+		secretNames = nil
+	}
 	return &store.Resolved{
-		Definition: combined,
-		BaseDir:    resolvedItems[0].BaseDir,
-		Files:      files,
+		Definition:  combined,
+		BaseDir:     resolvedItems[0].BaseDir,
+		Files:       files,
+		SecretNames: secretNames,
 	}, runMeta, nil
 }
 

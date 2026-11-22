@@ -109,6 +109,7 @@ type HTTPConfig struct {
 	DNSOverrides   map[string]string
 	ProxyURL       *url.URL
 	ConnectBackoff time.Duration
+	AllowedTargets []string
 }
 
 // LoadMode is the load model.

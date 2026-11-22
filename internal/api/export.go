@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"tidegate/internal/exporter"
@@ -76,8 +77,34 @@ func (s *Server) handleExportProject(w http.ResponseWriter, r *http.Request) {
 		h.Set("Cache-Control", "no-store")
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write(data)
+	case "k6":
+		sid := strings.TrimSpace(r.URL.Query().Get("scenario_id"))
+		if sid == "" {
+			scens, lerr := s.store.ListScenarios(pid)
+			if lerr != nil {
+				writeError(w, lerr)
+				return
+			}
+			if len(scens) == 0 {
+				writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "项目中没有可导出为 k6 脚本的场景"))
+				return
+			}
+			sid = scens[0].ID
+		}
+		script, err := exporter.ExportScenarioK6(s.store, pid, sid, store.ResolveOptions{
+			EnvironmentID: r.URL.Query().Get("env_id"),
+		})
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		h.Set("Content-Type", "application/javascript; charset=utf-8")
+		h.Set("Content-Disposition", `attachment; filename="`+stem+`-`+sanitizeHeaderValue(sid)+`-k6.js"`)
+		h.Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(script)
 	default:
-		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "导出格式只支持 tidegate、openapi-json、openapi-yaml 或 postman"))
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "导出格式只支持 tidegate、openapi-json、openapi-yaml、postman 或 k6"))
 	}
 }
 
@@ -110,9 +137,56 @@ func (s *Server) handleRunExport(w http.ResponseWriter, r *http.Request) {
 		s.exportRunHTML(w, r, run, snaps)
 	case "har":
 		s.exportRunHAR(w, r, run)
+	case "jtl":
+		s.exportRunJTL(w, r, run, snaps)
 	default:
-		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "导出格式只支持 json、csv、html 或 har"))
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "导出格式只支持 json、csv、html、har 或 jtl"))
 	}
+}
+
+func (s *Server) handleExportScenario(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	sid := r.PathValue("id")
+	format := r.URL.Query().Get("format")
+	if format == "" {
+		format = "k6"
+	}
+	if format != "k6" {
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "场景导出格式只支持 k6"))
+		return
+	}
+	script, err := exporter.ExportScenarioK6(s.store, pid, sid, store.ResolveOptions{
+		EnvironmentID: r.URL.Query().Get("env_id"),
+	})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "application/javascript; charset=utf-8")
+	h.Set("Content-Disposition", `attachment; filename="tidegate-scenario-`+sanitizeHeaderValue(sid)+`-k6.js"`)
+	h.Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(script)
+}
+
+func (s *Server) exportRunJTL(w http.ResponseWriter, r *http.Request, run *store.Run, snaps []store.SnapshotRecord) {
+	samples, err := s.results.Samples(r.Context(), run.ID, store.SampleQuery{Limit: 1000})
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	var buf bytes.Buffer
+	if err := exporter.ExportRunJTL(run, snaps, samples, &buf); err != nil {
+		writeError(w, err)
+		return
+	}
+	h := w.Header()
+	h.Set("Content-Type", "text/csv; charset=utf-8")
+	h.Set("Content-Disposition", `attachment; filename="tidegate-run-`+sanitizeHeaderValue(run.ID)+`.jtl"`)
+	h.Set("Cache-Control", "no-store")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(buf.Bytes())
 }
 
 func (s *Server) exportRunHAR(w http.ResponseWriter, r *http.Request, run *store.Run) {

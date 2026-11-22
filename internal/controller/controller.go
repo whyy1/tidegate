@@ -143,6 +143,7 @@ type StartRunRequest struct {
 	Variables     map[string]scenario.Scalar `json:"variables,omitempty"`
 	Load          *scenario.Load             `json:"load,omitempty"`
 	HTTP          *scenario.HTTPOptions      `json:"http,omitempty"`
+	ActorRole     string                     `json:"-"`
 }
 
 // New starts the cluster listener, cleans up interrupted runs, optionally starts
@@ -468,11 +469,16 @@ func (c *Controller) DebugAPI(ctx context.Context, projectID string, req DebugAP
 	if err != nil {
 		return nil, userErr(ErrInvalidInput, err.Error(), err)
 	}
+	targetCheck, err := c.enforceDebugSecurity(ctx, plan)
+	if err != nil {
+		return nil, err
+	}
 
 	runRes, err := engine.RunDebug(ctx, plan, engine.DebugOptions{
 		Client:       c.clientKind,
 		MaxBodyBytes: req.MaxBodyBytes,
 		SkipThink:    true,
+		TargetCheck:  targetCheck,
 	})
 	if err != nil {
 		return nil, err
@@ -554,6 +560,10 @@ func (c *Controller) DebugScenario(ctx context.Context, projectID string, req De
 	if err != nil {
 		return nil, userErr(ErrInvalidInput, err.Error(), err)
 	}
+	targetCheck, err := c.enforceDebugSecurity(ctx, plan)
+	if err != nil {
+		return nil, err
+	}
 
 	skipThink := req.SkipThink == nil || *req.SkipThink
 	return engine.RunDebug(ctx, plan, engine.DebugOptions{
@@ -561,7 +571,26 @@ func (c *Controller) DebugScenario(ctx context.Context, projectID string, req De
 		MaxBodyBytes: req.MaxBodyBytes,
 		SkipThink:    skipThink,
 		StopOnError:  req.StopOnError,
+		TargetCheck:  targetCheck,
 	})
+}
+
+func (c *Controller) enforceDebugSecurity(ctx context.Context, plan *scenario.Plan) (func(host string, ip net.IP) error, error) {
+	pol, err := c.GetSecurityPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidatePlanTargets(ctx, plan, pol); err != nil {
+		return nil, err
+	}
+	if !pol.AllowlistEnabled {
+		return nil, nil
+	}
+	check, err := CompileTargetMatcher(pol.AllowedTargets)
+	if err != nil {
+		return nil, userErr(ErrInvalidInput, err.Error(), err)
+	}
+	return check, nil
 }
 
 func (c *Controller) resolveRunDefinition(projectID string, req StartRunRequest) (*store.Resolved, store.Run, error) {
@@ -632,19 +661,40 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 	if err != nil {
 		return nil, err
 	}
-	nodes := c.srv.Nodes()
-	if len(nodes) == 0 {
-		return nil, userErr(ErrNoAgents, "当前没有可用的发压节点，请等待本机或远程节点接入后重试", nil)
+
+	// Validate compilation, security allowlist, and role scale limits before admitting the run.
+	plan, err := scenario.Compile(cloneDefinition(resolved.Definition), resolved.CompileOptions())
+	if err != nil {
+		return nil, userErr(ErrInvalidInput, err.Error(), err)
+	}
+	pol, err := c.GetSecurityPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidatePlanTargets(ctx, plan, pol); err != nil {
+		return nil, err
+	}
+	if err := ValidateRoleScale(plan, req.ActorRole, pol); err != nil {
+		return nil, err
 	}
 
-	scenJSON, err := json.Marshal(resolved.Definition)
+	execDef := cloneDefinition(resolved.Definition)
+	if pol.AllowlistEnabled {
+		execDef.HTTP.AllowedTargets = append([]string(nil), pol.AllowedTargets...)
+	}
+	scenJSON, err := json.Marshal(execDef)
 	if err != nil {
 		return nil, fmt.Errorf("序列化场景失败：%w", err)
 	}
+	scrubbedDef := scrubDefinitionSecrets(resolved.Definition, resolved.SecretNames)
+	scrubbedJSON, err := json.Marshal(scrubbedDef)
+	if err != nil {
+		return nil, fmt.Errorf("序列化脱敏场景失败：%w", err)
+	}
 
-	// Validate compilation before admitting the run or creating database records.
-	if _, err := scenario.Compile(cloneDefinition(resolved.Definition), resolved.CompileOptions()); err != nil {
-		return nil, userErr(ErrInvalidInput, err.Error(), err)
+	nodes := c.srv.Nodes()
+	if len(nodes) == 0 {
+		return nil, userErr(ErrNoAgents, "当前没有可用的发压节点，请等待本机或远程节点接入后重试", nil)
 	}
 
 	dataFiles := make([]cluster.DataFile, 0, len(resolved.Files))
@@ -665,7 +715,7 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 	c.mu.Unlock()
 
 	runMeta.ScenarioName = resolved.Definition.Name
-	runMeta.Scenario = scenJSON
+	runMeta.Scenario = scrubbedJSON
 	runMeta.Status = store.RunPreparing
 	runMeta.CreatedAt = time.Now()
 	if err := c.results.CreateRun(ctx, &runMeta); err != nil {
@@ -673,7 +723,7 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 	}
 
 	egress := inspectTargetEgress(ctx, resolved.Definition)
-	ar := newActiveRun(c, runMeta.ID, egress, resolved.Definition.Load.Thresholds)
+	ar := newActiveRun(c, runMeta.ID, plan.Load.Mode, egress, resolved.Definition.Load.Thresholds)
 
 	c.mu.Lock()
 	if c.active != nil {
@@ -813,6 +863,12 @@ func (c *Controller) StopRun(ctx context.Context, runID string, abort bool) (*st
 // SetRunTarget dynamically adjusts the cluster-wide load target (VUs or RPS)
 // of an active run.
 func (c *Controller) SetRunTarget(ctx context.Context, runID string, target float64) error {
+	return c.SetRunTargetWithRole(ctx, runID, target, "")
+}
+
+// SetRunTargetWithRole dynamically adjusts the load target while enforcing role
+// limits defined in SecurityPolicy.
+func (c *Controller) SetRunTargetWithRole(ctx context.Context, runID string, target float64, actorRole string) error {
 	if target <= 0 {
 		return userErr(ErrInvalidInput, "目标负载必须大于 0", nil)
 	}
@@ -825,6 +881,27 @@ func (c *Controller) SetRunTarget(ctx context.Context, runID string, target floa
 	if ar == nil {
 		return userErr(ErrRunNotActive, "当前没有正在运行的指定压测任务", nil)
 	}
+
+	role := strings.ToLower(strings.TrimSpace(actorRole))
+	if role != "" && role != "admin" {
+		if role == "viewer" {
+			return userErr(ErrScaleLimitExceeded, "只读角色无权调整压测负载", nil)
+		}
+		pol, err := c.GetSecurityPolicy(ctx)
+		if err != nil {
+			return err
+		}
+		if ar.loadMode == scenario.LoadRate {
+			if pol.MemberMaxRPS > 0 && target > pol.MemberMaxRPS {
+				return userErr(ErrScaleLimitExceeded, fmt.Sprintf("目标速率 %.0f RPS 超出当前角色上限 %.0f RPS", target, pol.MemberMaxRPS), nil)
+			}
+		} else {
+			if pol.MemberMaxVUs > 0 && int(target) > pol.MemberMaxVUs {
+				return userErr(ErrScaleLimitExceeded, fmt.Sprintf("并发虚拟用户数 %.0f 超出当前角色上限 %d", target, pol.MemberMaxVUs), nil)
+			}
+		}
+	}
+
 	for _, id := range ar.nodeIDs() {
 		if node := c.srv.Node(id); node != nil {
 			if err := node.SetTarget(runID, target); err != nil {
@@ -955,6 +1032,7 @@ type seqBucket struct {
 type activeRun struct {
 	ctrl       *Controller
 	id         string
+	loadMode   scenario.LoadMode
 	alerts     *alertEvaluator
 	thresholds []scenario.Threshold
 
@@ -972,10 +1050,11 @@ type activeRun struct {
 	finalized         bool
 }
 
-func newActiveRun(ctrl *Controller, id string, egress targetEgress, thresholds []scenario.Threshold) *activeRun {
+func newActiveRun(ctrl *Controller, id string, loadMode scenario.LoadMode, egress targetEgress, thresholds []scenario.Threshold) *activeRun {
 	return &activeRun{
 		ctrl:       ctrl,
 		id:         id,
+		loadMode:   loadMode,
 		alerts:     newAlertEvaluator(id, ctrl.results, ctrl.hub, egress),
 		thresholds: append([]scenario.Threshold(nil), thresholds...),
 		stopCh:     make(chan struct{}),

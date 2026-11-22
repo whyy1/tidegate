@@ -38,6 +38,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	out := fs.String("out", "", "写出 JSON 结果")
 	csvPath := fs.String("csv", "", "写出每秒 CSV")
 	htmlPath := fs.String("html", "", "写出独立 HTML 报告")
+	jtlPath := fs.String("jtl", "", "写出 JMeter JTL 日志文件")
 	quiet := fs.Bool("quiet", false, "不输出每秒摘要")
 	client := fs.String("client", string(engine.ClientFast), "HTTP 客户端：fast 或 std")
 	startProfiles := profileFlags(fs)
@@ -47,7 +48,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		return flagError(err)
 	}
 	if len(pos) != 1 {
-		fmt.Fprintln(stderr, "用法：tidegate run <场景文件> [--out result.json] [--csv result.csv] [--html report.html] [--quiet]")
+		fmt.Fprintln(stderr, "用法：tidegate run <场景文件> [--out result.json] [--csv result.csv] [--html report.html] [--jtl result.jtl] [--quiet]")
 		return 2
 	}
 	path := pos[0]
@@ -96,6 +97,15 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 			return 1
 		}
 		defer htmlF.Close()
+	}
+	var jtlF *os.File
+	if *jtlPath != "" {
+		jtlF, err = os.Create(*jtlPath)
+		if err != nil {
+			fmt.Fprintf(stderr, "无法创建 JTL 文件：%v\n", err)
+			return 1
+		}
+		defer jtlF.Close()
 	}
 	stopProfiles, err := startProfiles()
 	if err != nil {
@@ -154,7 +164,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		if outF != nil {
 			result.Snapshots = append(result.Snapshots, view)
 		}
-		if htmlF != nil {
+		if htmlF != nil || jtlF != nil {
 			snapCopy := *view
 			snapCopy.Samples = nil
 			if b, err := json.Marshal(&snapCopy); err == nil {
@@ -225,7 +235,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 		}
 		fmt.Fprintf(w, "已写出结果：%s\n", *out)
 	}
-	if htmlF != nil {
+	if htmlF != nil || jtlF != nil {
 		sumJSON, _ := json.Marshal(summary.View())
 		scenJSON, _ := json.Marshal(def)
 		runStatus := store.RunFinished
@@ -245,11 +255,20 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 			Error:        runErr,
 			Summary:      sumJSON,
 		}
-		if err := exporter.ExportRunHTML(runMeta, htmlSnaps, nil, htmlSamples, htmlF); err != nil {
-			fmt.Fprintf(stderr, "写入 HTML 报告失败：%v\n", err)
-			return 1
+		if htmlF != nil {
+			if err := exporter.ExportRunHTML(runMeta, htmlSnaps, nil, htmlSamples, htmlF); err != nil {
+				fmt.Fprintf(stderr, "写入 HTML 报告失败：%v\n", err)
+				return 1
+			}
+			fmt.Fprintf(w, "已写出 HTML 报告：%s\n", *htmlPath)
 		}
-		fmt.Fprintf(w, "已写出 HTML 报告：%s\n", *htmlPath)
+		if jtlF != nil {
+			if err := exporter.ExportRunJTL(runMeta, htmlSnaps, htmlSamples, jtlF); err != nil {
+				fmt.Fprintf(stderr, "写入 JTL 日志失败：%v\n", err)
+				return 1
+			}
+			fmt.Fprintf(w, "已写出 JTL 日志：%s\n", *jtlPath)
+		}
 	}
 	if *memProfile != "" {
 		f, err := os.Create(*memProfile)

@@ -77,11 +77,17 @@ type ctxKey struct{}
 type principal struct {
 	user    *User
 	session *Session
+	token   *APIToken
 }
 
 // WithSession returns a context carrying the authenticated user and session.
 func WithSession(ctx context.Context, u *User, s *Session) context.Context {
 	return context.WithValue(ctx, ctxKey{}, principal{user: u, session: s})
+}
+
+// WithAPIToken returns a context carrying the user authenticated by an API token.
+func WithAPIToken(ctx context.Context, u *User, t *APIToken) context.Context {
+	return context.WithValue(ctx, ctxKey{}, principal{user: u, token: t})
 }
 
 // UserFromContext returns the user stored by RequireSession.
@@ -96,13 +102,42 @@ func SessionFromContext(ctx context.Context) (*Session, bool) {
 	return p.session, ok && p.session != nil
 }
 
-// RequireSession rejects requests without a valid session cookie and stores
-// the user and session in the request context. A stale cookie is cleared.
+// TokenFromContext returns the API token stored by RequireSession when
+// authenticated via Bearer token.
+func TokenFromContext(ctx context.Context) (*APIToken, bool) {
+	p, ok := ctx.Value(ctxKey{}).(principal)
+	return p.token, ok && p.token != nil
+}
+
+// BearerToken extracts the token from an "Authorization: Bearer <token>" header.
+func BearerToken(r *http.Request) string {
+	authz := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(authz) <= 7 || !strings.EqualFold(authz[:7], "Bearer ") {
+		return ""
+	}
+	return strings.TrimSpace(authz[7:])
+}
+
+// RequireSession rejects requests without a valid session cookie or Bearer API
+// token and stores the authenticated principal in the request context. A stale
+// cookie is cleared.
 func (g *Guard) RequireSession(next http.Handler) http.Handler {
 	if g.svc == nil {
 		panic("auth: RequireSession needs a Guard created with a Service")
 	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if bt := BearerToken(r); bt != "" {
+			u, tok, err := g.svc.AuthenticateBearer(r.Context(), bt)
+			if err != nil {
+				if _, ok := AsError(err); !ok && !errors.Is(err, context.Canceled) {
+					g.svc.log.Error("auth: authenticate bearer request", "err", err)
+				}
+				g.onError(w, r, err)
+				return
+			}
+			next.ServeHTTP(w, r.WithContext(WithAPIToken(r.Context(), u, tok)))
+			return
+		}
 		token := SessionToken(r)
 		if token == "" {
 			g.onError(w, r, ErrUnauthenticated)
@@ -133,11 +168,14 @@ func isSafeMethod(m string) bool {
 	return false
 }
 
-// CheckCSRF validates a state-changing request: RequestHeader must be "1"
-// and the request must come from a trusted origin (see CheckOrigin). Safe
-// methods always pass.
+// CheckCSRF validates a state-changing request: Bearer-authenticated CLI/CI
+// requests bypass browser CSRF checks, whereas cookie-based requests require
+// RequestHeader=="1" and a trusted origin.
 func (g *Guard) CheckCSRF(r *http.Request) error {
 	if isSafeMethod(r.Method) {
+		return nil
+	}
+	if BearerToken(r) != "" {
 		return nil
 	}
 	if r.Header.Get(RequestHeader) != "1" {

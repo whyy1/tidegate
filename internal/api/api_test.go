@@ -17,6 +17,7 @@ import (
 	"net/http/cookiejar"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -57,6 +58,11 @@ func newAPITestEnv(t *testing.T, allowNonLoopback bool) *apiTestEnv {
 		t.Fatal(err)
 	}
 	rdb := store.NewResultDB(db)
+	box, err := store.LoadOrCreateMasterKey(filepath.Join(dir, "master.key"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st.SetSecretVault(store.NewSecretVault(rdb, box))
 	authSvc, err := auth.New(db, auth.Options{
 		Argon2: auth.Argon2Params{Memory: 64, Time: 1, Threads: 1, SaltLen: 8, KeyLen: 16},
 	})
@@ -1265,4 +1271,336 @@ func mustParseURL(t *testing.T, raw string) *url.URL {
 		t.Fatal(err)
 	}
 	return u
+}
+
+func doBearerReq(t *testing.T, token, method, rawURL string, body any) *http.Response {
+	t.Helper()
+	var r io.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		r = bytes.NewReader(b)
+	}
+	req, err := http.NewRequest(method, rawURL, r)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return resp
+}
+
+func TestRBACTokensSecurityPolicyAuditSecretsJTLAndK6(t *testing.T) {
+	tsrv, err := testserver.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsrv.Start()
+	defer tsrv.Close()
+
+	env := newAPITestEnv(t, false)
+	adminCl := newCookieClient(t)
+
+	// 1. Setup first admin user.
+	resp := doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/setup", map[string]string{
+		"code":     env.setupCod,
+		"username": "rootadmin",
+		"password": "root-strong-password-1",
+	}, true)
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("setup = %d: %s", resp.StatusCode, b)
+	}
+	var setupOut struct {
+		User struct {
+			ID   int64  `json:"id"`
+			Role string `json:"role"`
+		} `json:"user"`
+	}
+	decodeBody(t, resp, &setupOut)
+
+	// Last admin cannot be demoted.
+	resp = doJSONReq(t, adminCl, "PATCH", env.baseURL+"/api/v1/users/1", map[string]string{"role": "member"}, true)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("expected 409 on demoting last admin, got %d", resp.StatusCode)
+	}
+
+	// 2. Admin creates member and viewer accounts.
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/users", map[string]string{
+		"username": "dev_member",
+		"password": "member-strong-password-1",
+		"role":     "member",
+	}, true)
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("create member = %d: %s", resp.StatusCode, b)
+	}
+	resp.Body.Close()
+
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/users", map[string]string{
+		"username": "ops_viewer",
+		"password": "viewer-strong-password-1",
+		"role":     "viewer",
+	}, true)
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("create viewer = %d: %s", resp.StatusCode, b)
+	}
+	resp.Body.Close()
+
+	// 3. Wait for local agent and configure SecurityPolicy (admin-only).
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		agents, _ := env.ctrl.Agents(context.Background())
+		if len(agents) > 0 {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	resp = doJSONReq(t, adminCl, "PUT", env.baseURL+"/api/v1/settings/security", map[string]any{
+		"allowlist_enabled": true,
+		"allowed_targets":   []string{"127.0.0.1/32"},
+		"member_max_vus":    2,
+		"member_max_rps":    50,
+	}, true)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("PUT settings/security = %d: %s", resp.StatusCode, b)
+	}
+	resp.Body.Close()
+
+	// 4. Member logs in and mints an API Bearer token without CSRF requirements.
+	memberCl := newCookieClient(t)
+	resp = doJSONReq(t, memberCl, "POST", env.baseURL+"/api/v1/auth/login", map[string]string{
+		"username": "dev_member",
+		"password": "member-strong-password-1",
+	}, true)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("member login = %d: %s", resp.StatusCode, b)
+	}
+	resp.Body.Close()
+
+	// Member cannot create users or view audit logs.
+	resp = doJSONReq(t, memberCl, "GET", env.baseURL+"/api/v1/audit-logs", nil, false)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for member GET audit-logs, got %d", resp.StatusCode)
+	}
+
+	resp = doJSONReq(t, memberCl, "POST", env.baseURL+"/api/v1/auth/tokens", map[string]any{
+		"name":     "ci-pipeline",
+		"ttl_days": 7,
+	}, true)
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("create token = %d: %s", resp.StatusCode, b)
+	}
+	var tokOut struct {
+		Token     auth.APIToken `json:"token"`
+		Plaintext string        `json:"plaintext"`
+	}
+	decodeBody(t, resp, &tokOut)
+	if !strings.HasPrefix(tokOut.Plaintext, "tg_") {
+		t.Fatalf("unexpected plaintext token: %q", tokOut.Plaintext)
+	}
+
+	// Using Bearer token WITHOUT cookies or X-Tidegate-Request creates a project with encrypted secrets.
+	resp = doBearerReq(t, tokOut.Plaintext, "POST", env.baseURL+"/api/v1/projects", map[string]any{
+		"name": "SecureProject",
+		"variables": store.KeyValueList{
+			{Name: "vault_key", Value: "top-secret-vault-value", Secret: true},
+		},
+	})
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("bearer POST projects = %d: %s", resp.StatusCode, b)
+	}
+	var createdPr store.Project
+	decodeBody(t, resp, &createdPr)
+	if createdPr.Variables[0].Value != store.SecretMask {
+		t.Fatalf("expected SecretMask in API response, got %q", createdPr.Variables[0].Value)
+	}
+	yamlBytes, err := os.ReadFile(filepath.Join(env.st.Root(), createdPr.ID, "project.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(yamlBytes), "top-secret-vault-value") {
+		t.Fatalf("project.yaml on disk leaked encrypted secret: %s", yamlBytes)
+	}
+
+	// Create API + Scenario via Bearer.
+	resp = doBearerReq(t, tokOut.Plaintext, "POST", env.baseURL+"/api/v1/projects/"+createdPr.ID+"/apis", map[string]any{
+		"name": "PingSecret",
+		"request": store.APIRequest{
+			Method:  "GET",
+			URL:     tsrv.URL() + "/ping",
+			Headers: store.KeyValueList{{Name: "X-Secret", Value: "{{vault_key}}"}},
+		},
+	})
+	if resp.StatusCode != 201 {
+		t.Fatalf("bearer create API = %d", resp.StatusCode)
+	}
+	var createdAPI store.API
+	decodeBody(t, resp, &createdAPI)
+
+	resp = doBearerReq(t, tokOut.Plaintext, "POST", env.baseURL+"/api/v1/projects/"+createdPr.ID+"/scenarios", map[string]any{
+		"name":  "MemberScenario",
+		"steps": []store.ScenarioStep{{ID: "s1", APIID: createdAPI.ID}},
+		"load": scenario.Load{
+			Mode:        "vus",
+			MaxRequests: 2,
+			Stages:      []scenario.Stage{{Duration: scenario.Duration(2 * time.Second), Target: 1}},
+		},
+	})
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("bearer create scenario = %d: %s", resp.StatusCode, b)
+	}
+	var createdScen store.Scenario
+	decodeBody(t, resp, &createdScen)
+
+	// Export k6 script references __ENV without leaking plaintext secret.
+	resp = doBearerReq(t, tokOut.Plaintext, "GET", env.baseURL+"/api/v1/projects/"+createdPr.ID+"/scenarios/"+createdScen.ID+"/export?format=k6", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("export k6 = %d", resp.StatusCode)
+	}
+	k6Body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if strings.Contains(string(k6Body), "top-secret-vault-value") || !strings.Contains(string(k6Body), "__ENV.VAULT_KEY") {
+		t.Fatalf("unexpected k6 export body:\n%s", k6Body)
+	}
+
+	// Disallowed target blocked with 403 target_not_allowed.
+	resp = doBearerReq(t, tokOut.Plaintext, "POST", env.baseURL+"/api/v1/projects/"+createdPr.ID+"/debug", map[string]any{
+		"api": &store.API{
+			Name:    "Disallowed",
+			Request: store.APIRequest{Method: "GET", URL: "http://evil.invalid/test"},
+		},
+	})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for disallowed debug target, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Scale exceeding MemberMaxVUs=2 blocked with 403 scale_limit_exceeded.
+	resp = doBearerReq(t, tokOut.Plaintext, "POST", env.baseURL+"/api/v1/projects/"+createdPr.ID+"/runs", map[string]any{
+		"scenario_id": createdScen.ID,
+		"load": scenario.Load{
+			Mode:   "vus",
+			Stages: []scenario.Stage{{Duration: scenario.Duration(time.Second), Target: 5}},
+		},
+	})
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 for member scale limit exceeded, got %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	// Allowed run within member limits succeeds and exports 17-col JTL.
+	resp = doBearerReq(t, tokOut.Plaintext, "POST", env.baseURL+"/api/v1/projects/"+createdPr.ID+"/runs", map[string]any{
+		"scenario_id": createdScen.ID,
+	})
+	if resp.StatusCode != 201 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("bearer StartRun = %d: %s", resp.StatusCode, b)
+	}
+	var startedRun store.Run
+	decodeBody(t, resp, &startedRun)
+
+	runDeadline := time.Now().Add(8 * time.Second)
+	for time.Now().Before(runDeadline) {
+		r, _ := env.rdb.GetRun(context.Background(), startedRun.ID)
+		if r != nil && !r.Status.Active() {
+			break
+		}
+		time.Sleep(40 * time.Millisecond)
+	}
+
+	resp = doBearerReq(t, tokOut.Plaintext, "GET", env.baseURL+"/api/v1/runs/"+startedRun.ID+"/export?format=jtl", nil)
+	if resp.StatusCode != 200 {
+		t.Fatalf("export JTL = %d", resp.StatusCode)
+	}
+	jtlRows, err := csv.NewReader(resp.Body).ReadAll()
+	resp.Body.Close()
+	if err != nil || len(jtlRows) < 2 || len(jtlRows[0]) != 17 || jtlRows[0][0] != "timeStamp" {
+		t.Fatalf("unexpected JTL export (%d rows): %+v err=%v", len(jtlRows), jtlRows, err)
+	}
+
+	// 5. Viewer RBAC checks + forced secret redaction in to-curl.
+	viewerCl := newCookieClient(t)
+	resp = doJSONReq(t, viewerCl, "POST", env.baseURL+"/api/v1/auth/login", map[string]string{
+		"username": "ops_viewer",
+		"password": "viewer-strong-password-1",
+	}, true)
+	if resp.StatusCode != 200 {
+		t.Fatalf("viewer login = %d", resp.StatusCode)
+	}
+	resp.Body.Close()
+
+	for _, tc := range []struct{ method, path string }{
+		{"POST", "/api/v1/projects"},
+		{"POST", "/api/v1/projects/" + createdPr.ID + "/debug"},
+		{"POST", "/api/v1/projects/" + createdPr.ID + "/runs"},
+		{"GET", "/api/v1/audit-logs"},
+	} {
+		r := doJSONReq(t, viewerCl, tc.method, env.baseURL+tc.path, map[string]any{"name": "x"}, tc.method != "GET")
+		r.Body.Close()
+		if r.StatusCode != http.StatusForbidden {
+			t.Fatalf("expected viewer 403 on %s %s, got %d", tc.method, tc.path, r.StatusCode)
+		}
+	}
+
+	// Viewer requesting to-curl with redact_secrets=false must still have secrets redacted.
+	resp = doJSONReq(t, viewerCl, "POST", env.baseURL+"/api/v1/projects/"+createdPr.ID+"/apis/to-curl", map[string]any{
+		"api_id":         createdAPI.ID,
+		"mode":           "expanded",
+		"shell":          "bash",
+		"redact_secrets": false,
+	}, true)
+	if resp.StatusCode != 200 {
+		t.Fatalf("viewer to-curl = %d", resp.StatusCode)
+	}
+	var curlOut struct {
+		Curl string `json:"curl"`
+	}
+	decodeBody(t, resp, &curlOut)
+	if strings.Contains(curlOut.Curl, "top-secret-vault-value") {
+		t.Fatalf("viewer to-curl leaked secret plaintext: %s", curlOut.Curl)
+	}
+
+	// 6. Admin verifies audit log trail.
+	resp = doJSONReq(t, adminCl, "GET", env.baseURL+"/api/v1/audit-logs?limit=50", nil, false)
+	if resp.StatusCode != 200 {
+		t.Fatalf("GET audit-logs = %d", resp.StatusCode)
+	}
+	var audits []store.AuditEntry
+	decodeBody(t, resp, &audits)
+	seenAction := map[string]bool{}
+	for _, a := range audits {
+		seenAction[a.Action] = true
+	}
+	for _, want := range []string{"user.setup", "user.create", "security.update", "token.create", "project.create", "run.start"} {
+		if !seenAction[want] {
+			t.Fatalf("expected audit action %q in %+v", want, seenAction)
+		}
+	}
 }

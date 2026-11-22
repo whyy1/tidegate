@@ -35,6 +35,13 @@ func (c *Controller) EstimateRun(ctx context.Context, projectID string, req Star
 	if err != nil {
 		return nil, userErr(ErrInvalidInput, err.Error(), err)
 	}
+	pol, err := c.GetSecurityPolicy(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if err := ValidatePlanTargets(ctx, plan, pol); err != nil {
+		return nil, err
+	}
 
 	expectedReqs, leafSteps := estimateNodesProfile(plan.Steps)
 	stepCount := len(leafSteps)

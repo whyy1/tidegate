@@ -219,19 +219,21 @@ type dialTiming struct {
 
 // dialer opens counted connections, optionally with TLS on top.
 type dialer struct {
-	eng        *Engine
-	nd         net.Dialer
-	dns        *dnsCache
-	tlsBase    *tls.Config
-	tlsTimeout time.Duration
-	tlsByHost  sync.Map // host name -> *tls.Config
+	eng         *Engine
+	nd          net.Dialer
+	dns         *dnsCache
+	targetCheck func(host string, ip net.IP) error
+	tlsBase     *tls.Config
+	tlsTimeout  time.Duration
+	tlsByHost   sync.Map // host name -> *tls.Config
 }
 
-func newDialer(e *Engine, cfg *scenario.HTTPConfig) *dialer {
+func newDialer(e *Engine, cfg *scenario.HTTPConfig, targetCheck func(host string, ip net.IP) error) *dialer {
 	return &dialer{
-		eng: e,
-		nd:  net.Dialer{Timeout: cfg.ConnectTimeout, KeepAlive: 30 * time.Second},
-		dns: newDNSCache(cfg.DNSRefresh, cfg.ConnectTimeout, cfg.DNSOverrides),
+		eng:         e,
+		nd:          net.Dialer{Timeout: cfg.ConnectTimeout, KeepAlive: 30 * time.Second},
+		dns:         newDNSCache(cfg.DNSRefresh, cfg.ConnectTimeout, cfg.DNSOverrides),
+		targetCheck: targetCheck,
 		tlsBase: &tls.Config{
 			InsecureSkipVerify: cfg.InsecureSkipVerify,
 			NextProtos:         []string{"http/1.1"}, // never negotiate HTTP/2
@@ -273,6 +275,12 @@ func (d *dialer) dialTCP(ctx context.Context, o *scenario.Origin, t *dialTiming)
 			addr = e.addrs[(start+i)%n]
 		} else {
 			addr = e.alt[i-n]
+		}
+		if d.targetCheck != nil {
+			hostStr, _, _ := net.SplitHostPort(addr)
+			if checkErr := d.targetCheck(o.HostName, net.ParseIP(hostStr)); checkErr != nil {
+				return nil, &hopError{phase: phaseDial, err: checkErr}
+			}
 		}
 		c, err = d.nd.DialContext(ctx, "tcp", addr)
 		if err == nil || ctx.Err() != nil || isTimeout(err) {
