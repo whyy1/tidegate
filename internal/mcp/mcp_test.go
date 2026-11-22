@@ -23,6 +23,8 @@ import (
 
 type mcpTestEnv struct {
 	srv         *httptest.Server
+	authSvc     *auth.Service
+	adminUserID int64
 	ctrl        *controller.Controller
 	st          *store.Store
 	rdb         *store.ResultDB
@@ -193,6 +195,8 @@ func setupMCPTestEnv(t *testing.T) *mcpTestEnv {
 
 	return &mcpTestEnv{
 		srv:         hs,
+		authSvc:     authSvc,
+		adminUserID: setupRes.User.ID,
 		ctrl:        ctrl,
 		st:          st,
 		rdb:         rdb,
@@ -442,5 +446,160 @@ func TestRunStdioProxyRoundTrip(t *testing.T) {
 	}
 	if !strings.Contains(lines[1], `"MCPDemo"`) {
 		t.Fatalf("expected list_projects output to contain MCPDemo, got: %s", lines[1])
+	}
+}
+
+func TestMCPResourcesPromptsAndScopeEnforcement(t *testing.T) {
+	env := setupMCPTestEnv(t)
+	ctx := context.Background()
+
+	// 1. initialize advertises resources & prompts capabilities.
+	st, initOut := callMCPRPC(t, env.srv.URL, env.viewerToken, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      101,
+		"method":  "initialize",
+		"params":  map[string]any{"protocolVersion": "2025-03-26"},
+	})
+	if st != 200 {
+		t.Fatalf("initialize = %d: %+v", st, initOut)
+	}
+	caps := initOut["result"].(map[string]any)["capabilities"].(map[string]any)
+	if caps["resources"] == nil || caps["prompts"] == nil {
+		t.Fatalf("expected capabilities.resources and capabilities.prompts, got %+v", caps)
+	}
+
+	// 2. resources/list & resources/templates/list.
+	st, rList := callMCPRPC(t, env.srv.URL, env.viewerToken, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      102,
+		"method":  "resources/list",
+	})
+	if st != 200 {
+		t.Fatalf("resources/list = %d: %+v", st, rList)
+	}
+	resources := rList["result"].(map[string]any)["resources"].([]any)
+	if len(resources) < 2 {
+		t.Fatalf("expected >= 2 resources, got %+v", resources)
+	}
+
+	st, tList := callMCPRPC(t, env.srv.URL, env.viewerToken, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      103,
+		"method":  "resources/templates/list",
+	})
+	if st != 200 {
+		t.Fatalf("resources/templates/list = %d: %+v", st, tList)
+	}
+	templates := tList["result"].(map[string]any)["resourceTemplates"].([]any)
+	if len(templates) != 3 {
+		t.Fatalf("expected 3 resourceTemplates, got %d", len(templates))
+	}
+
+	// 3. resources/read never exposes Vault plaintext secret.
+	for _, uri := range []string{
+		"tidegate://projects",
+		"tidegate://projects/" + env.project.ID + "/workspace",
+		"tidegate://projects/" + env.project.ID + "/environments",
+	} {
+		st, rr := callMCPRPC(t, env.srv.URL, env.viewerToken, map[string]any{
+			"jsonrpc": "2.0",
+			"id":      104,
+			"method":  "resources/read",
+			"params":  map[string]any{"uri": uri},
+		})
+		if st != 200 || rr["error"] != nil {
+			t.Fatalf("resources/read(%s) = %d %+v", uri, st, rr)
+		}
+		raw, _ := json.Marshal(rr)
+		if strings.Contains(string(raw), "vault-secret-plaintext-777") {
+			t.Fatalf("resources/read(%s) leaked Vault secret: %s", uri, raw)
+		}
+	}
+
+	// 4. prompts/list & prompts/get.
+	st, pList := callMCPRPC(t, env.srv.URL, env.viewerToken, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      105,
+		"method":  "prompts/list",
+	})
+	if st != 200 {
+		t.Fatalf("prompts/list = %d", st)
+	}
+	prompts := pList["result"].(map[string]any)["prompts"].([]any)
+	if len(prompts) != 4 {
+		t.Fatalf("expected 4 prompts, got %d", len(prompts))
+	}
+
+	st, pGet := callMCPRPC(t, env.srv.URL, env.viewerToken, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      106,
+		"method":  "prompts/get",
+		"params": map[string]any{
+			"name": "diagnose_api_failure",
+			"arguments": map[string]any{
+				"project_id": env.project.ID,
+				"api_id":     env.apiAllowed.ID,
+			},
+		},
+	})
+	if st != 200 || pGet["error"] != nil {
+		t.Fatalf("prompts/get = %d %+v", st, pGet)
+	}
+	msgs := pGet["result"].(map[string]any)["messages"].([]any)
+	if len(msgs) != 1 || !strings.Contains(msgs[0].(map[string]any)["content"].(map[string]any)["text"].(string), env.apiAllowed.ID) {
+		t.Fatalf("unexpected prompt messages: %+v", msgs)
+	}
+
+	// 5. Scope enforcement: token without "mcp" gets 403; token with ["mcp","read"] allows read & blocks save_api.
+	_, noMCPTok, err := env.authSvc.CreateAPIToken(ctx, auth.CreateTokenRequest{
+		UserID: env.adminUserID,
+		Name:   "rest-read-only",
+		Scopes: []string{"read"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, _ = callMCPRPC(t, env.srv.URL, noMCPTok, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      107,
+		"method":  "tools/list",
+	})
+	if st != http.StatusForbidden {
+		t.Fatalf("token missing mcp scope status = %d, want 403", st)
+	}
+
+	_, mcpReadTok, err := env.authSvc.CreateAPIToken(ctx, auth.CreateTokenRequest{
+		UserID: env.adminUserID,
+		Name:   "mcp-read-only",
+		Scopes: []string{"mcp", "read"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st, okRes := callMCPRPC(t, env.srv.URL, mcpReadTok, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      108,
+		"method":  "tools/call",
+		"params":  map[string]any{"name": "list_projects", "arguments": map[string]any{}},
+	})
+	if st != 200 || okRes["result"].(map[string]any)["isError"] == true {
+		t.Fatalf("mcp+read list_projects failed: %d %+v", st, okRes)
+	}
+	st, blkRes := callMCPRPC(t, env.srv.URL, mcpReadTok, map[string]any{
+		"jsonrpc": "2.0",
+		"id":      109,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "save_api",
+			"arguments": map[string]any{
+				"project_id": env.project.ID,
+				"name":       "Blocked",
+				"method":     "GET",
+				"url":        env.targetSrv.URL,
+			},
+		},
+	})
+	if st != 200 || blkRes["result"].(map[string]any)["isError"] != true {
+		t.Fatalf("mcp+read save_api should return isError=true, got: %d %+v", st, blkRes)
 	}
 }

@@ -1,20 +1,31 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Bot, Check, Copy, Key, KeyRound, Laptop, LogOut, Plus, ShieldAlert, Trash2, X } from 'lucide-react'
+import { Bot, Check, Copy, Key, KeyRound, Laptop, LogOut, Plus, ShieldAlert, ShieldCheck, Trash2, X } from 'lucide-react'
 import { api, APIError } from '../lib/api'
-import type { APIToken, SessionItem, User, UserRole } from '../lib/types'
+import type { APIToken, Project, SessionItem, TOTPEnrollment, User, UserRole } from '../lib/types'
 
-export type AccountModalTab = 'sessions' | 'tokens' | 'mcp' | 'password'
+export type AccountModalTab = 'sessions' | 'tokens' | 'totp' | 'mcp' | 'password'
 
 interface Props {
   open: boolean
   initialTab?: AccountModalTab
   user: User
+  projects?: Project[]
+  onUserUpdated?: (user: User) => void
   onClose: () => void
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
   onLoggedOut: () => void
 }
 
-export function AccountModal({ open, initialTab = 'sessions', user, onClose, onToast, onLoggedOut }: Props) {
+export function AccountModal({
+  open,
+  initialTab = 'sessions',
+  user,
+  projects = [],
+  onUserUpdated,
+  onClose,
+  onToast,
+  onLoggedOut,
+}: Props) {
   const [tab, setTab] = useState<AccountModalTab>(initialTab)
   const [sessions, setSessions] = useState<SessionItem[]>([])
   const [loading, setLoading] = useState(false)
@@ -23,9 +34,18 @@ export function AccountModal({ open, initialTab = 'sessions', user, onClose, onT
   const [tokName, setTokName] = useState('')
   const [tokRole, setTokRole] = useState<UserRole>(user.role)
   const [tokTTLDays, setTokTTLDays] = useState<number>(30)
+  const [tokScopes, setTokScopes] = useState<string[]>([])
+  const [tokProjectIDs, setTokProjectIDs] = useState<string[]>([])
   const [creatingTok, setCreatingTok] = useState(false)
   const [newPlaintext, setNewPlaintext] = useState('')
   const [copiedTok, setCopiedTok] = useState(false)
+  const [enrollment, setEnrollment] = useState<TOTPEnrollment | null>(null)
+  const [totpConfirmCode, setTotpConfirmCode] = useState('')
+  const [recoveryCodes, setRecoveryCodes] = useState<string[]>([])
+  const [copiedRecovery, setCopiedRecovery] = useState(false)
+  const [disablePwd, setDisablePwd] = useState('')
+  const [disableCode, setDisableCode] = useState('')
+  const [totpBusy, setTotpBusy] = useState(false)
   const [mcpMode, setMcpMode] = useState<'http' | 'stdio'>('http')
   const [copiedMcp, setCopiedMcp] = useState(false)
   const [curPwd, setCurPwd] = useState('')
@@ -37,6 +57,12 @@ export function AccountModal({ open, initialTab = 'sessions', user, onClose, onT
     if (open) {
       setTab(initialTab)
       setCopiedMcp(false)
+      setEnrollment(null)
+      setTotpConfirmCode('')
+      setRecoveryCodes([])
+      setCopiedRecovery(false)
+      setDisablePwd('')
+      setDisableCode('')
     }
   }, [open, initialTab])
 
@@ -108,6 +134,32 @@ export function AccountModal({ open, initialTab = 'sessions', user, onClose, onT
   )
   const activeSnippet = mcpMode === 'http' ? httpConfigSnippet : stdioConfigSnippet
 
+  const availableTokenScopes =
+    user.role === 'admin'
+      ? [
+          { id: 'read', label: 'read (只读)' },
+          { id: 'write', label: 'write (写入)' },
+          { id: 'debug', label: 'debug (调试)' },
+          { id: 'run', label: 'run (压测/集合)' },
+          { id: 'mcp', label: 'mcp (MCP 协议)' },
+          { id: 'admin', label: 'admin (系统管理)' },
+        ]
+      : [
+          { id: 'read', label: 'read (只读)' },
+          { id: 'write', label: 'write (写入)' },
+          { id: 'debug', label: 'debug (调试)' },
+          { id: 'run', label: 'run (压测/集合)' },
+          { id: 'mcp', label: 'mcp (MCP 协议)' },
+        ]
+
+  const toggleTokScope = (scope: string) => {
+    setTokScopes((prev) => (prev.includes(scope) ? prev.filter((x) => x !== scope) : [...prev, scope]))
+  }
+
+  const toggleTokProject = (pid: string) => {
+    setTokProjectIDs((prev) => (prev.includes(pid) ? prev.filter((x) => x !== pid) : [...prev, pid]))
+  }
+
   const handleCreateToken = async (e: FormEvent) => {
     e.preventDefault()
     if (!tokName.trim()) {
@@ -119,17 +171,78 @@ export function AccountModal({ open, initialTab = 'sessions', user, onClose, onT
       const res = await api.createAPIToken({
         name: tokName.trim(),
         role: tokRole,
+        scopes: tokScopes.length > 0 ? tokScopes : undefined,
+        project_ids: tokProjectIDs.length > 0 ? tokProjectIDs : undefined,
         ttl_days: tokTTLDays > 0 ? tokTTLDays : undefined,
       })
       setNewPlaintext(res.plaintext)
       setCopiedTok(false)
       setTokName('')
+      setTokScopes([])
+      setTokProjectIDs([])
       await loadTokens()
       onToast('success', '已生成新的 API 访问令牌，可直接用于 CLI 或 MCP 接入')
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '生成 API 令牌失败')
     } finally {
       setCreatingTok(false)
+    }
+  }
+
+  const handleStartEnrollTOTP = async () => {
+    setTotpBusy(true)
+    try {
+      const res = await api.enrollTOTP()
+      setEnrollment(res)
+      setTotpConfirmCode('')
+      setRecoveryCodes([])
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : '初始化 2FA 密钥失败')
+    } finally {
+      setTotpBusy(false)
+    }
+  }
+
+  const handleConfirmTOTP = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!totpConfirmCode.trim()) {
+      onToast('error', '请输入 6 位动态验证码')
+      return
+    }
+    setTotpBusy(true)
+    try {
+      const res = await api.confirmTOTP(totpConfirmCode.trim())
+      setRecoveryCodes(res.recovery_codes || [])
+      setCopiedRecovery(false)
+      setEnrollment(null)
+      setTotpConfirmCode('')
+      onUserUpdated?.({ ...user, totp_enabled: true })
+      onToast('success', '已启用 TOTP 双因素认证，请妥善保存恢复码')
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : '绑定验证器失败')
+    } finally {
+      setTotpBusy(false)
+    }
+  }
+
+  const handleDisableTOTP = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!disablePwd || !disableCode.trim()) {
+      onToast('error', '请输入当前密码与验证码或恢复码')
+      return
+    }
+    setTotpBusy(true)
+    try {
+      await api.disableTOTP({ password: disablePwd, code: disableCode.trim() })
+      setDisablePwd('')
+      setDisableCode('')
+      setRecoveryCodes([])
+      onUserUpdated?.({ ...user, totp_enabled: false })
+      onToast('success', '已关闭双因素认证 (2FA)')
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : '关闭 2FA 失败')
+    } finally {
+      setTotpBusy(false)
     }
   }
 
@@ -207,6 +320,7 @@ export function AccountModal({ open, initialTab = 'sessions', user, onClose, onT
             [
               { id: 'sessions' as const, label: '活动会话', icon: Laptop },
               { id: 'tokens' as const, label: 'API 访问令牌', icon: Key },
+              { id: 'totp' as const, label: '双因素认证 2FA', icon: ShieldCheck },
               { id: 'mcp' as const, label: 'MCP 客户端接入', icon: Bot },
               { id: 'password' as const, label: '修改密码', icon: KeyRound },
             ] as const
@@ -274,7 +388,7 @@ export function AccountModal({ open, initialTab = 'sessions', user, onClose, onT
 
           {tab === 'tokens' && (
             <div className="space-y-4 text-xs">
-              <form onSubmit={handleCreateToken} className="p-3 rounded-lg border border-slate-200 bg-slate-50/60 space-y-2.5">
+              <form onSubmit={handleCreateToken} className="p-3 rounded-lg border border-slate-200 bg-slate-50/60 space-y-3">
                 <div className="font-medium text-slate-800">生成长期 CLI / CI / MCP Bearer 令牌（tg_ 前缀）</div>
                 <div className="grid grid-cols-12 gap-2 items-center">
                   <input
@@ -314,6 +428,50 @@ export function AccountModal({ open, initialTab = 'sessions', user, onClose, onT
                     <Plus className="w-3.5 h-3.5" /> 创建
                   </button>
                 </div>
+
+                <div className="space-y-1.5 pt-1 border-t border-slate-200/80">
+                  <div className="text-[11px] font-medium text-slate-600">
+                    细粒度能力范围 Scope（全部不选 = 继承角色全部默认权限）：
+                  </div>
+                  <div className="flex flex-wrap gap-2">
+                    {availableTokenScopes.map((sc) => (
+                      <label
+                        key={sc.id}
+                        className="inline-flex items-center gap-1.5 px-2 py-1 rounded border border-slate-200 bg-white cursor-pointer hover:border-sky-300"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={tokScopes.includes(sc.id)}
+                          onChange={() => toggleTokScope(sc.id)}
+                        />
+                        <span className="font-mono text-[11px] text-slate-700">{sc.label}</span>
+                      </label>
+                    ))}
+                  </div>
+                </div>
+
+                {projects.length > 0 && (
+                  <div className="space-y-1.5 pt-1 border-t border-slate-200/80">
+                    <div className="text-[11px] font-medium text-slate-600">
+                      限定可访问项目（全部不选 = 允许访问当前用户有权限的所有项目）：
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {projects.map((p) => (
+                        <label
+                          key={p.id}
+                          className="inline-flex items-center gap-1.5 px-2 py-1 rounded border border-slate-200 bg-white cursor-pointer hover:border-sky-300"
+                        >
+                          <input
+                            type="checkbox"
+                            checked={tokProjectIDs.includes(p.id)}
+                            onChange={() => toggleTokProject(p.id)}
+                          />
+                          <span className="text-[11px] text-slate-700">{p.name}</span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </form>
 
               {newPlaintext && (
@@ -354,7 +512,7 @@ export function AccountModal({ open, initialTab = 'sessions', user, onClose, onT
                       className="flex items-center justify-between gap-3 p-2.5 rounded-lg border border-slate-200 bg-white"
                     >
                       <div className="min-w-0">
-                        <div className="flex items-center gap-2 font-medium text-slate-800">
+                        <div className="flex flex-wrap items-center gap-1.5 font-medium text-slate-800">
                           <span>{t.name}</span>
                           <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-mono text-[10px]">
                             {t.prefix}...
@@ -362,6 +520,25 @@ export function AccountModal({ open, initialTab = 'sessions', user, onClose, onT
                           <span className="px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 font-mono text-[10px]">
                             {t.role}
                           </span>
+                          {t.scopes && t.scopes.length > 0 ? (
+                            t.scopes.map((sc) => (
+                              <span
+                                key={sc}
+                                className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 font-mono text-[10px]"
+                              >
+                                scope:{sc}
+                              </span>
+                            ))
+                          ) : (
+                            <span className="px-1.5 py-0.5 rounded bg-slate-50 text-slate-500 text-[10px]">
+                              全量 Scope
+                            </span>
+                          )}
+                          {t.project_ids && t.project_ids.length > 0 && (
+                            <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 text-[10px]">
+                              限定 {t.project_ids.length} 个项目
+                            </span>
+                          )}
                         </div>
                         <div className="tg-tabular text-[11px] text-slate-400 mt-0.5">
                           创建：{new Date(t.created_at).toLocaleString()}
@@ -383,17 +560,207 @@ export function AccountModal({ open, initialTab = 'sessions', user, onClose, onT
             </div>
           )}
 
+          {tab === 'totp' && (
+            <div className="space-y-4 text-xs">
+              <div className="flex items-center justify-between p-3 rounded-lg border border-slate-200 bg-slate-50">
+                <div>
+                  <div className="font-semibold text-slate-800">TOTP 双因素认证（2FA）</div>
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    支持 Google Authenticator、1Password、Microsoft Authenticator 等 RFC 6238 验证器。
+                  </p>
+                </div>
+                <span
+                  className={`px-2.5 py-1 rounded-full font-semibold text-[11px] ${
+                    user.totp_enabled
+                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
+                      : 'bg-slate-200 text-slate-700'
+                  }`}
+                >
+                  {user.totp_enabled ? '已启用 2FA' : '未启用'}
+                </span>
+              </div>
+
+              {recoveryCodes.length > 0 && (
+                <div className="p-3.5 rounded-lg border border-amber-300 bg-amber-50 space-y-2.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-semibold text-amber-950">
+                      一次性恢复码（仅展示一次，丢失验证器时可用于紧急登录）：
+                    </span>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          await navigator.clipboard.writeText(recoveryCodes.join('\n'))
+                          setCopiedRecovery(true)
+                          onToast('success', '已复制全部 8 个恢复码')
+                        } catch {
+                          onToast('info', '请手动记录下方恢复码')
+                        }
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-700 hover:bg-amber-800 text-white font-medium"
+                    >
+                      {copiedRecovery ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />} 复制全部
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {recoveryCodes.map((rc) => (
+                      <div
+                        key={rc}
+                        className="px-2 py-1.5 rounded bg-white border border-amber-200 font-mono text-center text-slate-900 select-all"
+                      >
+                        {rc}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {!user.totp_enabled ? (
+                enrollment ? (
+                  <form onSubmit={handleConfirmTOTP} className="space-y-3 p-3.5 rounded-lg border border-slate-200 bg-white">
+                    <div className="font-semibold text-slate-800">步骤 1：在验证器 App 中添加账号密钥</div>
+                    <div className="space-y-2">
+                      <div>
+                        <div className="text-[11px] text-slate-500 mb-1">Base32 手动密钥（Secret）：</div>
+                        <div className="flex items-center gap-2">
+                          <code className="flex-1 px-2.5 py-1.5 rounded bg-slate-50 border border-slate-200 font-mono text-slate-900 select-all">
+                            {enrollment.secret}
+                          </code>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                await navigator.clipboard.writeText(enrollment.secret)
+                                onToast('success', '已复制 Base32 密钥')
+                              } catch {
+                                onToast('info', '请手动复制密钥')
+                              }
+                            }}
+                            className="px-2.5 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-50"
+                          >
+                            复制密钥
+                          </button>
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] text-slate-500 mb-1">otpauth:// 配置 URI：</div>
+                        <div className="px-2.5 py-1.5 rounded bg-slate-50 border border-slate-200 font-mono text-[11px] break-all text-slate-700 select-all">
+                          {enrollment.otpauth_url}
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-200">
+                      <label htmlFor="tg-totp-confirm" className="block font-semibold text-slate-800 mb-1">
+                        步骤 2：输入验证器动态码以完成绑定
+                      </label>
+                      <p className="text-[11px] text-slate-500 mb-1.5">
+                        请输入验证器当前显示的 6 位数字动态验证码。
+                      </p>
+                      <div className="flex items-center gap-2 max-w-sm">
+                        <input
+                          id="tg-totp-confirm"
+                          type="text"
+                          inputMode="numeric"
+                          autoComplete="one-time-code"
+                          pattern="[0-9]*"
+                          maxLength={6}
+                          spellCheck={false}
+                          required
+                          value={totpConfirmCode}
+                          onChange={(e) => setTotpConfirmCode(e.target.value)}
+                          placeholder="6 位数字验证码"
+                          className="tg-tabular flex-1 px-3 py-1.5 border border-slate-300 rounded-md font-mono tracking-widest focus:border-sky-600 focus:outline-none"
+                        />
+                        <button
+                          type="submit"
+                          disabled={totpBusy}
+                          className="px-3.5 py-1.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white font-medium disabled:opacity-50"
+                        >
+                          {totpBusy ? '验证中...' : '确认启用'}
+                        </button>
+                      </div>
+                    </div>
+                  </form>
+                ) : (
+                  <div className="p-4 rounded-lg border border-dashed border-slate-300 bg-slate-50/70 space-y-2.5">
+                    <p className="text-slate-600 leading-relaxed">
+                      启用双因素认证后，Web 控制台登录除用户名密码外还需提供 6 位 TOTP 动态码（不影响已签发的 Bearer API 令牌自动化调用）。
+                    </p>
+                    <button
+                      type="button"
+                      disabled={totpBusy}
+                      onClick={() => void handleStartEnrollTOTP()}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-[#0B2A4A] hover:bg-[#123862] text-white font-medium disabled:opacity-50"
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5" /> {totpBusy ? '生成中...' : '开始绑定验证器'}
+                    </button>
+                  </div>
+                )
+              ) : (
+                <form onSubmit={handleDisableTOTP} className="space-y-3 p-3.5 rounded-lg border border-slate-200 bg-white max-w-md">
+                  <div className="font-semibold text-slate-800">停用双因素认证（2FA）</div>
+                  <div>
+                    <label htmlFor="tg-totp-disable-pwd" className="block font-medium text-slate-700 mb-1">
+                      当前登录密码
+                    </label>
+                    <input
+                      id="tg-totp-disable-pwd"
+                      type="password"
+                      required
+                      value={disablePwd}
+                      onChange={(e) => setDisablePwd(e.target.value)}
+                      className="w-full px-3 py-1.5 border border-slate-300 rounded-md focus:border-sky-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="tg-totp-disable-code" className="block font-medium text-slate-700 mb-1">
+                      当前动态验证码或恢复码
+                    </label>
+                    <p className="text-[11px] text-slate-500 mb-1">
+                      输入当前 6 位动态验证码或任意一个尚未使用的 8 位恢复码（XXXX-XXXX）。
+                    </p>
+                    <input
+                      id="tg-totp-disable-code"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      pattern="[0-9A-Za-z-]*"
+                      maxLength={12}
+                      spellCheck={false}
+                      required
+                      value={disableCode}
+                      onChange={(e) => setDisableCode(e.target.value)}
+                      placeholder="6 位数字验证码或 XXXX-XXXX"
+                      className="tg-tabular w-full px-3 py-1.5 border border-slate-300 rounded-md font-mono tracking-wider focus:border-sky-500 focus:outline-none"
+                    />
+                  </div>
+                  <button
+                    type="submit"
+                    disabled={totpBusy}
+                    className="px-3.5 py-1.5 rounded-md border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-800 font-medium disabled:opacity-50"
+                  >
+                    {totpBusy ? '处理中...' : '停用 2FA'}
+                  </button>
+                </form>
+              )}
+            </div>
+          )}
+
           {tab === 'mcp' && (
             <div className="space-y-3.5 text-xs">
               <div className="p-3 rounded-lg border border-sky-200 bg-sky-50/70 space-y-1.5">
                 <div className="font-semibold text-sky-950 flex items-center gap-1.5">
                   <ShieldAlert className="w-4 h-4 text-sky-700" />
-                  <span>最小权限安全接入建议</span>
+                  <span>MCP 2.0 能力与最小权限安全接入建议</span>
                 </div>
                 <p className="text-slate-700 leading-relaxed">
-                  Tidegate MCP 暴露 15 个高内聚工具。若仅用于让 AI 查阅接口结构与分析历史压测报告，建议创建{' '}
-                  <code className="px-1 rounded bg-white border border-sky-200 font-mono">viewer</code> 权限令牌；若需编排接口、调试与受控压测，请使用带有效期的{' '}
-                  <code className="px-1 rounded bg-white border border-sky-200 font-mono">member</code> 令牌。所有 Vault 密文与凭据均自动脱敏。
+                  Tidegate MCP 2.0 暴露 <strong>16 项工具</strong>、<strong>MCP Resources（tidegate:// 只读上下文资源）</strong>以及{' '}
+                  <strong>4 项专家 Prompts 诊断/压测模板</strong>。若仅用于让 AI 查阅接口结构与分析历史压测报告，建议创建{' '}
+                  <code className="px-1 rounded bg-white border border-sky-200 font-mono">viewer</code> 角色且仅勾选{' '}
+                  <code className="px-1 rounded bg-white border border-sky-200 font-mono">mcp</code> +{' '}
+                  <code className="px-1 rounded bg-white border border-sky-200 font-mono">read</code> Scope 的令牌；若需编排接口、调试或执行压测，请显式勾选对应{' '}
+                  <code className="px-1 rounded bg-white border border-sky-200 font-mono">write / debug / run</code> Scope 与允许访问的项目。所有 Vault 密文与凭据均自动脱敏。
                 </p>
               </div>
 

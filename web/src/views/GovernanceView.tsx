@@ -294,6 +294,7 @@ export function GovernanceView({ currentUser, onToast }: Props) {
                   <th className="px-3 py-2">ID</th>
                   <th className="px-3 py-2">用户名</th>
                   <th className="px-3 py-2">角色</th>
+                  <th className="px-3 py-2">双因素 (2FA)</th>
                   <th className="px-3 py-2">创建时间</th>
                   <th className="px-3 py-2 text-right">操作</th>
                 </tr>
@@ -328,34 +329,64 @@ export function GovernanceView({ currentUser, onToast }: Props) {
                         <option value="viewer">viewer</option>
                       </select>
                     </td>
+                    <td className="px-3 py-2">
+                      {u.totp_enabled ? (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded bg-emerald-50 border border-emerald-200 text-emerald-800 font-medium text-[11px]">
+                          已启用
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center px-2 py-0.5 rounded bg-slate-100 text-slate-500 text-[11px]">
+                          未启用
+                        </span>
+                      )}
+                    </td>
                     <td className="px-3 py-2 text-slate-500">{new Date(u.created_at).toLocaleString()}</td>
                     <td className="px-3 py-2 text-right">
-                      {u.id !== currentUser.id && (
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            if (confirmDelUid !== u.id) {
-                              setConfirmDelUid(u.id)
-                              return
-                            }
-                            try {
-                              await api.deleteUser(u.id)
-                              setConfirmDelUid(0)
-                              await loadUsers()
-                              onToast('success', `已删除用户「${u.username}」`)
-                            } catch (err) {
-                              onToast('error', err instanceof APIError ? err.message : '删除用户失败')
-                            }
-                          }}
-                          className={`inline-flex items-center gap-1 px-2 py-1 rounded border ${
-                            confirmDelUid === u.id
-                              ? 'bg-rose-600 border-rose-600 text-white'
-                              : 'border-rose-200 text-rose-700 hover:bg-rose-50'
-                          }`}
-                        >
-                          <Trash2 className="w-3 h-3" /> {confirmDelUid === u.id ? '确认删除' : '删除'}
-                        </button>
-                      )}
+                      <div className="inline-flex items-center gap-1.5 justify-end">
+                        {u.totp_enabled && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                await api.adminResetUserTOTP(u.id)
+                                await loadUsers()
+                                onToast('success', `已重置「${u.username}」的双因素认证 (2FA)`)
+                              } catch (err) {
+                                onToast('error', err instanceof APIError ? err.message : '重置 2FA 失败')
+                              }
+                            }}
+                            className="inline-flex items-center gap-1 px-2 py-1 rounded border border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100"
+                          >
+                            重置 2FA
+                          </button>
+                        )}
+                        {u.id !== currentUser.id && (
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (confirmDelUid !== u.id) {
+                                setConfirmDelUid(u.id)
+                                return
+                              }
+                              try {
+                                await api.deleteUser(u.id)
+                                setConfirmDelUid(0)
+                                await loadUsers()
+                                onToast('success', `已删除用户「${u.username}」`)
+                              } catch (err) {
+                                onToast('error', err instanceof APIError ? err.message : '删除用户失败')
+                              }
+                            }}
+                            className={`inline-flex items-center gap-1 px-2 py-1 rounded border ${
+                              confirmDelUid === u.id
+                                ? 'bg-rose-600 border-rose-600 text-white'
+                                : 'border-rose-200 text-rose-700 hover:bg-rose-50'
+                            }`}
+                          >
+                            <Trash2 className="w-3 h-3" /> {confirmDelUid === u.id ? '确认删除' : '删除'}
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}

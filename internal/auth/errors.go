@@ -38,6 +38,11 @@ const (
 	CodeLastAdmin          Code = "last_admin"
 	CodeInvalidRole        Code = "invalid_role"
 	CodeInvalidTokenInput  Code = "invalid_token_input"
+	CodeTOTPRequired       Code = "totp_required"
+	CodeInvalidTOTP        Code = "invalid_totp"
+	CodeTOTPAlreadyEnabled Code = "totp_already_enabled"
+	CodeTOTPNotEnabled     Code = "totp_not_enabled"
+	CodeScopeForbidden     Code = "insufficient_scope"
 	CodeInternal           Code = "internal_error"
 )
 
@@ -84,8 +89,13 @@ var (
 	ErrTokenNotFound     = &Error{Code: CodeTokenNotFound, Status: http.StatusNotFound, Message: "访问令牌不存在"}
 	ErrUserExists        = &Error{Code: CodeUserExists, Status: http.StatusConflict, Message: "用户名已存在"}
 	ErrLastAdmin         = &Error{Code: CodeLastAdmin, Status: http.StatusConflict, Message: "不能删除或降级最后一个管理员账户"}
-	ErrInvalidRole       = &Error{Code: CodeInvalidRole, Status: http.StatusBadRequest, Message: "角色只能是 admin、member 或 viewer"}
-	ErrInvalidTokenInput = &Error{Code: CodeInvalidTokenInput, Status: http.StatusBadRequest, Message: "访问令牌名称不能为空且不能超过 100 个字符"}
+	ErrInvalidRole        = &Error{Code: CodeInvalidRole, Status: http.StatusBadRequest, Message: "角色只能是 admin、member 或 viewer"}
+	ErrInvalidTokenInput  = &Error{Code: CodeInvalidTokenInput, Status: http.StatusBadRequest, Message: "访问令牌名称不能为空且不能超过 100 个字符"}
+	ErrTOTPRequired       = &Error{Code: CodeTOTPRequired, Status: http.StatusUnauthorized, Message: "该账号已开启双因素认证，请输入 6 位动态验证码或恢复码"}
+	ErrInvalidTOTP        = &Error{Code: CodeInvalidTOTP, Status: http.StatusUnauthorized, Message: "动态验证码或恢复码无效"}
+	ErrTOTPAlreadyEnabled = &Error{Code: CodeTOTPAlreadyEnabled, Status: http.StatusConflict, Message: "当前账号已启用双因素认证"}
+	ErrTOTPNotEnabled     = &Error{Code: CodeTOTPNotEnabled, Status: http.StatusBadRequest, Message: "当前账号尚未启用或未完成双因素认证初始化"}
+	ErrScopeForbidden     = &Error{Code: CodeScopeForbidden, Status: http.StatusForbidden, Message: "当前访问令牌缺少执行该操作所需的 Scope 权限范围"}
 
 	errInternal = &Error{Code: CodeInternal, Status: http.StatusInternalServerError, Message: "服务器内部错误"}
 )

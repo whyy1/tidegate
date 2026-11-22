@@ -33,27 +33,28 @@ logo 是一道抬起的闸门，形状正好是字母 T，潮水从闸下流过�
 
 | 模块 | 内容 |
 |---|---|
-| 接口管理与 IDE 工作台 | 可折叠双轴导航、`Ctrl+K` 全局命令面板、左右/上下可拖拽分屏工作台；项目与目录树、多环境与临时变量池、AES-256-GCM 密钥保险箱；支持 HTTP/1.1 & HTTP/2、WebSocket、gRPC、SSE 调试、XPath/JSONPath/正则提取、JSON Schema 断言与响应文档 |
-| 场景编排 | 步骤覆盖、事务分组 (`group`) / 循环 (`loop`) / 条件 (`if`) / 权重分流 (`weighted`) 与纯 Go 受限沙箱脚本、固定/均匀/正态思考时间、CSV/JSON/JSONL 数据驱动、多场景加权 Mix 与代理/DNS 覆写 |
-| 压测配置 | 闭环并发（VUs）与开环速率（RPS）双模式，预热、爬坡、保持、下降阶段编排与 SLA 违约自动中止阈值 |
+| 接口管理与 IDE 工作台 | 可折叠双轴导航、`Ctrl+K` 全局命令面板、左右/上下可拖拽分屏工作台；`{{var}}` 变量实时补全、项目与目录树、多环境与临时变量池、AES-256-GCM 密钥保险箱；支持 HTTP/1.1 & HTTP/2、WebSocket、gRPC（含 Server Reflection 与 `.proto` 自动发现/示例生成）、SSE 调试、接口级前后置脚本（`pre_script` / `post_script`）、XPath/JSONPath/正则提取、JSON Schema 断言与目录级批量回归测试运行器 |
+| 场景编排与韧性引擎 | 步骤覆盖、事务分组 (`group`) / 循环 (`loop`) / 条件 (`if`) / 权重分流 (`weighted`) 与纯 Go 受限沙箱脚本、`on_error`（`continue` / `abort_iteration` / `abort_vu`）失败策略、固定/均匀/正态思考时间、CSV/JSON/JSONL 数据驱动、多场景加权 Mix 与代理/DNS 覆写 |
+| 压测配置与高性能引擎 | 闭环并发（VUs）与开环速率（RPS）双模式，预热、爬坡、保持、下降阶段编排、`max_dials_per_sec` 平滑建连限速、空闲连接缓冲自动收缩与 SLA 违约自动中止阈值 |
 | 实时图表与观测 | `uPlot` 吞吐量、延迟百分位、并发、双层带宽与瓶颈区间标注；HDR 延迟直方图、时间热力图、五段耗时分解与分节点明细；支持 `/api/v1/metrics/prometheus` 采集及 InfluxDB / Prometheus Pushgateway 实时外发 |
-| 安全与治理 | 多角色 RBAC（`admin` / `member` / `viewer`）、`tg_` API 访问令牌与限流防护、出站目标 Host/CIDR 白名单与成员并发/RPS 上限、全链路操作审计日志与调试历史自动脱敏 |
-| MCP 智能体接入 | Streamable HTTP (`POST /api/v1/mcp`) 与 CLI Stdio (`tidegate mcp`) 双传输、15 个读写分离且带完整安全注解的工具、Vault 零泄露与默认 200 VUs / 300s 护栏 |
-| 报告与对比 | 历史记录、异常采样一键工作台复现、离线单文件 HTML 报告、CSV / JSON / JTL / HAR 导出、2–6 次多次基线与分步骤回归对比 |
+| 安全与企业治理 | 多角色 RBAC（`admin` / `member` / `viewer`）与项目级访问控制（`ACL` 私有隔离及成员覆写）、RFC 6238 TOTP 双因素认证（2FA）与恢复码、带细粒度 `scopes` / `project_ids` 绑定的 `tg_` API 令牌与限流防护、出站目标 Host/CIDR 白名单、成员并发/RPS 上限、全链路审计日志与自动脱敏 |
+| MCP 2.0 智能体接入 | Streamable HTTP (`POST /api/v1/mcp`) 与 CLI Stdio (`tidegate mcp`) 双传输、16 个带安全注解工具（含批量集合回归 `run_collection_test`）、4 类 `tidegate://` 只读 Resources、4 项专家诊断/压测 Prompts 模板、Vault 零泄露与默认 200 VUs / 300s 护栏 |
+| 报告与对比 | 历史记录、异常采样一键工作台复现、离线单文件 HTML 报告、CSV / JSON / JTL / JUnit XML / HAR 导出、2–6 次多次基线与分步骤回归对比 |
 | 分布式集群 | 集群 ECDSA CA 与双向 mTLS、Join Token 换签与证书持久化重连、`--ca-fingerprint` 指纹校验、节点吊销、标签筛选 (`node_selector`)、自定义权重与断线自动重平衡 / 中止策略 |
-| 导入导出 | 两步预览导入 `.tidegate`、OpenAPI 3.x / Swagger 2.0、Postman v2.1、Apifox、JMeter (`.jmx`)、HAR 1.2、cURL；支持导出 k6 (`.js`)、JMeter (`.jtl`)、OpenAPI 与 Postman |
+| 导入导出与智能合并 | 两步预览与非破坏性智能合并导入（保留既有断言/提取器/前后置脚本与描述）`.tidegate`、OpenAPI 3.x / Swagger 2.0、Postman v2.1、Apifox、JMeter (`.jmx`)、HAR 1.2、cURL；支持导出 k6 (`.js`)、JMeter (`.jtl`)、OpenAPI 与 Postman |
 | 部署 | 单文件原生可执行文件与多阶段非 root 只读容器镜像，支持 Windows、Linux、macOS |
 
 完整的功能架构白皮书见[产品架构与功能白皮书](docs/product-plan.md)。
 
 ## 当前进度
 
-目前全阶段能力（**双轴 IDE Web 工作台**、**多协议调试与复杂场景控制流**、**全链路可观测与对比**、**安全加固与 RBAC 治理**、**零信任 mTLS 集群** 以及 **MCP 智能体网关**）均已完整实现并集成至本地与容器交付物中：
+目前 `v1.1` 全阶段能力（**双轴 IDE Web 工作台与批量回归**、**韧性发压引擎**、**gRPC 服务发现与非破坏性智能合并**、**企业安全（项目级 ACL / Scope 令牌 / 2FA）**、**零信任 mTLS 集群** 以及 **MCP 2.0 智能体网关**）均已完整实现并集成至本地与容器交付物中：
 
-- **双轴 IDE 工作台与多协议接口管理**：采用左侧可折叠深海导航栏、44px 上下文顶栏、`Ctrl+K` 全局快捷搜索面板与左右/上下可拖拽分屏调试区；支持本地账户（初始化口令 + Argon2id）、RBAC、多设备会话管理与 `tg_` Bearer 令牌；四级变量与 AES-256-GCM 密文保险箱、两步预览导入导出及 HTTP/1.1、HTTP/2、WebSocket、gRPC、SSE 五段耗时瀑布图。
-- **场景编排与可观测大盘**：支持控制流、受限纯 Go 脚本沙箱、CSV/JSON/JSONL 数据切片与 `Mix` 混合流量；支持 HDR 直方图与时间×延迟热力图、2–6 次基线回归对比、k6/JTL/HTML/HAR 导出，以及 Prometheus 采集与 InfluxDB/Pushgateway 异步外发。
-- **分布式集群与纵深安全体系**：控制器内置集群 CA、Join Token、`--ca-fingerprint`、`--cert-dir`、故障重分配；后端调试历史与外部指标推送均配备自动密文脱敏及云元数据防 SSRF 拦截；全部资源变更与 MCP 工具调用均记录 `audit_logs`。
-- **安全 MCP Server（15 工具）**：同时支持 HTTP 直连与 `tidegate mcp` Stdio 桥接，可在 Web 控制台账号弹窗一键生成客户端接入配置。
+- **双轴 IDE 工作台与集合回归测试**：采用左侧可折叠深海导航栏、44px 上下文顶栏、`Ctrl+K` 全局快捷搜索面板与左右/上下可拖拽分屏调试区；内置 `{{var}}` 变量自动补全与带行号脚本编辑器，支持接口级 `pre_script` / `post_script`（含 `resp.status` / `resp.body` / `resp.header` / `resp.json` 与 `jsonpath`），支持一键运行目录/项目功能回归测试与 `tidegate test --junit` CI 流水线接入。
+- **多协议工作台与智能协同**：支持 HTTP/1.1 & HTTP/2、WebSocket、gRPC（支持 Server Reflection `v1`/`v1alpha` 与 `.proto` 声明自动发现及示例 JSON 生成）、SSE 调试与五段耗时瀑布图；OpenAPI / Postman 导入支持字段级非破坏性 `merge` 合并。
+- **韧性引擎与可观测大盘**：支持 `on_error` 迭代/VU 失败策略、`max_dials_per_sec` 建连限速与空闲连接内存收缩（`shrinkIdleBuffers`）；支持控制流、受限纯 Go 脚本沙箱、CSV/JSON/JSONL 数据切片与 `Mix` 混合流量；支持 HDR 直方图与时间×延迟热力图、2–6 次基线回归对比，以及 Prometheus 采集与 InfluxDB/Pushgateway 异步外发。
+- **纵深安全与零信任分布式集群**：控制器内置集群 ECDSA CA 与双向 mTLS；支持项目级私有隔离 ACL、细粒度 Token Scope（`read` / `write` / `debug` / `run` / `mcp` / `admin`）及项目白名单绑定、RFC 6238 TOTP 双因素认证与管理员一键重置；调试历史与外部指标推送均配备自动密文脱敏与防 SSRF 拦截，全链路操作写入 `audit_logs`。
+- **MCP 2.0 服务网关**：提供 16 项工具、`tidegate://` 只读 Resources 与 4 项专家 Prompts 模板，同时支持 Streamable HTTP 直连与 `tidegate mcp` Stdio 桥接，可在 Web 控制台账号弹窗一键生成带最小 Scope 建议的接入配置。
 
 ### 快速开始（Web 控制台）
 
@@ -72,16 +73,17 @@ CGO_ENABLED=0 go build -o tidegate ./cmd/tidegate
 ./tidegate reset-password --data ./data --user admin
 ```
 
-### 命令行压测与 CI 门禁
+### 命令行压测、功能回归与 CI 门禁
 
-无需界面时，可直接用 CLI 运行 YAML / JSON 场景并接入持续集成检查：
+无需界面时，可直接用 CLI 运行接口集合功能回归或 YAML / JSON 压测场景并接入持续集成检查：
 
 ```bash
-./tidegate testserver                                                   # 启动内置的被测服务（默认 :18080）
+./tidegate testserver                                                   # 启动内置的被测服务（HTTP/TLS/WS/gRPC 反射，默认 :18080）
+./tidegate test --data ./data --folder "用户认证" --junit junit.xml       # 运行目录功能回归测试并输出 JUnit XML 报告
 ./tidegate run examples/ping.yaml --out result.json --csv result.csv --html report.html --jtl result.jtl
 ```
 
-场景中配置的 `thresholds` 在压测结束或运行期违约校验失败时，`tidegate run` 将返回退出码 `3`，便于流水线直接作为性能门禁拦截回归；更多场景写法见 [examples](examples) 目录。
+功能测试失败或场景中配置的 `thresholds` 违约时，`tidegate test` / `tidegate run` 将返回退出码 `3`，便于流水线直接作为质量与性能门禁拦截回归；更多场景写法见 [examples](examples) 目录。
 
 ### 多机分布式压测（零信任 mTLS）
 
@@ -97,9 +99,9 @@ CGO_ENABLED=0 go build -o tidegate ./cmd/tidegate
 ./tidegate agent --join <控制器IP:7443> --token <加入令牌> --cert-dir ./agent-certs --ca-fingerprint <CA_SHA256指纹> --labels zone=cn-east,tier=perf
 ```
 
-### MCP 智能体安全接入（Model Context Protocol）
+### MCP 2.0 智能体安全接入（Model Context Protocol）
 
-先在控制台右上角（或侧栏「MCP 智能体接入」）生成一枚 `tg_` 访问令牌（只读排查推荐 `viewer`，编排与调试推荐设置有效期的 `member`），再按需选择 **Streamable HTTP** 或 **CLI Stdio** 模式配置客户端（如 Cursor / Claude Desktop / Antigravity `mcp_config.json`）：
+先在控制台右上角「账号与安全」创建一枚 `tg_` 访问令牌（建议绑定细粒度 Scope：只读排查建议 `viewer` + `mcp` + `read`，编排与调试建议带有效期的 `member` + `mcp` + 对应读写 Scope 并可选限定访问项目），再按需选择 **Streamable HTTP** 或 **CLI Stdio** 模式配置客户端（如 Cursor / Claude Desktop `mcp_config.json`）：
 
 **方式一：Streamable HTTP 直连（推荐）**
 
@@ -129,10 +131,14 @@ CGO_ENABLED=0 go build -o tidegate ./cmd/tidegate
 }
 ```
 
-- **工具能力（共 15 个）**：
-  - 只读探查与分析（`viewer`+）：`list_projects`、`get_project_workspace`、`get_api_detail`、`get_scenario_detail`、`estimate_load_run`、`list_runs`、`get_run_report`、`compare_runs`、`get_cluster_status`
-  - 编排与受控执行（`member`+）：`save_api`、`import_api_spec`（`preview`/`apply`）、`save_scenario`、`debug_api`、`debug_scenario`、`manage_load_run`（`start`/`set_target`/`graceful_stop`/`abort`）
-- **安全护栏**：`viewer` 令牌只允许执行只读工具；所有密文变量与认证请求头在返回前自动打码；调试与压测强制遵循目标白名单与 `scripts_disabled`；MCP 发起的压测默认限制为 **单次最高 200 VUs、最长 300 秒**，管理员可在「系统治理 -> 安全围栏与 MCP」中一键开关或调整上限，所有调用均记入 `audit_logs`。
+- **工具能力（共 16 个）**：
+  - 只读探查与分析（`viewer`+ / `read` Scope）：`list_projects`、`get_project_workspace`、`get_api_detail`、`get_scenario_detail`、`estimate_load_run`、`list_runs`、`get_run_report`、`compare_runs`、`get_cluster_status`
+  - 编排与导入（`member`+ / `write` Scope）：`save_api`、`import_api_spec`（`preview`/`apply`）、`save_scenario`
+  - 调试、回归测试与受控压测（`member`+ / `debug` & `run` Scope）：`debug_api`、`debug_scenario`、`run_collection_test`、`manage_load_run`（`start`/`set_target`/`graceful_stop`/`abort`）
+- **MCP Resources & Prompts**：
+  - 只读上下文资源（`read` Scope，强脱敏）：`tidegate://projects`、`tidegate://projects/{project_id}/workspace`、`tidegate://projects/{project_id}/environments`、`tidegate://runs/{run_id}/summary`
+  - 专家 Prompts 模板（4 项）：`diagnose_api_failure`、`generate_regression_suite`、`design_load_scenario`、`analyze_run_bottleneck`
+- **安全护栏**：支持项目级私有 ACL 与令牌 Scope / 项目白名单裁剪；`viewer` 或无对应 Scope 令牌无法触发写入/调试/压测工具；所有密文变量与认证请求头在返回前自动打码；调试与压测强制遵循目标白名单与 `scripts_disabled`；MCP 发起的压测默认限制为 **单次最高 200 VUs、最长 300 秒**，管理员可在「系统治理 -> 安全围栏与 MCP」中一键开关或调整上限，所有调用均记入 `audit_logs`。
 
 ### Docker 部署
 

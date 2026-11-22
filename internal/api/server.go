@@ -82,6 +82,7 @@ func NewServer(opts Options) (*Server, error) {
 		Store:      opts.Store,
 		Results:    opts.Results,
 		Controller: opts.Controller,
+		Auth:       opts.Auth,
 		Version:    opts.Version,
 		Audit:      s.audit,
 	})
@@ -125,30 +126,100 @@ func (s *Server) buildHandler() http.Handler {
 	authed := func(fn http.HandlerFunc) http.Handler {
 		return s.guard.RequireSession(fn)
 	}
-	requireRole := func(allow func(auth.Role) bool, fn http.HandlerFunc) http.Handler {
+	scoped := func(scope string, fn http.HandlerFunc) http.Handler {
 		return s.guard.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			u, ok := auth.UserFromContext(r.Context())
-			if !ok || !allow(u.Role) {
-				writeError(w, auth.ErrForbidden)
+			if err := auth.CheckScope(r.Context(), scope); err != nil {
+				writeError(w, err)
 				return
 			}
 			fn(w, r)
 		}))
 	}
-	writer := func(fn http.HandlerFunc) http.Handler {
-		return requireRole(auth.Role.CanWrite, fn)
+	scopedWriter := func(scope string, fn http.HandlerFunc) http.Handler {
+		return s.guard.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			u, ok := auth.UserFromContext(r.Context())
+			if !ok || !u.Role.CanWrite() {
+				writeError(w, auth.ErrForbidden)
+				return
+			}
+			if err := auth.CheckScope(r.Context(), scope); err != nil {
+				writeError(w, err)
+				return
+			}
+			fn(w, r)
+		}))
 	}
 	adminOnly := func(fn http.HandlerFunc) http.Handler {
-		return requireRole(auth.Role.IsAdmin, fn)
+		return s.guard.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			u, ok := auth.UserFromContext(r.Context())
+			if !ok || !u.Role.IsAdmin() {
+				writeError(w, auth.ErrForbidden)
+				return
+			}
+			if err := auth.CheckScope(r.Context(), "admin"); err != nil {
+				writeError(w, err)
+				return
+			}
+			fn(w, r)
+		}))
+	}
+	projAccess := func(scope string, needWrite bool, fn http.HandlerFunc) http.Handler {
+		return s.guard.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := auth.CheckScope(r.Context(), scope); err != nil {
+				writeError(w, err)
+				return
+			}
+			nextReq, ok := s.authorizeProject(w, r, r.PathValue("pid"), needWrite)
+			if !ok {
+				return
+			}
+			fn(w, nextReq)
+		}))
+	}
+	projRead := func(fn http.HandlerFunc) http.Handler {
+		return projAccess("read", false, fn)
+	}
+	projWrite := func(fn http.HandlerFunc) http.Handler {
+		return projAccess("write", true, fn)
+	}
+	runAccess := func(scope string, needWrite bool, fn http.HandlerFunc) http.Handler {
+		return s.guard.RequireSession(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if err := auth.CheckScope(r.Context(), scope); err != nil {
+				writeError(w, err)
+				return
+			}
+			run, err := s.results.GetRun(r.Context(), r.PathValue("id"))
+			if err != nil {
+				writeError(w, err)
+				return
+			}
+			nextReq := r
+			if run.ProjectID != "" {
+				var ok bool
+				nextReq, ok = s.authorizeProject(w, r, run.ProjectID, needWrite)
+				if !ok {
+					return
+				}
+			} else if needWrite {
+				if u, ok := auth.UserFromContext(r.Context()); !ok || !u.Role.CanWrite() {
+					writeError(w, auth.ErrForbidden)
+					return
+				}
+			}
+			fn(w, nextReq)
+		}))
 	}
 
-	// Setup, authentication, users, and API tokens.
+	// Setup, authentication, users, 2FA, and API tokens.
 	apiMux.HandleFunc("GET /api/v1/setup/status", s.handleSetupStatus)
 	apiMux.Handle("POST /api/v1/setup", s.guard.RequireSecureTransport(http.HandlerFunc(s.handleSetup)))
 	apiMux.Handle("POST /api/v1/auth/login", s.guard.RequireSecureTransport(http.HandlerFunc(s.handleLogin)))
 	apiMux.Handle("POST /api/v1/auth/logout", authed(s.handleLogout))
 	apiMux.Handle("GET /api/v1/auth/me", authed(s.handleMe))
 	apiMux.Handle("POST /api/v1/auth/password", authed(s.handleChangePassword))
+	apiMux.Handle("POST /api/v1/auth/totp/enroll", authed(s.handleEnrollTOTP))
+	apiMux.Handle("POST /api/v1/auth/totp/confirm", authed(s.handleConfirmTOTP))
+	apiMux.Handle("POST /api/v1/auth/totp/disable", authed(s.handleDisableTOTP))
 	apiMux.Handle("GET /api/v1/auth/sessions", authed(s.handleListSessions))
 	apiMux.Handle("DELETE /api/v1/auth/sessions/{id}", authed(s.handleRevokeSession))
 	apiMux.Handle("GET /api/v1/auth/tokens", authed(s.handleListAPITokens))
@@ -159,95 +230,98 @@ func (s *Server) buildHandler() http.Handler {
 	apiMux.Handle("POST /api/v1/users", adminOnly(s.handleCreateUser))
 	apiMux.Handle("PATCH /api/v1/users/{id}", adminOnly(s.handlePatchUser))
 	apiMux.Handle("DELETE /api/v1/users/{id}", adminOnly(s.handleDeleteUser))
-	apiMux.Handle("GET /api/v1/settings/security", authed(s.handleGetSecurityPolicy))
+	apiMux.Handle("DELETE /api/v1/users/{id}/totp", adminOnly(s.handleAdminResetUserTOTP))
+	apiMux.Handle("GET /api/v1/settings/security", scoped("read", s.handleGetSecurityPolicy))
 	apiMux.Handle("PUT /api/v1/settings/security", adminOnly(s.handlePutSecurityPolicy))
-	apiMux.Handle("GET /api/v1/settings/metrics-sink", authed(s.handleGetMetricsSink))
+	apiMux.Handle("GET /api/v1/settings/metrics-sink", scoped("read", s.handleGetMetricsSink))
 	apiMux.Handle("PUT /api/v1/settings/metrics-sink", adminOnly(s.handlePutMetricsSink))
 	apiMux.Handle("POST /api/v1/settings/metrics-sink/test", adminOnly(s.handleTestMetricsSink))
-	apiMux.Handle("GET /api/v1/metrics/prometheus", authed(s.handlePrometheusMetrics))
+	apiMux.Handle("GET /api/v1/metrics/prometheus", scoped("read", s.handlePrometheusMetrics))
 	apiMux.Handle("GET /api/v1/audit-logs", adminOnly(s.handleListAuditLogs))
 
-	// Projects.
-	apiMux.Handle("GET /api/v1/projects", authed(s.handleListProjects))
-	apiMux.Handle("POST /api/v1/projects", writer(s.handleCreateProject))
-	apiMux.Handle("POST /api/v1/projects/import", writer(s.handleImportProjectArchive))
-	apiMux.Handle("GET /api/v1/projects/{pid}", authed(s.handleGetProject))
-	apiMux.Handle("PATCH /api/v1/projects/{pid}", writer(s.handlePatchProject))
-	apiMux.Handle("DELETE /api/v1/projects/{pid}", writer(s.handleDeleteProject))
-	apiMux.Handle("GET /api/v1/projects/{pid}/export", authed(s.handleExportProject))
-	apiMux.Handle("POST /api/v1/projects/{pid}/import/preview", authed(s.handleImportPreview))
-	apiMux.Handle("POST /api/v1/projects/{pid}/import/apply", writer(s.handleImportApply))
+	// Projects & ACL.
+	apiMux.Handle("GET /api/v1/projects", scoped("read", s.handleListProjects))
+	apiMux.Handle("POST /api/v1/projects", scopedWriter("write", s.handleCreateProject))
+	apiMux.Handle("POST /api/v1/projects/import", scopedWriter("write", s.handleImportProjectArchive))
+	apiMux.Handle("GET /api/v1/projects/{pid}", projRead(s.handleGetProject))
+	apiMux.Handle("PATCH /api/v1/projects/{pid}", projWrite(s.handlePatchProject))
+	apiMux.Handle("DELETE /api/v1/projects/{pid}", projWrite(s.handleDeleteProject))
+	apiMux.Handle("GET /api/v1/projects/{pid}/acl", adminOnly(s.handleGetProjectACL))
+	apiMux.Handle("PUT /api/v1/projects/{pid}/acl", adminOnly(s.handlePutProjectACL))
+	apiMux.Handle("GET /api/v1/projects/{pid}/export", projRead(s.handleExportProject))
+	apiMux.Handle("POST /api/v1/projects/{pid}/import/preview", projRead(s.handleImportPreview))
+	apiMux.Handle("POST /api/v1/projects/{pid}/import/apply", projWrite(s.handleImportApply))
 
 	// API tree, folders, APIs.
-	apiMux.Handle("GET /api/v1/projects/{pid}/tree", authed(s.handleTree))
-	apiMux.Handle("POST /api/v1/projects/{pid}/folders", writer(s.handleCreateFolder))
-	apiMux.Handle("GET /api/v1/projects/{pid}/folders/{id}", authed(s.handleGetFolder))
-	apiMux.Handle("PATCH /api/v1/projects/{pid}/folders/{id}", writer(s.handlePatchFolder))
-	apiMux.Handle("DELETE /api/v1/projects/{pid}/folders/{id}", writer(s.handleDeleteFolder))
-	apiMux.Handle("POST /api/v1/projects/{pid}/apis", writer(s.handleCreateAPI))
-	apiMux.Handle("POST /api/v1/projects/{pid}/apis/resolve-preview", authed(s.handleResolvePreviewAPI))
-	apiMux.Handle("POST /api/v1/projects/{pid}/apis/to-curl", authed(s.handleAPIToCurl))
-	apiMux.Handle("POST /api/v1/projects/{pid}/grpc/discover", authed(s.handleDiscoverGRPC))
-	apiMux.Handle("GET /api/v1/projects/{pid}/apis/{id}", authed(s.handleGetAPI))
-	apiMux.Handle("PUT /api/v1/projects/{pid}/apis/{id}", writer(s.handleUpdateAPI))
-	apiMux.Handle("DELETE /api/v1/projects/{pid}/apis/{id}", writer(s.handleDeleteAPI))
-	apiMux.Handle("POST /api/v1/projects/{pid}/apis/{id}/copy", writer(s.handleCopyAPI))
-	apiMux.Handle("POST /api/v1/projects/{pid}/move", writer(s.handleMoveNode))
+	apiMux.Handle("GET /api/v1/projects/{pid}/tree", projRead(s.handleTree))
+	apiMux.Handle("POST /api/v1/projects/{pid}/folders", projWrite(s.handleCreateFolder))
+	apiMux.Handle("GET /api/v1/projects/{pid}/folders/{id}", projRead(s.handleGetFolder))
+	apiMux.Handle("PATCH /api/v1/projects/{pid}/folders/{id}", projWrite(s.handlePatchFolder))
+	apiMux.Handle("DELETE /api/v1/projects/{pid}/folders/{id}", projWrite(s.handleDeleteFolder))
+	apiMux.Handle("POST /api/v1/projects/{pid}/apis", projWrite(s.handleCreateAPI))
+	apiMux.Handle("POST /api/v1/projects/{pid}/apis/resolve-preview", projRead(s.handleResolvePreviewAPI))
+	apiMux.Handle("POST /api/v1/projects/{pid}/apis/to-curl", projRead(s.handleAPIToCurl))
+	apiMux.Handle("POST /api/v1/projects/{pid}/grpc/discover", projAccess("debug", false, s.handleDiscoverGRPC))
+	apiMux.Handle("GET /api/v1/projects/{pid}/apis/{id}", projRead(s.handleGetAPI))
+	apiMux.Handle("PUT /api/v1/projects/{pid}/apis/{id}", projWrite(s.handleUpdateAPI))
+	apiMux.Handle("DELETE /api/v1/projects/{pid}/apis/{id}", projWrite(s.handleDeleteAPI))
+	apiMux.Handle("POST /api/v1/projects/{pid}/apis/{id}/copy", projWrite(s.handleCopyAPI))
+	apiMux.Handle("POST /api/v1/projects/{pid}/move", projWrite(s.handleMoveNode))
 
 	// Environments.
-	apiMux.Handle("GET /api/v1/projects/{pid}/environments", authed(s.handleListEnvironments))
-	apiMux.Handle("POST /api/v1/projects/{pid}/environments", writer(s.handleCreateEnvironment))
-	apiMux.Handle("GET /api/v1/projects/{pid}/environments/{id}", authed(s.handleGetEnvironment))
-	apiMux.Handle("PUT /api/v1/projects/{pid}/environments/{id}", writer(s.handleUpdateEnvironment))
-	apiMux.Handle("DELETE /api/v1/projects/{pid}/environments/{id}", writer(s.handleDeleteEnvironment))
+	apiMux.Handle("GET /api/v1/projects/{pid}/environments", projRead(s.handleListEnvironments))
+	apiMux.Handle("POST /api/v1/projects/{pid}/environments", projWrite(s.handleCreateEnvironment))
+	apiMux.Handle("GET /api/v1/projects/{pid}/environments/{id}", projRead(s.handleGetEnvironment))
+	apiMux.Handle("PUT /api/v1/projects/{pid}/environments/{id}", projWrite(s.handleUpdateEnvironment))
+	apiMux.Handle("DELETE /api/v1/projects/{pid}/environments/{id}", projWrite(s.handleDeleteEnvironment))
 
 	// Data files.
-	apiMux.Handle("GET /api/v1/projects/{pid}/files", authed(s.handleListFiles))
-	apiMux.Handle("POST /api/v1/projects/{pid}/files", writer(s.handleUploadFile))
-	apiMux.Handle("GET /api/v1/projects/{pid}/files/{name}/preview", authed(s.handlePreviewFile))
-	apiMux.Handle("DELETE /api/v1/projects/{pid}/files/{name}", writer(s.handleDeleteFile))
+	apiMux.Handle("GET /api/v1/projects/{pid}/files", projRead(s.handleListFiles))
+	apiMux.Handle("POST /api/v1/projects/{pid}/files", projWrite(s.handleUploadFile))
+	apiMux.Handle("GET /api/v1/projects/{pid}/files/{name}/preview", projRead(s.handlePreviewFile))
+	apiMux.Handle("DELETE /api/v1/projects/{pid}/files/{name}", projWrite(s.handleDeleteFile))
 
 	// Interactive debug, dry-run, collection runner, history, cURL conversion.
-	apiMux.Handle("POST /api/v1/projects/{pid}/debug", writer(s.handleDebugAPI))
-	apiMux.Handle("POST /api/v1/projects/{pid}/scenarios/debug", writer(s.handleDebugScenario))
-	apiMux.Handle("POST /api/v1/projects/{pid}/tests/run", writer(s.handleRunCollectionTest))
-	apiMux.Handle("GET /api/v1/projects/{pid}/debug-history", authed(s.handleListDebugHistory))
-	apiMux.Handle("GET /api/v1/projects/{pid}/debug-history/{id}", authed(s.handleGetDebugRecord))
-	apiMux.Handle("DELETE /api/v1/projects/{pid}/debug-history", writer(s.handleClearDebugHistory))
-	apiMux.Handle("POST /api/v1/tools/curl/parse", authed(s.handleParseCurl))
+	apiMux.Handle("POST /api/v1/projects/{pid}/debug", projAccess("debug", true, s.handleDebugAPI))
+	apiMux.Handle("POST /api/v1/projects/{pid}/scenarios/debug", projAccess("debug", true, s.handleDebugScenario))
+	apiMux.Handle("POST /api/v1/projects/{pid}/tests/run", projAccess("debug", true, s.handleRunCollectionTest))
+	apiMux.Handle("GET /api/v1/projects/{pid}/debug-history", projRead(s.handleListDebugHistory))
+	apiMux.Handle("GET /api/v1/projects/{pid}/debug-history/{id}", projRead(s.handleGetDebugRecord))
+	apiMux.Handle("DELETE /api/v1/projects/{pid}/debug-history", projAccess("debug", true, s.handleClearDebugHistory))
+	apiMux.Handle("POST /api/v1/tools/curl/parse", scoped("read", s.handleParseCurl))
 
 	// Scenarios.
-	apiMux.Handle("GET /api/v1/projects/{pid}/scenarios", authed(s.handleListScenarios))
-	apiMux.Handle("POST /api/v1/projects/{pid}/scenarios", writer(s.handleCreateScenario))
-	apiMux.Handle("GET /api/v1/projects/{pid}/scenarios/{id}", authed(s.handleGetScenario))
-	apiMux.Handle("PUT /api/v1/projects/{pid}/scenarios/{id}", writer(s.handleUpdateScenario))
-	apiMux.Handle("DELETE /api/v1/projects/{pid}/scenarios/{id}", writer(s.handleDeleteScenario))
-	apiMux.Handle("GET /api/v1/projects/{pid}/scenarios/{id}/export", authed(s.handleExportScenario))
+	apiMux.Handle("GET /api/v1/projects/{pid}/scenarios", projRead(s.handleListScenarios))
+	apiMux.Handle("POST /api/v1/projects/{pid}/scenarios", projWrite(s.handleCreateScenario))
+	apiMux.Handle("GET /api/v1/projects/{pid}/scenarios/{id}", projRead(s.handleGetScenario))
+	apiMux.Handle("PUT /api/v1/projects/{pid}/scenarios/{id}", projWrite(s.handleUpdateScenario))
+	apiMux.Handle("DELETE /api/v1/projects/{pid}/scenarios/{id}", projWrite(s.handleDeleteScenario))
+	apiMux.Handle("GET /api/v1/projects/{pid}/scenarios/{id}/export", projRead(s.handleExportScenario))
 
 	// Runs, snapshots, samples, export.
-	apiMux.Handle("POST /api/v1/projects/{pid}/runs", writer(s.handleStartRun))
-	apiMux.Handle("POST /api/v1/projects/{pid}/runs/estimate", authed(s.handleEstimateRun))
-	apiMux.Handle("GET /api/v1/projects/{pid}/runs", authed(s.handleListRuns))
-	apiMux.Handle("GET /api/v1/runs/compare", authed(s.handleCompareRuns))
-	apiMux.Handle("GET /api/v1/runs/{id}", authed(s.handleGetRun))
-	apiMux.Handle("GET /api/v1/runs/{id}/snapshots", authed(s.handleRunSnapshots))
-	apiMux.Handle("GET /api/v1/runs/{id}/samples", authed(s.handleRunSamples))
-	apiMux.Handle("GET /api/v1/runs/{id}/histogram", authed(s.handleRunHistogram))
-	apiMux.Handle("POST /api/v1/runs/{id}/stop", writer(s.handleStopRun))
-	apiMux.Handle("POST /api/v1/runs/{id}/target", writer(s.handleSetRunTarget))
-	apiMux.Handle("DELETE /api/v1/runs/{id}", writer(s.handleDeleteRun))
-	apiMux.Handle("GET /api/v1/runs/{id}/export", authed(s.handleRunExport))
+	apiMux.Handle("POST /api/v1/projects/{pid}/runs", projAccess("run", true, s.handleStartRun))
+	apiMux.Handle("POST /api/v1/projects/{pid}/runs/estimate", projRead(s.handleEstimateRun))
+	apiMux.Handle("GET /api/v1/projects/{pid}/runs", projRead(s.handleListRuns))
+	apiMux.Handle("GET /api/v1/runs/compare", scoped("read", s.handleCompareRuns))
+	apiMux.Handle("GET /api/v1/runs/{id}", runAccess("read", false, s.handleGetRun))
+	apiMux.Handle("GET /api/v1/runs/{id}/snapshots", runAccess("read", false, s.handleRunSnapshots))
+	apiMux.Handle("GET /api/v1/runs/{id}/samples", runAccess("read", false, s.handleRunSamples))
+	apiMux.Handle("GET /api/v1/runs/{id}/histogram", runAccess("read", false, s.handleRunHistogram))
+	apiMux.Handle("POST /api/v1/runs/{id}/stop", runAccess("run", true, s.handleStopRun))
+	apiMux.Handle("POST /api/v1/runs/{id}/target", runAccess("run", true, s.handleSetRunTarget))
+	apiMux.Handle("DELETE /api/v1/runs/{id}", runAccess("write", true, s.handleDeleteRun))
+	apiMux.Handle("GET /api/v1/runs/{id}/export", runAccess("read", false, s.handleRunExport))
 
 	// Agents, system, WebSocket.
-	apiMux.Handle("GET /api/v1/agents", authed(s.handleListAgents))
-	apiMux.Handle("GET /api/v1/agents/ca", authed(s.handleGetAgentCA))
+	apiMux.Handle("GET /api/v1/agents", scoped("read", s.handleListAgents))
+	apiMux.Handle("GET /api/v1/agents/ca", scoped("read", s.handleGetAgentCA))
 	apiMux.Handle("GET /api/v1/agents/join-tokens", adminOnly(s.handleListJoinTokens))
 	apiMux.Handle("POST /api/v1/agents/join-tokens", adminOnly(s.handleCreateJoinToken))
 	apiMux.Handle("DELETE /api/v1/agents/join-tokens/{id}", adminOnly(s.handleDeleteJoinToken))
 	apiMux.Handle("PATCH /api/v1/agents/{id}", adminOnly(s.handlePatchAgent))
 	apiMux.Handle("DELETE /api/v1/agents/{id}", adminOnly(s.handleRevokeAgent))
-	apiMux.Handle("GET /api/v1/system/info", authed(s.handleSystemInfo))
-	apiMux.Handle("GET /api/v1/ws", authed(s.handleWS))
+	apiMux.Handle("GET /api/v1/system/info", scoped("read", s.handleSystemInfo))
+	apiMux.Handle("GET /api/v1/ws", scoped("read", s.handleWS))
 
 	// Unmatched /api/ paths return JSON 404.
 	apiMux.HandleFunc("/api/", func(w http.ResponseWriter, r *http.Request) {

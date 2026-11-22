@@ -81,12 +81,90 @@ type InitializeResult struct {
 
 // ServerCapabilities describes MCP primitives exposed by Tidegate.
 type ServerCapabilities struct {
-	Tools *ToolsCapability `json:"tools,omitempty"`
+	Tools     *ToolsCapability     `json:"tools,omitempty"`
+	Resources *ResourcesCapability `json:"resources,omitempty"`
+	Prompts   *PromptsCapability   `json:"prompts,omitempty"`
 }
 
 // ToolsCapability indicates tool listing support.
 type ToolsCapability struct {
 	ListChanged bool `json:"listChanged"`
+}
+
+// ResourcesCapability indicates MCP resource listing/reading support.
+type ResourcesCapability struct {
+	Subscribe   bool `json:"subscribe,omitempty"`
+	ListChanged bool `json:"listChanged"`
+}
+
+// PromptsCapability indicates MCP prompt listing/retrieval support.
+type PromptsCapability struct {
+	ListChanged bool `json:"listChanged"`
+}
+
+// Resource describes one concrete readable MCP resource URI.
+type Resource struct {
+	URI         string `json:"uri"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+}
+
+// ResourceTemplate describes a parameterized URI template exposed by MCP.
+type ResourceTemplate struct {
+	URITemplate string `json:"uriTemplate"`
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	MimeType    string `json:"mimeType,omitempty"`
+}
+
+// ResourceContents carries textual data returned by resources/read.
+type ResourceContents struct {
+	URI      string `json:"uri"`
+	MimeType string `json:"mimeType,omitempty"`
+	Text     string `json:"text"`
+}
+
+// ReadResourceParams holds arguments for resources/read.
+type ReadResourceParams struct {
+	URI string `json:"uri"`
+}
+
+// ReadResourceResult holds contents returned by resources/read.
+type ReadResourceResult struct {
+	Contents []ResourceContents `json:"contents"`
+}
+
+// PromptArgument describes one parameter for a prompt template.
+type PromptArgument struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Required    bool   `json:"required,omitempty"`
+}
+
+// Prompt describes a reusable workflow prompt template.
+type Prompt struct {
+	Name        string           `json:"name"`
+	Description string           `json:"description,omitempty"`
+	Arguments   []PromptArgument `json:"arguments,omitempty"`
+}
+
+// GetPromptParams holds arguments for prompts/get.
+type GetPromptParams struct {
+	Name      string            `json:"name"`
+	Arguments map[string]string `json:"arguments,omitempty"`
+}
+
+// PromptMessage represents one message returned by prompts/get.
+type PromptMessage struct {
+	Role    string       `json:"role"`
+	Content ContentBlock `json:"content"`
+}
+
+// GetPromptResult returns rendered messages for a requested prompt.
+type GetPromptResult struct {
+	Description string          `json:"description,omitempty"`
+	Messages    []PromptMessage `json:"messages"`
 }
 
 // Tool describes an MCP callable tool and its JSON Schema input contract.

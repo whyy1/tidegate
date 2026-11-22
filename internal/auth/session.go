@@ -129,16 +129,17 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*User, *Sessi
 		sess                         Session
 		u                            User
 		role                         string
+		totpEnabled                  int
 		created, seen, expires       int64
 		userCreated, userPwChangedAt int64
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT s.id, s.user_id, s.created_at, s.last_seen_at, s.expires_at, s.remote_addr, s.user_agent,
-		        u.username, u.role, u.created_at, u.password_changed_at
+		        u.username, u.role, u.totp_enabled, u.created_at, u.password_changed_at
 		   FROM auth_sessions s JOIN auth_users u ON u.id = s.user_id
 		  WHERE s.token_hash = ?`, hash).
 		Scan(&sess.ID, &sess.UserID, &created, &seen, &expires, &sess.RemoteAddr, &sess.UserAgent,
-			&u.Username, &role, &userCreated, &userPwChangedAt)
+			&u.Username, &role, &totpEnabled, &userCreated, &userPwChangedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, ErrUnauthenticated
 	}
@@ -150,6 +151,8 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*User, *Sessi
 	sess.ExpiresAt = time.UnixMilli(expires)
 	u.ID = sess.UserID
 	u.Role = Role(role)
+	u.RawRole = u.Role
+	u.TOTPEnabled = totpEnabled != 0
 	u.CreatedAt = time.UnixMilli(userCreated)
 	u.PasswordChangedAt = time.UnixMilli(userPwChangedAt)
 

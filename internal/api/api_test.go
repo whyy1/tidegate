@@ -19,6 +19,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1902,5 +1903,229 @@ func TestM2CProtocolsScriptsAndMetricsExporters(t *testing.T) {
 	decodeBody(t, resp, &hResp)
 	if hResp.RunID != runObj.ID || len(hResp.Bands) != 12 {
 		t.Fatalf("unexpected RunHistogramResponse: %+v", hResp)
+	}
+}
+
+func TestPhaseO4TOTPScopedTokensAndProjectACL(t *testing.T) {
+	env := newAPITestEnv(t, false)
+	adminCl := newCookieClient(t)
+
+	// Setup admin user & obtain ID.
+	resp := doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/setup", map[string]string{
+		"code":     env.setupCod,
+		"username": "admin",
+		"password": "strong password 123",
+	}, true)
+	if resp.StatusCode != 201 {
+		t.Fatalf("setup = %d", resp.StatusCode)
+	}
+	var setupOut struct {
+		User struct {
+			ID          int64 `json:"id"`
+			TOTPEnabled bool  `json:"totp_enabled"`
+		} `json:"user"`
+	}
+	decodeBody(t, resp, &setupOut)
+
+	// 1. TOTP enroll -> confirm -> login returns 401 totp_required -> recovery login -> admin reset.
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/auth/totp/enroll", nil, true)
+	if resp.StatusCode != 200 {
+		t.Fatalf("POST /totp/enroll = %d", resp.StatusCode)
+	}
+	var enrollOut auth.TOTPEnrollment
+	decodeBody(t, resp, &enrollOut)
+	totpNow, err := auth.GenerateTOTPCode(enrollOut.Secret, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/auth/totp/confirm", map[string]string{
+		"code": totpNow,
+	}, true)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("POST /totp/confirm = %d: %s", resp.StatusCode, b)
+	}
+	var confirmOut struct {
+		TOTPEnabled   bool     `json:"totp_enabled"`
+		RecoveryCodes []string `json:"recovery_codes"`
+	}
+	decodeBody(t, resp, &confirmOut)
+	if !confirmOut.TOTPEnabled || len(confirmOut.RecoveryCodes) != 8 {
+		t.Fatalf("unexpected totp confirm response: %+v", confirmOut)
+	}
+
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/auth/logout", nil, true)
+	resp.Body.Close()
+	if resp.StatusCode != 204 {
+		t.Fatalf("logout = %d", resp.StatusCode)
+	}
+
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/auth/login", map[string]string{
+		"username": "admin",
+		"password": "strong password 123",
+	}, true)
+	if resp.StatusCode != 401 {
+		resp.Body.Close()
+		t.Fatalf("login without totp_code = %d, want 401", resp.StatusCode)
+	}
+	var errOut struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	decodeBody(t, resp, &errOut)
+	if errOut.Error.Code != string(auth.CodeTOTPRequired) {
+		t.Fatalf("login error code = %q, want %q", errOut.Error.Code, auth.CodeTOTPRequired)
+	}
+
+	// Complete login with recovery code.
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/auth/login", map[string]string{
+		"username":  "admin",
+		"password":  "strong password 123",
+		"totp_code": confirmOut.RecoveryCodes[0],
+	}, true)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("login with recovery code = %d: %s", resp.StatusCode, b)
+	}
+	resp.Body.Close()
+
+	// Admin resets TOTP -> subsequent password-only login works.
+	resp = doJSONReq(t, adminCl, "DELETE", env.baseURL+"/api/v1/users/"+strconv.FormatInt(setupOut.User.ID, 10)+"/totp", nil, true)
+	resp.Body.Close()
+	if resp.StatusCode != 204 {
+		t.Fatalf("DELETE /users/{id}/totp = %d", resp.StatusCode)
+	}
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/auth/logout", nil, true)
+	resp.Body.Close()
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/auth/login", map[string]string{
+		"username": "admin",
+		"password": "strong password 123",
+	}, true)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("login after admin reset totp = %d", resp.StatusCode)
+	}
+
+	// 2. Per-project RBAC ACL isolation.
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/users", map[string]string{
+		"username": "alice_member",
+		"password": "alice-strong-password-1",
+		"role":     "member",
+	}, true)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create user = %d", resp.StatusCode)
+	}
+	var aliceOut struct {
+		User struct {
+			ID int64 `json:"id"`
+		} `json:"user"`
+	}
+	decodeBody(t, resp, &aliceOut)
+
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/projects", map[string]string{
+		"name": "RestrictedProject",
+	}, true)
+	if resp.StatusCode != 201 {
+		t.Fatalf("create project = %d", resp.StatusCode)
+	}
+	var secretProj store.Project
+	decodeBody(t, resp, &secretProj)
+
+	resp = doJSONReq(t, adminCl, "PUT", env.baseURL+"/api/v1/projects/"+secretProj.ID+"/acl", map[string]any{
+		"restricted": true,
+		"members":    []map[string]any{},
+	}, true)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("PUT project acl = %d: %s", resp.StatusCode, b)
+	}
+	resp.Body.Close()
+
+	aliceCl := newCookieClient(t)
+	resp = doJSONReq(t, aliceCl, "POST", env.baseURL+"/api/v1/auth/login", map[string]string{
+		"username": "alice_member",
+		"password": "alice-strong-password-1",
+	}, true)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("alice login = %d", resp.StatusCode)
+	}
+
+	resp = doJSONReq(t, aliceCl, "GET", env.baseURL+"/api/v1/projects", nil, false)
+	var aliceProjects []store.Project
+	decodeBody(t, resp, &aliceProjects)
+	for _, p := range aliceProjects {
+		if p.ID == secretProj.ID {
+			t.Fatalf("unlisted alice should not see restricted project in list: %+v", aliceProjects)
+		}
+	}
+	resp = doJSONReq(t, aliceCl, "GET", env.baseURL+"/api/v1/projects/"+secretProj.ID, nil, false)
+	resp.Body.Close()
+	if resp.StatusCode != 403 {
+		t.Fatalf("alice direct GET restricted project = %d, want 403", resp.StatusCode)
+	}
+
+	// Grant alice access via ACL -> now she can see & read RestrictedProject.
+	resp = doJSONReq(t, adminCl, "PUT", env.baseURL+"/api/v1/projects/"+secretProj.ID+"/acl", map[string]any{
+		"restricted": true,
+		"members":    []map[string]any{{"user_id": aliceOut.User.ID, "role": "viewer"}},
+	}, true)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("grant alice acl = %d", resp.StatusCode)
+	}
+	resp = doJSONReq(t, aliceCl, "GET", env.baseURL+"/api/v1/projects/"+secretProj.ID, nil, false)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("alice GET after ACL grant = %d, want 200", resp.StatusCode)
+	}
+
+	// 3. Token fine-grained scopes: ["read"] allows GET /projects, denies POST /folders with 403 insufficient_scope.
+	resp = doJSONReq(t, adminCl, "POST", env.baseURL+"/api/v1/auth/tokens", map[string]any{
+		"name":   "ro-only",
+		"scopes": []string{"read"},
+	}, true)
+	if resp.StatusCode != 201 {
+		t.Fatalf("POST /auth/tokens = %d", resp.StatusCode)
+	}
+	var tokOut struct {
+		Plaintext string `json:"plaintext"`
+	}
+	decodeBody(t, resp, &tokOut)
+
+	reqGet, _ := http.NewRequest("GET", env.baseURL+"/api/v1/projects", nil)
+	reqGet.Header.Set("Authorization", "Bearer "+tokOut.Plaintext)
+	rGet, err := http.DefaultClient.Do(reqGet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rGet.Body.Close()
+	if rGet.StatusCode != 200 {
+		t.Fatalf("Bearer read-only GET /projects = %d, want 200", rGet.StatusCode)
+	}
+
+	reqPost, _ := http.NewRequest("POST", env.baseURL+"/api/v1/projects/"+secretProj.ID+"/folders", strings.NewReader(`{"name":"blocked"}`))
+	reqPost.Header.Set("Authorization", "Bearer "+tokOut.Plaintext)
+	reqPost.Header.Set("Content-Type", "application/json")
+	rPost, err := http.DefaultClient.Do(reqPost)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rPost.StatusCode != 403 {
+		rPost.Body.Close()
+		t.Fatalf("Bearer read-only POST /folders = %d, want 403", rPost.StatusCode)
+	}
+	var scopeErr struct {
+		Error struct {
+			Code string `json:"code"`
+		} `json:"error"`
+	}
+	decodeBody(t, rPost, &scopeErr)
+	if scopeErr.Error.Code != string(auth.CodeScopeForbidden) {
+		t.Fatalf("scope error code = %q, want %q", scopeErr.Error.Code, auth.CodeScopeForbidden)
 	}
 }

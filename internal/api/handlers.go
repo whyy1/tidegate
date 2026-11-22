@@ -21,6 +21,7 @@ type userDTO struct {
 	ID                int64     `json:"id"`
 	Username          string    `json:"username"`
 	Role              auth.Role `json:"role"`
+	TOTPEnabled       bool      `json:"totp_enabled"`
 	CreatedAt         time.Time `json:"created_at"`
 	PasswordChangedAt time.Time `json:"password_changed_at"`
 }
@@ -30,6 +31,7 @@ func toUserDTO(u *auth.User) userDTO {
 		ID:                u.ID,
 		Username:          u.Username,
 		Role:              u.Role,
+		TOTPEnabled:       u.TOTPEnabled,
 		CreatedAt:         u.CreatedAt,
 		PasswordChangedAt: u.PasswordChangedAt,
 	}
@@ -81,6 +83,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Username string `json:"username"`
 		Password string `json:"password"`
+		TOTPCode string `json:"totp_code"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, err)
@@ -89,6 +92,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	res, err := s.auth.Login(r.Context(), auth.LoginRequest{
 		Username:   body.Username,
 		Password:   body.Password,
+		TOTPCode:   body.TOTPCode,
 		RemoteAddr: r.RemoteAddr,
 		UserAgent:  r.UserAgent(),
 	})
@@ -229,16 +233,50 @@ func deleteVersion(w http.ResponseWriter, r *http.Request) string {
 // ---------------------------------------------------------------------------
 // Projects
 
-func (s *Server) handleListProjects(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) authorizeProject(w http.ResponseWriter, r *http.Request, pid string, needWrite bool) (*http.Request, bool) {
+	u, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, auth.ErrUnauthenticated)
+		return r, false
+	}
+	tok, _ := auth.TokenFromContext(r.Context())
+	effRole, allowed, err := s.auth.ResolveProjectRole(r.Context(), u, tok, pid)
+	if err != nil {
+		writeError(w, err)
+		return r, false
+	}
+	if !allowed || (needWrite && !effRole.CanWrite()) {
+		writeError(w, auth.ErrForbidden)
+		return r, false
+	}
+	return r.WithContext(auth.WithEffectiveRole(r.Context(), effRole)), true
+}
+
+func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	list, err := s.store.ListProjects()
 	if err != nil {
 		writeError(w, err)
 		return
 	}
+	u, _ := auth.UserFromContext(r.Context())
+	tok, _ := auth.TokenFromContext(r.Context())
+	if u != nil {
+		filtered := make([]*store.Project, 0, len(list))
+		for _, pr := range list {
+			if _, allowed, err := s.auth.ResolveProjectRole(r.Context(), u, tok, pr.ID); err == nil && allowed {
+				filtered = append(filtered, pr)
+			}
+		}
+		list = filtered
+	}
 	writeJSON(w, http.StatusOK, list)
 }
 
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
+	if tok, ok := auth.TokenFromContext(r.Context()); ok && len(tok.ProjectIDs) > 0 {
+		writeError(w, auth.ErrForbidden)
+		return
+	}
 	var in store.Project
 	if err := decodeJSON(w, r, &in); err != nil {
 		writeError(w, err)
@@ -316,6 +354,9 @@ func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := s.results.ClearDebugHistory(r.Context(), pid); err != nil {
 		s.log.Warn("清理项目调试历史失败", "project_id", pid, "err", err)
+	}
+	if err := s.auth.DeleteProjectACL(r.Context(), pid); err != nil {
+		s.log.Warn("清理项目 ACL 权限记录失败", "project_id", pid, "err", err)
 	}
 	s.audit(r, "project.delete", "project", pid, nil)
 	w.WriteHeader(http.StatusNoContent)
@@ -487,6 +528,10 @@ func (s *Server) handleImportApply(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleImportProjectArchive(w http.ResponseWriter, r *http.Request) {
+	if tok, ok := auth.TokenFromContext(r.Context()); ok && len(tok.ProjectIDs) > 0 {
+		writeError(w, auth.ErrForbidden)
+		return
+	}
 	in, nameOverride, err := readImportInput(w, r)
 	if err != nil {
 		writeError(w, err)

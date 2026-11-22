@@ -20,6 +20,19 @@ type RunComparisonItem = controller.RunComparisonItem
 
 func (s *Server) handleCompareRuns(w http.ResponseWriter, r *http.Request) {
 	rawIDs := strings.Split(r.URL.Query().Get("ids"), ",")
+	seenProj := make(map[string]bool)
+	for _, rawID := range rawIDs {
+		rid := strings.TrimSpace(rawID)
+		if rid == "" {
+			continue
+		}
+		if run, err := s.results.GetRun(r.Context(), rid); err == nil && run.ProjectID != "" && !seenProj[run.ProjectID] {
+			seenProj[run.ProjectID] = true
+			if _, ok := s.authorizeProject(w, r, run.ProjectID, false); !ok {
+				return
+			}
+		}
+	}
 	maxPoints := 600
 	if rawMax := strings.TrimSpace(r.URL.Query().Get("max_points")); rawMax != "" {
 		if n, err := strconv.Atoi(rawMax); err == nil {

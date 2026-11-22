@@ -23,8 +23,8 @@ func TestMigrateIdempotentAndVersioned(t *testing.T) {
 	if err := db.QueryRow(`SELECT value FROM auth_meta WHERE key = 'schema_version'`).Scan(&v); err != nil {
 		t.Fatal(err)
 	}
-	if v != "2" {
-		t.Fatalf("schema version = %q, want 2", v)
+	if v != "3" {
+		t.Fatalf("schema version = %q, want 3", v)
 	}
 	if _, err := db.Exec(`UPDATE auth_meta SET value = '99' WHERE key = 'schema_version'`); err != nil {
 		t.Fatal(err)
@@ -696,5 +696,228 @@ func TestRolesUsersAndAPITokens(t *testing.T) {
 	}
 	if err := s.DeleteUser(ctx, setup.User.ID, member.ID); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestTOTPEnrollConfirmLoginReplayRecoveryAndReset(t *testing.T) {
+	ctx := context.Background()
+	s, clk, setup := newSetupService(t, nil)
+
+	// Align fake clock cleanly to step start.
+	clk.Advance(30 * time.Second)
+
+	enroll, err := s.BeginTOTPEnrollment(ctx, setup.User.ID)
+	if err != nil {
+		t.Fatalf("BeginTOTPEnrollment: %v", err)
+	}
+	if enroll.Secret == "" || !strings.HasPrefix(enroll.OTPAuthURL, "otpauth://totp/") {
+		t.Fatalf("unexpected enrollment: %+v", enroll)
+	}
+
+	// Confirming with an invalid code must fail.
+	_, err = s.ConfirmTOTPEnrollment(ctx, setup.User.ID, "000000")
+	wantErr(t, err, ErrInvalidTOTP)
+
+	// Confirm with valid RFC 6238 code succeeds and issues 8 recovery codes.
+	code1, err := GenerateTOTPCode(enroll.Secret, clk.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery, err := s.ConfirmTOTPEnrollment(ctx, setup.User.ID, code1)
+	if err != nil {
+		t.Fatalf("ConfirmTOTPEnrollment: %v", err)
+	}
+	if len(recovery) != 8 {
+		t.Fatalf("recovery codes len = %d, want 8", len(recovery))
+	}
+	if _, err := s.BeginTOTPEnrollment(ctx, setup.User.ID); !errors.Is(err, ErrTOTPAlreadyEnabled) {
+		t.Fatalf("re-enroll while enabled = %v, want ErrTOTPAlreadyEnabled", err)
+	}
+
+	// Password-only login now requires TOTP.
+	_, err = login(s, testAdmin, testPassword, testAddr)
+	wantErr(t, err, ErrTOTPRequired)
+
+	// Wrong TOTP fails.
+	_, err = s.Login(ctx, LoginRequest{
+		Username:   testAdmin,
+		Password:   testPassword,
+		TOTPCode:   "999999",
+		RemoteAddr: testAddr,
+		UserAgent:  "test",
+	})
+	wantErr(t, err, ErrInvalidTOTP)
+
+	// Same step used for enrollment cannot be replayed.
+	_, err = s.Login(ctx, LoginRequest{
+		Username:   testAdmin,
+		Password:   testPassword,
+		TOTPCode:   code1,
+		RemoteAddr: testAddr,
+		UserAgent:  "test",
+	})
+	wantErr(t, err, ErrInvalidTOTP)
+
+	// Advancing one step (+30s) allows next valid TOTP login, then blocks replay on that step.
+	clk.Advance(30 * time.Second)
+	code2, err := GenerateTOTPCode(enroll.Secret, clk.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Login(ctx, LoginRequest{
+		Username:   testAdmin,
+		Password:   testPassword,
+		TOTPCode:   code2,
+		RemoteAddr: testAddr,
+		UserAgent:  "test",
+	}); err != nil {
+		t.Fatalf("login with step2 TOTP: %v", err)
+	}
+	_, err = s.Login(ctx, LoginRequest{
+		Username:   testAdmin,
+		Password:   testPassword,
+		TOTPCode:   code2,
+		RemoteAddr: testAddr,
+		UserAgent:  "test",
+	})
+	wantErr(t, err, ErrInvalidTOTP)
+
+	// Recovery code works once and is burned afterwards.
+	if _, err := s.Login(ctx, LoginRequest{
+		Username:   testAdmin,
+		Password:   testPassword,
+		TOTPCode:   recovery[0],
+		RemoteAddr: testAddr,
+		UserAgent:  "test",
+	}); err != nil {
+		t.Fatalf("login with recovery code: %v", err)
+	}
+	_, err = s.Login(ctx, LoginRequest{
+		Username:   testAdmin,
+		Password:   testPassword,
+		TOTPCode:   recovery[0],
+		RemoteAddr: testAddr,
+		UserAgent:  "test",
+	})
+	wantErr(t, err, ErrInvalidTOTP)
+
+	// Wrong password cannot disable TOTP.
+	err = s.DisableTOTP(ctx, setup.User.ID, "wrong password!", recovery[1], testAddr)
+	wantErr(t, err, ErrIncorrectPassword)
+
+	// AdminResetTOTP clears 2FA so password-only login works again.
+	if err := s.AdminResetTOTP(ctx, setup.User.ID); err != nil {
+		t.Fatalf("AdminResetTOTP: %v", err)
+	}
+	uAfter, err := s.User(ctx, setup.User.ID)
+	if err != nil || uAfter.TOTPEnabled {
+		t.Fatalf("expected TOTPEnabled=false after reset, got %+v err=%v", uAfter, err)
+	}
+	if _, err := login(s, testAdmin, testPassword, testAddr); err != nil {
+		t.Fatalf("password login after TOTP reset: %v", err)
+	}
+}
+
+func TestTokenScopesAndProjectACL(t *testing.T) {
+	ctx := context.Background()
+	s, _, setup := newSetupService(t, nil)
+
+	member, err := s.CreateUser(ctx, CreateUserRequest{
+		Username: "acl_member",
+		Password: "acl-member-password-1",
+		Role:     RoleMember,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	viewer, err := s.CreateUser(ctx, CreateUserRequest{
+		Username: "acl_viewer",
+		Password: "acl-viewer-password-1",
+		Role:     RoleViewer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Unknown scope or non-admin requesting "admin" scope is rejected.
+	if _, _, err := s.CreateAPIToken(ctx, CreateTokenRequest{
+		UserID: member.ID,
+		Name:   "bad-scope",
+		Scopes: []string{"bogus"},
+	}); !errors.Is(err, ErrInvalidTokenInput) {
+		t.Fatalf("unknown scope err = %v, want ErrInvalidTokenInput", err)
+	}
+	if _, _, err := s.CreateAPIToken(ctx, CreateTokenRequest{
+		UserID: member.ID,
+		Name:   "non-admin-escalate",
+		Scopes: []string{"admin"},
+	}); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("non-admin admin scope err = %v, want ErrForbidden", err)
+	}
+
+	// Valid scoped & project-bound token persists and enforces CheckScope.
+	tokMeta, rawSecret, err := s.CreateAPIToken(ctx, CreateTokenRequest{
+		UserID:     member.ID,
+		Name:       "mcp-reader",
+		Scopes:     []string{"mcp", "read", "mcp"},
+		ProjectIDs: []string{"proj_a"},
+	})
+	if err != nil {
+		t.Fatalf("CreateAPIToken(scoped): %v", err)
+	}
+	if len(tokMeta.Scopes) != 2 || tokMeta.Scopes[0] != "mcp" || tokMeta.Scopes[1] != "read" {
+		t.Fatalf("unexpected normalized Scopes: %+v", tokMeta.Scopes)
+	}
+	authU, authTok, err := s.AuthenticateBearerFrom(ctx, rawSecret, testAddr)
+	if err != nil {
+		t.Fatalf("AuthenticateBearerFrom: %v", err)
+	}
+	tokCtx := WithAPIToken(ctx, authU, authTok)
+	if err := CheckScope(tokCtx, "read"); err != nil {
+		t.Fatalf("CheckScope(read) = %v", err)
+	}
+	if err := CheckScope(tokCtx, "write"); !errors.Is(err, ErrScopeForbidden) {
+		t.Fatalf("CheckScope(write) = %v, want ErrScopeForbidden", err)
+	}
+
+	// Project ACL resolution: restricted project isolates unlisted member/viewer,
+	// grants explicit viewer->member elevation, respects admin RawRole under narrowed token,
+	// and respects token project_ids restriction.
+	acl, err := s.SetProjectACL(ctx, "proj_secret", true, []ProjectMember{
+		{UserID: viewer.ID, Role: RoleMember},
+	})
+	if err != nil {
+		t.Fatalf("SetProjectACL: %v", err)
+	}
+	if !acl.Restricted || len(acl.Members) != 1 || acl.Members[0].Role != RoleMember {
+		t.Fatalf("unexpected ACL: %+v", acl)
+	}
+
+	if role, ok, err := s.ResolveProjectRole(ctx, member, nil, "proj_secret"); err != nil || ok || role != "" {
+		t.Fatalf("unlisted member on restricted project = (%q, %v, %v), want denied", role, ok, err)
+	}
+	if role, ok, err := s.ResolveProjectRole(ctx, viewer, nil, "proj_secret"); err != nil || !ok || role != RoleMember {
+		t.Fatalf("elevated viewer on restricted project = (%q, %v, %v), want member/true", role, ok, err)
+	}
+
+	// Admin with a viewer-capped bearer token resolves RawRole=admin capped to viewer.
+	_, adminViewerSecret, err := s.CreateAPIToken(ctx, CreateTokenRequest{
+		UserID:     setup.User.ID,
+		Name:       "admin-ro",
+		Role:       RoleViewer,
+		ProjectIDs: []string{"proj_secret"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	adminU, adminTok, err := s.AuthenticateBearerFrom(ctx, adminViewerSecret, testAddr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if role, ok, err := s.ResolveProjectRole(ctx, adminU, adminTok, "proj_secret"); err != nil || !ok || role != RoleViewer {
+		t.Fatalf("admin viewer token on restricted project = (%q, %v, %v), want viewer/true", role, ok, err)
+	}
+	if role, ok, err := s.ResolveProjectRole(ctx, adminU, adminTok, "proj_other"); err != nil || ok || role != "" {
+		t.Fatalf("token excluding proj_other = (%q, %v, %v), want denied", role, ok, err)
 	}
 }

@@ -2,6 +2,7 @@
 @import "uplot/dist/uPlot.min.css";
 
 :root {
+  accent-color: var(--tg-tidal-600);
   --tg-navy-950: #07192e;
   --tg-navy-900: #0b2a4a;
   --tg-navy-800: #123862;

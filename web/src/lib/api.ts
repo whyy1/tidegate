@@ -25,6 +25,7 @@ import type {
   MetricsSinkConfig,
   PreviewResult,
   Project,
+  ProjectACL,
   Run,
   RunComparisonResponse,
   RunDetail,
@@ -38,6 +39,8 @@ import type {
   SetupStatus,
   SnapshotView,
   SystemInfo,
+  TOTPConfirmResult,
+  TOTPEnrollment,
   Tree,
   User,
   UserRole,
@@ -150,17 +153,31 @@ export const api = {
   setupStatus: () => request<SetupStatus>('/api/v1/setup/status', { skipUnauthEvent: true }),
   setup: (payload: { code: string; username: string; password: string }) =>
     request<{ user: User }>('/api/v1/setup', { method: 'POST', jsonBody: payload, skipUnauthEvent: true }),
-  login: (payload: { username: string; password: string }) =>
+  login: (payload: { username: string; password: string; totp_code?: string }) =>
     request<{ user: User }>('/api/v1/auth/login', { method: 'POST', jsonBody: payload, skipUnauthEvent: true }),
   logout: () => request<void>('/api/v1/auth/logout', { method: 'POST', skipUnauthEvent: true }),
   me: () => request<{ user: User }>('/api/v1/auth/me', { skipUnauthEvent: true }),
   changePassword: (payload: { current_password: string; new_password: string }) =>
     request<void>('/api/v1/auth/password', { method: 'POST', jsonBody: payload }),
+  enrollTOTP: () => request<TOTPEnrollment>('/api/v1/auth/totp/enroll', { method: 'POST' }),
+  confirmTOTP: (code: string) =>
+    request<TOTPConfirmResult>('/api/v1/auth/totp/confirm', { method: 'POST', jsonBody: { code } }),
+  disableTOTP: (payload: { password: string; code: string }) =>
+    request<{ totp_enabled: boolean }>('/api/v1/auth/totp/disable', { method: 'POST', jsonBody: payload }),
   listSessions: () => request<{ sessions: SessionItem[] }>('/api/v1/auth/sessions'),
   revokeSession: (id: string) => request<void>(`/api/v1/auth/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
   // Projects & Project Import/Export
   listProjects: async () => (await request<Project[] | null>('/api/v1/projects')) || [],
+  getProjectACL: (pid: string) => request<ProjectACL>(`/api/v1/projects/${encodeURIComponent(pid)}/acl`),
+  putProjectACL: (
+    pid: string,
+    payload: { restricted: boolean; members: Array<{ user_id: number; role: 'member' | 'viewer' }> }
+  ) =>
+    request<ProjectACL>(`/api/v1/projects/${encodeURIComponent(pid)}/acl`, {
+      method: 'PUT',
+      jsonBody: payload,
+    }),
   createProject: (payload: { name: string; description?: string; variables?: KeyValue[] }) =>
     request<Project>('/api/v1/projects', { method: 'POST', jsonBody: payload }),
   getProject: (pid: string) => request<Project>(`/api/v1/projects/${encodeURIComponent(pid)}`),
@@ -451,8 +468,14 @@ export const api = {
 
   // Personal API Tokens
   listAPITokens: async () => (await request<APIToken[] | null>('/api/v1/auth/tokens')) || [],
-  createAPIToken: (body: { name: string; role?: UserRole; ttl_days?: number; expires_in?: string }) =>
-    request<CreateAPITokenResult>('/api/v1/auth/tokens', { method: 'POST', jsonBody: body }),
+  createAPIToken: (body: {
+    name: string
+    role?: UserRole
+    scopes?: string[]
+    project_ids?: string[]
+    ttl_days?: number
+    expires_in?: string
+  }) => request<CreateAPITokenResult>('/api/v1/auth/tokens', { method: 'POST', jsonBody: body }),
   revokeAPIToken: (id: string) =>
     request<void>(`/api/v1/auth/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
@@ -463,6 +486,7 @@ export const api = {
   patchUser: (id: number, body: { role: UserRole }) =>
     request<{ user: User }>(`/api/v1/users/${id}`, { method: 'PATCH', jsonBody: body }),
   deleteUser: (id: number) => request<void>(`/api/v1/users/${id}`, { method: 'DELETE' }),
+  adminResetUserTOTP: (id: number) => request<void>(`/api/v1/users/${id}/totp`, { method: 'DELETE' }),
   getSecurityPolicy: () => request<SecurityPolicy>('/api/v1/settings/security'),
   putSecurityPolicy: (pol: SecurityPolicy) =>
     request<SecurityPolicy>('/api/v1/settings/security', { method: 'PUT', jsonBody: pol }),

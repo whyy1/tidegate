@@ -1,13 +1,14 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { ArchiveRestore, Download, FolderPlus, Save, Trash2, Upload, X } from 'lucide-react'
+import { ArchiveRestore, Download, FolderPlus, Save, Shield, Trash2, Upload, X } from 'lucide-react'
 import { api, APIError } from '../lib/api'
-import type { KeyValue, Project } from '../lib/types'
+import type { KeyValue, Project, User } from '../lib/types'
 import { KeyValueEditor } from './KeyValueEditor'
 
 interface Props {
   open: boolean
   projects: Project[]
   activeProject: Project | null
+  isAdmin?: boolean
   onClose: () => void
   onSelectProject: (id: string) => void
   onProjectsChanged: (selectId?: string) => Promise<void>
@@ -18,12 +19,13 @@ export function ProjectModal({
   open,
   projects,
   activeProject,
+  isAdmin = false,
   onClose,
   onSelectProject,
   onProjectsChanged,
   onToast,
 }: Props) {
-  const [tab, setTab] = useState<'edit' | 'create' | 'import'>('edit')
+  const [tab, setTab] = useState<'edit' | 'acl' | 'create' | 'import'>('edit')
   const [name, setName] = useState('')
   const [desc, setDesc] = useState('')
   const [vars, setVars] = useState<KeyValue[]>([])
@@ -33,6 +35,11 @@ export function ProjectModal({
   const [archiveName, setArchiveName] = useState('')
   const [busy, setBusy] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [aclLoading, setAclLoading] = useState(false)
+  const [aclSaving, setAclSaving] = useState(false)
+  const [aclRestricted, setAclRestricted] = useState(false)
+  const [aclUsers, setAclUsers] = useState<User[]>([])
+  const [aclRoles, setAclRoles] = useState<Record<number, '' | 'viewer' | 'member'>>({})
 
   useEffect(() => {
     if (open && activeProject) {
@@ -42,6 +49,39 @@ export function ProjectModal({
       setConfirmDelete(false)
     }
   }, [open, activeProject])
+
+  useEffect(() => {
+    if (!open || tab !== 'acl' || !isAdmin || !activeProject) return
+    let active = true
+    setAclLoading(true)
+    Promise.all([api.getProjectACL(activeProject.id), api.listUsers()])
+      .then(([acl, users]) => {
+        if (!active) return
+        setAclRestricted(Boolean(acl.restricted))
+        setAclUsers(users)
+        const roleMap: Record<number, '' | 'viewer' | 'member'> = {}
+        for (const m of acl.members || []) {
+          roleMap[m.user_id] = m.role
+        }
+        setAclRoles(roleMap)
+      })
+      .catch((err) => {
+        if (!active) return
+        onToast('error', err instanceof APIError ? err.message : '加载项目访问控制失败')
+      })
+      .finally(() => {
+        if (active) setAclLoading(false)
+      })
+    return () => {
+      active = false
+    }
+  }, [open, tab, isAdmin, activeProject?.id])
+
+  useEffect(() => {
+    if ((!isAdmin || !activeProject) && tab === 'acl') {
+      setTab('edit')
+    }
+  }, [isAdmin, activeProject, tab])
 
   if (!open) return null
 
@@ -104,6 +144,33 @@ export function ProjectModal({
     }
   }
 
+  const handleSaveACL = async (e: FormEvent) => {
+    e.preventDefault()
+    if (!activeProject) return
+    setAclSaving(true)
+    try {
+      const members = aclUsers
+        .filter((u) => u.role !== 'admin')
+        .map((u) => ({ user_id: u.id, role: aclRoles[u.id] }))
+        .filter((m): m is { user_id: number; role: 'member' | 'viewer' } => m.role === 'member' || m.role === 'viewer')
+      const saved = await api.putProjectACL(activeProject.id, {
+        restricted: aclRestricted,
+        members,
+      })
+      const roleMap: Record<number, '' | 'viewer' | 'member'> = {}
+      for (const m of saved.members || []) {
+        roleMap[m.user_id] = m.role
+      }
+      setAclRestricted(saved.restricted)
+      setAclRoles(roleMap)
+      onToast('success', '项目级成员访问控制 (ACL) 已更新')
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : '保存项目 ACL 失败')
+    } finally {
+      setAclSaving(false)
+    }
+  }
+
   const handleImportArchive = async (e: FormEvent) => {
     e.preventDefault()
     if (!archiveFile) {
@@ -142,30 +209,49 @@ export function ProjectModal({
           </button>
         </div>
 
-        <div className="px-5 pt-3 border-b border-slate-200 flex gap-4 text-xs font-medium">
+        <div role="tablist" aria-label="项目管理页签" className="tg-tablist px-5 pt-2 border-b border-slate-200 flex gap-5 text-xs font-medium">
           <button
             type="button"
+            role="tab"
+            aria-selected={tab === 'edit'}
             onClick={() => setTab('edit')}
-            className={`pb-2.5 border-b-2 ${
-              tab === 'edit' ? 'border-sky-500 text-sky-700' : 'border-transparent text-slate-500 hover:text-slate-800'
+            className={`tg-tab pb-2.5 transition-colors ${
+              tab === 'edit' ? 'text-sky-700' : 'text-slate-500 hover:text-slate-800'
             }`}
           >
             当前项目配置
           </button>
+          {isAdmin && activeProject && (
+            <button
+              type="button"
+              role="tab"
+              aria-selected={tab === 'acl'}
+              onClick={() => setTab('acl')}
+              className={`tg-tab pb-2.5 transition-colors ${
+                tab === 'acl' ? 'text-sky-700' : 'text-slate-500 hover:text-slate-800'
+              }`}
+            >
+              <Shield className="w-3.5 h-3.5 inline mr-1" /> 成员访问控制
+            </button>
+          )}
           <button
             type="button"
+            role="tab"
+            aria-selected={tab === 'create'}
             onClick={() => setTab('create')}
-            className={`pb-2.5 border-b-2 ${
-              tab === 'create' ? 'border-sky-500 text-sky-700' : 'border-transparent text-slate-500 hover:text-slate-800'
+            className={`tg-tab pb-2.5 transition-colors ${
+              tab === 'create' ? 'text-sky-700' : 'text-slate-500 hover:text-slate-800'
             }`}
           >
             <FolderPlus className="w-3.5 h-3.5 inline mr-1" /> 新建项目
           </button>
           <button
             type="button"
+            role="tab"
+            aria-selected={tab === 'import'}
             onClick={() => setTab('import')}
-            className={`pb-2.5 border-b-2 ${
-              tab === 'import' ? 'border-sky-500 text-sky-700' : 'border-transparent text-slate-500 hover:text-slate-800'
+            className={`tg-tab pb-2.5 transition-colors ${
+              tab === 'import' ? 'text-sky-700' : 'text-slate-500 hover:text-slate-800'
             }`}
           >
             <ArchiveRestore className="w-3.5 h-3.5 inline mr-1" /> 导入 `.tidegate` 归档
@@ -260,6 +346,84 @@ export function ProjectModal({
                   <Save className="w-3.5 h-3.5" /> 保存项目
                 </button>
               </div>
+            </form>
+          )}
+
+          {tab === 'acl' && isAdmin && activeProject && (
+            <form onSubmit={handleSaveACL} className="space-y-4">
+              {aclLoading ? (
+                <p className="text-slate-500">正在加载项目成员访问控制...</p>
+              ) : (
+                <>
+                  <div className="p-3 rounded-lg border border-slate-200 bg-slate-50 space-y-1.5">
+                    <label className="flex items-center gap-2 font-semibold text-slate-800 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={aclRestricted}
+                        onChange={(e) => setAclRestricted(e.target.checked)}
+                      />
+                      <span>开启私有隔离：仅显式授权成员可访问此项目（管理员始终可见）</span>
+                    </label>
+                    <p className="text-[11px] text-slate-500 pl-6">
+                      未开启时，团队所有已登录用户均按全局角色访问该项目（下方成员配置仍可对单个用户授予额外权限，如将 viewer 在本项目提升为 member）。
+                    </p>
+                  </div>
+
+                  <div className="border border-slate-200 rounded-lg overflow-hidden">
+                    <table className="w-full text-left border-collapse">
+                      <thead className="bg-slate-50 border-b border-slate-200 text-slate-500">
+                        <tr>
+                          <th className="px-3 py-2">用户名</th>
+                          <th className="px-3 py-2">全局角色</th>
+                          <th className="px-3 py-2">本项目权限分配</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-100">
+                        {aclUsers.map((u) => (
+                          <tr key={u.id}>
+                            <td className="px-3 py-2 font-medium text-slate-800">{u.username}</td>
+                            <td className="px-3 py-2 font-mono text-slate-500">{u.role}</td>
+                            <td className="px-3 py-2">
+                              {u.role === 'admin' ? (
+                                <span className="px-2 py-0.5 rounded bg-sky-50 text-sky-800 font-mono text-[11px]">
+                                  admin（始终可管理）
+                                </span>
+                              ) : (
+                                <select
+                                  value={aclRoles[u.id] || ''}
+                                  onChange={(e) =>
+                                    setAclRoles((prev) => ({
+                                      ...prev,
+                                      [u.id]: e.target.value as '' | 'viewer' | 'member',
+                                    }))
+                                  }
+                                  className="px-2 py-1 border border-slate-300 rounded bg-white text-xs"
+                                >
+                                  <option value="">
+                                    {aclRestricted ? '无权限（禁止访问）' : '默认（沿用全局角色）'}
+                                  </option>
+                                  <option value="viewer">viewer（只读访问）</option>
+                                  <option value="member">member（读写与执行）</option>
+                                </select>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+
+                  <div className="flex justify-end pt-2 border-t border-slate-200">
+                    <button
+                      type="submit"
+                      disabled={aclSaving}
+                      className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white font-medium disabled:opacity-50"
+                    >
+                      <Save className="w-3.5 h-3.5" /> {aclSaving ? '保存中...' : '保存项目 ACL'}
+                    </button>
+                  </div>
+                </>
+              )}
             </form>
           )}
 

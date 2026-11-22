@@ -34,6 +34,7 @@ type Options struct {
 	Store      *store.Store
 	Results    *store.ResultDB
 	Controller *controller.Controller
+	Auth       *auth.Service
 	Version    string
 	Audit      AuditFunc
 }
@@ -43,6 +44,7 @@ type Server struct {
 	store   *store.Store
 	results *store.ResultDB
 	ctrl    *controller.Controller
+	auth    *auth.Service
 	version string
 	audit   AuditFunc
 
@@ -57,6 +59,7 @@ func NewServer(opts Options) *Server {
 		store:   opts.Store,
 		results: opts.Results,
 		ctrl:    opts.Controller,
+		auth:    opts.Auth,
 		version: opts.Version,
 		audit:   opts.Audit,
 		limiter: newRateWindow(defaultRatePerMinute, time.Minute),
@@ -84,6 +87,10 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	u, ok := auth.UserFromContext(r.Context())
 	if !ok {
 		auth.WriteError(w, auth.ErrUnauthenticated)
+		return
+	}
+	if err := auth.CheckScope(r.Context(), "mcp"); err != nil {
+		auth.WriteError(w, err)
 		return
 	}
 
@@ -164,13 +171,15 @@ func (s *Server) dispatch(r *http.Request, u *auth.User, pol controller.Security
 		return InitializeResult{
 			ProtocolVersion: proto,
 			Capabilities: ServerCapabilities{
-				Tools: &ToolsCapability{ListChanged: false},
+				Tools:     &ToolsCapability{ListChanged: false},
+				Resources: &ResourcesCapability{ListChanged: false},
+				Prompts:   &PromptsCapability{ListChanged: false},
 			},
 			ServerInfo: EntityInfo{
 				Name:    "tidegate",
 				Version: s.version,
 			},
-			Instructions: "Tidegate 接口调试、场景编排与分布式压测安全控制台。所有敏感变量与请求凭据已自动脱敏；写入、调试及压测操作受 RBAC 角色、目标白名单及 MCP 压测规模护栏限制。",
+			Instructions: "Tidegate 接口调试、场景编排与分布式压测安全控制台。支持 MCP Tools、Resources (tidegate://...) 与 Prompts；所有敏感变量与请求凭据已自动脱敏，访问受项目级 RBAC、Token Scope、目标白名单及规模护栏限制。",
 		}, nil
 
 	case "ping":
@@ -212,14 +221,61 @@ func (s *Server) dispatch(r *http.Request, u *auth.User, pol controller.Security
 		}
 		return res, nil
 
+	case "resources/list":
+		items, rpcErr := s.listMCPResources(r.Context(), u)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		return map[string]any{"resources": items}, nil
+
+	case "resources/templates/list":
+		if err := auth.CheckScope(r.Context(), "read"); err != nil {
+			return nil, &rpcError{Code: CodeInvalidRequest, Message: err.Error()}
+		}
+		return map[string]any{"resourceTemplates": s.listMCPResourceTemplates()}, nil
+
+	case "resources/read":
+		out, rpcErr := s.readMCPResource(r.Context(), u, req.Params)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		return out, nil
+
+	case "prompts/list":
+		return map[string]any{"prompts": s.listMCPPrompts()}, nil
+
+	case "prompts/get":
+		out, rpcErr := s.getMCPPrompt(req.Params)
+		if rpcErr != nil {
+			return nil, rpcErr
+		}
+		return out, nil
+
 	default:
 		return nil, &rpcError{Code: CodeMethodNotFound, Message: fmt.Sprintf("不支持的 MCP 方法 %q", req.Method)}
 	}
 }
 
 func (s *Server) invokeTool(r *http.Request, u *auth.User, pol controller.SecurityPolicy, td toolDef, args json.RawMessage) *CallToolResult {
-	if !td.readOnly && !u.Role.CanWrite() {
+	if td.scope != "" {
+		if err := auth.CheckScope(r.Context(), td.scope); err != nil {
+			return toolErrorResult(err)
+		}
+	}
+	if !td.readOnly && !u.Role.CanWrite() && s.auth == nil {
 		return toolErrorResult(fmt.Errorf("权限不足：当前令牌/用户角色为 %s，仅只读工具允许访问（需要 member 或 admin 权限）", u.Role))
+	}
+	if !td.readOnly && !u.Role.CanWrite() && td.spec.Name != "import_api_spec" {
+		// Global viewers cannot write unless an explicit per-project ACL grants member;
+		// reject early when caller has no project_id or verify via authorizeProject below.
+		var check struct {
+			ProjectID string `json:"project_id"`
+			RunID     string `json:"run_id"`
+		}
+		_ = json.Unmarshal(args, &check)
+		if strings.TrimSpace(check.ProjectID) == "" && strings.TrimSpace(check.RunID) == "" {
+			return toolErrorResult(fmt.Errorf("权限不足：当前令牌/用户角色为 %s，仅只读工具允许访问（需要 member 或 admin 权限）", u.Role))
+		}
 	}
 
 	timeout := defaultQueryTimeout
@@ -234,6 +290,141 @@ func (s *Server) invokeTool(r *http.Request, u *auth.User, pol controller.Securi
 		return toolErrorResult(err)
 	}
 	return formatToolSuccess(out)
+}
+
+func (s *Server) accessibleProjects(ctx context.Context, u *auth.User) ([]*store.Project, error) {
+	list, err := s.store.ListProjects()
+	if err != nil {
+		return nil, err
+	}
+	if s.auth == nil || u == nil {
+		return list, nil
+	}
+	tok, _ := auth.TokenFromContext(ctx)
+	out := make([]*store.Project, 0, len(list))
+	for _, pr := range list {
+		if _, allowed, err := s.auth.ResolveProjectRole(ctx, u, tok, pr.ID); err == nil && allowed {
+			out = append(out, pr)
+		}
+	}
+	return out, nil
+}
+
+func (s *Server) authorizeProject(ctx context.Context, u *auth.User, pid string, needWrite bool) (auth.Role, error) {
+	if s.auth == nil {
+		if u != nil && needWrite && !u.Role.CanWrite() {
+			return u.Role, auth.ErrForbidden
+		}
+		if u != nil {
+			return u.Role, nil
+		}
+		return auth.RoleAdmin, nil
+	}
+	tok, _ := auth.TokenFromContext(ctx)
+	role, allowed, err := s.auth.ResolveProjectRole(ctx, u, tok, pid)
+	if err != nil {
+		return "", err
+	}
+	if !allowed {
+		return "", fmt.Errorf("%w：无权访问项目 %s", auth.ErrForbidden, pid)
+	}
+	if needWrite && !role.CanWrite() {
+		return role, fmt.Errorf("%w：在项目 %s 中仅具有只读角色 %s", auth.ErrForbidden, pid, role)
+	}
+	return role, nil
+}
+
+func (s *Server) authorizeRun(ctx context.Context, u *auth.User, runID string, needWrite bool) (*store.Run, auth.Role, error) {
+	run, err := s.results.GetRun(ctx, runID)
+	if err != nil {
+		return nil, "", err
+	}
+	var effRole auth.Role
+	if u != nil {
+		effRole = u.Role
+	}
+	if run.ProjectID != "" {
+		r, err := s.authorizeProject(ctx, u, run.ProjectID, needWrite)
+		if err != nil {
+			return nil, r, err
+		}
+		effRole = r
+	} else if needWrite && (u == nil || !u.Role.CanWrite()) {
+		return nil, effRole, auth.ErrForbidden
+	}
+	return run, effRole, nil
+}
+
+func (s *Server) buildProjectWorkspace(pid string) (map[string]any, error) {
+	proj, err := s.store.GetProject(pid)
+	if err != nil {
+		return nil, err
+	}
+	tree, err := s.store.Tree(pid)
+	if err != nil {
+		return nil, err
+	}
+	envs, err := s.store.ListEnvironments(pid)
+	if err != nil {
+		return nil, err
+	}
+	scens, err := s.store.ListScenarios(pid)
+	if err != nil {
+		return nil, err
+	}
+	files, err := s.store.ListFiles(pid)
+	if err != nil {
+		return nil, err
+	}
+	scenSummaries := make([]map[string]any, 0, len(scens))
+	for _, sc := range scens {
+		scenSummaries = append(scenSummaries, map[string]any{
+			"id":             sc.ID,
+			"name":           sc.Name,
+			"description":    sc.Description,
+			"environment_id": sc.EnvironmentID,
+			"step_count":     len(sc.Steps),
+			"load_mode":      sc.Load.Mode,
+		})
+	}
+	return map[string]any{
+		"project":      proj,
+		"tree":         redactTreeSecrets(tree),
+		"environments": envs,
+		"scenarios":    scenSummaries,
+		"data_files":   files,
+	}, nil
+}
+
+func (s *Server) buildRunReport(ctx context.Context, u *auth.User, id string, sampleLimit int) (map[string]any, error) {
+	run, _, err := s.authorizeRun(ctx, u, id, false)
+	if err != nil {
+		return nil, err
+	}
+	alerts, err := s.results.Alerts(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	hist, _ := s.ctrl.RunHistogram(ctx, id)
+	thresholds, thresholdsPassed := controller.EvaluateRunThresholds(run)
+	var samples []store.SampleRecord
+	if sampleLimit > 0 {
+		samples, err = s.results.Samples(ctx, id, store.SampleQuery{Limit: sampleLimit})
+		if err != nil {
+			return nil, err
+		}
+		for i := range samples {
+			samples[i].Data = redactSampleRecordData(samples[i].Data)
+		}
+	}
+	return map[string]any{
+		"run":               run,
+		"thresholds":        thresholds,
+		"thresholds_passed": thresholdsPassed,
+		"alerts":            alerts,
+		"histogram":         hist,
+		"samples":           samples,
+	}, nil
 }
 
 func negotiateProtocol(clientVer string) string {

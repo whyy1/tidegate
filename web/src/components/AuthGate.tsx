@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, Eye, EyeOff, KeyRound, Lock, Radio, Server, ShieldCheck } from 'lucide-react'
 import { api, APIError } from '../lib/api'
 import type { SetupStatus, User } from '../lib/types'
@@ -14,10 +14,19 @@ export function AuthGate({ status, onAuthenticated }: Props) {
   const [username, setUsername] = useState('')
   const [password, setPassword] = useState('')
   const [confirmPwd, setConfirmPwd] = useState('')
+  const [totpStep, setTotpStep] = useState(false)
+  const [totpCode, setTotpCode] = useState('')
   const [showPwd, setShowPwd] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [insecureTransport, setInsecureTransport] = useState(false)
+  const totpInputRef = useRef<HTMLInputElement>(null)
+
+  useEffect(() => {
+    if (totpStep) {
+      totpInputRef.current?.focus()
+    }
+  }, [totpStep])
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -33,17 +42,31 @@ export function AuthGate({ status, onAuthenticated }: Props) {
         return
       }
     }
+    if (!isSetup && totpStep && !totpCode.trim()) {
+      setError('请输入 6 位动态验证码或恢复码')
+      return
+    }
     setSubmitting(true)
     try {
       const res = isSetup
         ? await api.setup({ code: code.trim(), username: username.trim(), password })
-        : await api.login({ username: username.trim(), password })
+        : await api.login({
+            username: username.trim(),
+            password,
+            totp_code: totpStep ? totpCode.trim() : undefined,
+          })
       onAuthenticated(res.user)
     } catch (err) {
       if (err instanceof APIError) {
-        setError(err.message)
-        if (err.code === 'insecure_transport') {
-          setInsecureTransport(true)
+        if (!isSetup && err.code === 'totp_required') {
+          setTotpStep(true)
+          setTotpCode('')
+          setError('')
+        } else {
+          setError(err.message)
+          if (err.code === 'insecure_transport') {
+            setInsecureTransport(true)
+          }
         }
       } else {
         setError('网络请求失败，请检查服务是否在线')
@@ -147,6 +170,7 @@ export function AuthGate({ status, onAuthenticated }: Props) {
                     id="tg-setup-code"
                     type="text"
                     required
+                    spellCheck={false}
                     autoComplete="one-time-code"
                     value={code}
                     onChange={(e) => setCode(e.target.value)}
@@ -157,51 +181,102 @@ export function AuthGate({ status, onAuthenticated }: Props) {
               </div>
             )}
 
-            <div>
-              <label htmlFor="tg-auth-username" className="block text-xs font-semibold text-slate-700 mb-1.5">
-                用户名
-              </label>
-              <div className="relative">
-                <ShieldCheck className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                <input
-                  id="tg-auth-username"
-                  type="text"
-                  required
-                  autoComplete="username"
-                  value={username}
-                  onChange={(e) => setUsername(e.target.value)}
-                  placeholder={isSetup ? '例如 admin' : '输入用户名'}
-                  className="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-lg focus:border-sky-600 focus:ring-2 focus:ring-sky-500/20 focus:outline-none"
-                />
-              </div>
-            </div>
+            {(!totpStep || isSetup) ? (
+              <>
+                <div>
+                  <label htmlFor="tg-auth-username" className="block text-xs font-semibold text-slate-700 mb-1.5">
+                    用户名
+                  </label>
+                  <div className="relative">
+                    <ShieldCheck className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      id="tg-auth-username"
+                      type="text"
+                      required
+                      spellCheck={false}
+                      autoComplete="username"
+                      value={username}
+                      onChange={(e) => setUsername(e.target.value)}
+                      placeholder={isSetup ? '例如 admin' : '输入用户名'}
+                      className="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-lg focus:border-sky-600 focus:ring-2 focus:ring-sky-500/20 focus:outline-none"
+                    />
+                  </div>
+                </div>
 
-            <div>
-              <label htmlFor="tg-auth-password" className="block text-xs font-semibold text-slate-700 mb-1.5">
-                密码{isSetup ? '（至少 10 个字符）' : ''}
-              </label>
-              <div className="relative">
-                <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
-                <input
-                  id="tg-auth-password"
-                  type={showPwd ? 'text' : 'password'}
-                  required
-                  autoComplete={isSetup ? 'new-password' : 'current-password'}
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="输入密码"
-                  className="w-full pl-9 pr-10 py-2 text-sm border border-slate-300 rounded-lg focus:border-sky-600 focus:ring-2 focus:ring-sky-500/20 focus:outline-none"
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowPwd((v) => !v)}
-                  aria-label={showPwd ? '隐藏密码' : '显示密码'}
-                  className="absolute right-2.5 top-2 p-0.5 rounded text-slate-400 hover:text-slate-700"
-                >
-                  {showPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
+                <div>
+                  <label htmlFor="tg-auth-password" className="block text-xs font-semibold text-slate-700 mb-1.5">
+                    密码{isSetup ? '（至少 10 个字符）' : ''}
+                  </label>
+                  <div className="relative">
+                    <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      id="tg-auth-password"
+                      type={showPwd ? 'text' : 'password'}
+                      required
+                      autoComplete={isSetup ? 'new-password' : 'current-password'}
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="输入密码"
+                      className="w-full pl-9 pr-10 py-2 text-sm border border-slate-300 rounded-lg focus:border-sky-600 focus:ring-2 focus:ring-sky-500/20 focus:outline-none"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPwd((v) => !v)}
+                      aria-label={showPwd ? '隐藏密码' : '显示密码'}
+                      className="absolute right-2.5 top-2 p-0.5 rounded text-slate-400 hover:text-slate-700"
+                    >
+                      {showPwd ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-3">
+                <div className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs">
+                  <span className="text-slate-600">
+                    正在验证账号 <strong className="font-mono text-slate-900">{username}</strong>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setTotpStep(false)
+                      setTotpCode('')
+                      setError('')
+                    }}
+                    className="text-sky-700 hover:underline font-medium"
+                  >
+                    返回账号密码登录
+                  </button>
+                </div>
+
+                <div>
+                  <label htmlFor="tg-auth-totp" className="block text-xs font-semibold text-slate-700 mb-1">
+                    双因素动态验证码（2FA）
+                  </label>
+                  <p className="text-[11px] text-slate-500 mb-1.5">
+                    请输入验证器 App 中显示的 6 位数字动态码，或输入一次性 8 位恢复码（如 XXXX-XXXX）。
+                  </p>
+                  <div className="relative">
+                    <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
+                    <input
+                      ref={totpInputRef}
+                      id="tg-auth-totp"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      pattern="[0-9A-Za-z-]*"
+                      maxLength={12}
+                      spellCheck={false}
+                      required
+                      value={totpCode}
+                      onChange={(e) => setTotpCode(e.target.value)}
+                      placeholder="6 位数字验证码或 XXXX-XXXX"
+                      className="tg-tabular w-full pl-9 pr-3 py-2 text-sm font-mono tracking-widest border border-slate-300 rounded-lg focus:border-sky-600 focus:ring-2 focus:ring-sky-500/20 focus:outline-none"
+                    />
+                  </div>
+                </div>
               </div>
-            </div>
+            )}
 
             {isSetup && (
               <div>
@@ -229,7 +304,13 @@ export function AuthGate({ status, onAuthenticated }: Props) {
               disabled={submitting}
               className="w-full py-2.5 rounded-lg bg-[#0B2A4A] hover:bg-[#123862] text-white text-sm font-semibold shadow-xs transition-colors disabled:opacity-50"
             >
-              {submitting ? '正在验证并进入系统...' : isSetup ? '完成初始化并进入控制台' : '登录控制台'}
+              {submitting
+                ? '正在验证并进入系统...'
+                : isSetup
+                  ? '完成初始化并进入控制台'
+                  : totpStep
+                    ? '验证动态码并登录'
+                    : '登录控制台'}
             </button>
           </form>
         </div>

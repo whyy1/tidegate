@@ -456,6 +456,7 @@ export function App() {
         open={projectModalOpen}
         projects={projects}
         activeProject={activeProject}
+        isAdmin={user.role === 'admin'}
         onClose={() => setProjectModalOpen(false)}
         onSelectProject={selectProject}
         onProjectsChanged={loadProjects}
@@ -479,6 +480,8 @@ export function App() {
         open={accountModalOpen}
         initialTab={accountInitialTab}
         user={user}
+        projects={projects}
+        onUserUpdated={(u) => setUser(u)}
         onClose={() => setAccountModalOpen(false)}
         onToast={pushToast}
         onLoggedOut={() => {

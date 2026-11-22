@@ -53,6 +53,29 @@ var migrations = [][]string{
 		)`,
 		`CREATE INDEX IF NOT EXISTS auth_tokens_user_idx ON auth_tokens(user_id)`,
 	},
+	// Version 3: TOTP two-factor authentication, token scopes/project bindings, and project-level ACLs.
+	{
+		`ALTER TABLE auth_users ADD COLUMN totp_secret TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE auth_users ADD COLUMN totp_enabled INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE auth_users ADD COLUMN totp_last_step INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE auth_users ADD COLUMN totp_recovery_hashes TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE auth_users ADD COLUMN totp_pending_secret TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE auth_tokens ADD COLUMN scopes TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE auth_tokens ADD COLUMN project_ids TEXT NOT NULL DEFAULT ''`,
+		`CREATE TABLE IF NOT EXISTS auth_project_acl (
+			project_id TEXT    PRIMARY KEY,
+			restricted INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL
+		)`,
+		`CREATE TABLE IF NOT EXISTS auth_project_members (
+			project_id TEXT    NOT NULL,
+			user_id    INTEGER NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+			role       TEXT    NOT NULL,
+			updated_at INTEGER NOT NULL,
+			PRIMARY KEY (project_id, user_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS auth_project_members_user_idx ON auth_project_members(user_id)`,
+	},
 }
 
 const schemaVersionKey = "schema_version"

@@ -10,8 +10,33 @@ export interface User {
   id: number
   username: string
   role: UserRole
+  totp_enabled?: boolean
   created_at: string
   password_changed_at: string
+}
+
+export interface TOTPEnrollment {
+  secret: string
+  otpauth_url: string
+  issuer: string
+  account: string
+}
+
+export interface TOTPConfirmResult {
+  totp_enabled: boolean
+  recovery_codes: string[]
+}
+
+export interface ProjectMember {
+  user_id: number
+  username?: string
+  role: 'member' | 'viewer'
+}
+
+export interface ProjectACL {
+  project_id: string
+  restricted: boolean
+  members: ProjectMember[]
 }
 
 export interface SessionItem {
@@ -913,6 +938,8 @@ export interface APIToken {
   name: string
   prefix: string
   role: UserRole
+  scopes?: string[]
+  project_ids?: string[]
   created_at: string
   last_used_at?: string
   expires_at?: string

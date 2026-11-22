@@ -75,6 +75,8 @@ type User struct {
 	ID                int64
 	Username          string
 	Role              Role
+	RawRole           Role // underlying DB role before per-token/per-project narrowing
+	TOTPEnabled       bool
 	CreatedAt         time.Time
 	PasswordChangedAt time.Time
 }
@@ -472,7 +474,7 @@ func (s *Service) createFirstAdmin(ctx context.Context, username, password strin
 	if err != nil {
 		return nil, fmt.Errorf("auth: create admin: %w", err)
 	}
-	return &User{ID: id, Username: username, Role: RoleAdmin, CreatedAt: now, PasswordChangedAt: now}, nil
+	return &User{ID: id, Username: username, Role: RoleAdmin, RawRole: RoleAdmin, CreatedAt: now, PasswordChangedAt: now}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +485,7 @@ func (s *Service) createFirstAdmin(ctx context.Context, username, password strin
 type LoginRequest struct {
 	Username   string
 	Password   string
+	TOTPCode   string
 	RemoteAddr string
 	UserAgent  string
 }
@@ -545,13 +548,24 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*LoginResult, er
 		s.loginFailed(userKey, addrKey)
 		return nil, ErrInvalidCredentials
 	}
-	s.loginByUser.reset(userKey)
-	s.loginByAddr.reset(addrKey)
-
 	if needsRehash(stored, s.params) {
 		s.rehash(ctx, u.ID, stored, req.Password)
 	}
 	release()
+
+	if u.TOTPEnabled {
+		code := strings.TrimSpace(req.TOTPCode)
+		if code == "" {
+			return nil, ErrTOTPRequired
+		}
+		if err := s.verifyUserTOTP(ctx, u.ID, code); err != nil {
+			s.loginFailed(userKey, addrKey)
+			return nil, err
+		}
+	}
+
+	s.loginByUser.reset(userKey)
+	s.loginByAddr.reset(addrKey)
 
 	sess, token, err := s.createSession(ctx, u.ID, req.RemoteAddr, req.UserAgent)
 	if err != nil {
@@ -718,18 +732,21 @@ func (s *Service) userCount(ctx context.Context, q queryer) (int, error) {
 	return n, nil
 }
 
-const userColumns = `id, username, role, created_at, password_changed_at, password_hash`
+const userColumns = `id, username, role, totp_enabled, created_at, password_changed_at, password_hash`
 
 func scanUser(row *sql.Row) (*User, string, error) {
 	var (
 		u                  User
 		role, hash         string
+		totpEnabled        int
 		created, pwChanged int64
 	)
-	if err := row.Scan(&u.ID, &u.Username, &role, &created, &pwChanged, &hash); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &role, &totpEnabled, &created, &pwChanged, &hash); err != nil {
 		return nil, "", err
 	}
 	u.Role = Role(role)
+	u.RawRole = u.Role
+	u.TOTPEnabled = totpEnabled != 0
 	u.CreatedAt = time.UnixMilli(created)
 	u.PasswordChangedAt = time.UnixMilli(pwChanged)
 	return &u, hash, nil
@@ -779,7 +796,7 @@ type CreateUserRequest struct {
 // ListUsers returns all accounts sorted by creation order.
 func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, username, role, created_at, password_changed_at FROM auth_users ORDER BY id ASC`)
+		`SELECT id, username, role, totp_enabled, created_at, password_changed_at FROM auth_users ORDER BY id ASC`)
 	if err != nil {
 		return nil, fmt.Errorf("auth: list users: %w", err)
 	}
@@ -789,12 +806,15 @@ func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
 		var (
 			u                  User
 			role               string
+			totpEnabled        int
 			created, pwChanged int64
 		)
-		if err := rows.Scan(&u.ID, &u.Username, &role, &created, &pwChanged); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &role, &totpEnabled, &created, &pwChanged); err != nil {
 			return nil, fmt.Errorf("auth: scan user: %w", err)
 		}
 		u.Role = Role(role)
+		u.RawRole = u.Role
+		u.TOTPEnabled = totpEnabled != 0
 		u.CreatedAt = time.UnixMilli(created)
 		u.PasswordChangedAt = time.UnixMilli(pwChanged)
 		out = append(out, u)
@@ -853,6 +873,7 @@ func (s *Service) CreateUser(ctx context.Context, req CreateUserRequest) (*User,
 		ID:                id,
 		Username:          username,
 		Role:              role,
+		RawRole:           role,
 		CreatedAt:         now,
 		PasswordChangedAt: now,
 	}, nil
@@ -872,11 +893,12 @@ func (s *Service) UpdateUserRole(ctx context.Context, userID int64, role Role) (
 	var (
 		u                  User
 		curRole            string
+		totpEnabled        int
 		created, pwChanged int64
 	)
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, username, role, created_at, password_changed_at FROM auth_users WHERE id = ?`, userID).
-		Scan(&u.ID, &u.Username, &curRole, &created, &pwChanged)
+		`SELECT id, username, role, totp_enabled, created_at, password_changed_at FROM auth_users WHERE id = ?`, userID).
+		Scan(&u.ID, &u.Username, &curRole, &totpEnabled, &created, &pwChanged)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
@@ -901,6 +923,8 @@ func (s *Service) UpdateUserRole(ctx context.Context, userID int64, role Role) (
 		return nil, fmt.Errorf("auth: update user role: %w", err)
 	}
 	u.Role = role
+	u.RawRole = role
+	u.TOTPEnabled = totpEnabled != 0
 	u.CreatedAt = time.UnixMilli(created)
 	u.PasswordChangedAt = time.UnixMilli(pwChanged)
 	return &u, nil

@@ -165,10 +165,12 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name      string    `json:"name"`
-		Role      auth.Role `json:"role"`
-		ExpiresIn string    `json:"expires_in"`
-		TTLDays   int       `json:"ttl_days"`
+		Name       string    `json:"name"`
+		Role       auth.Role `json:"role"`
+		Scopes     []string  `json:"scopes"`
+		ProjectIDs []string  `json:"project_ids"`
+		ExpiresIn  string    `json:"expires_in"`
+		TTLDays    int       `json:"ttl_days"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, err)
@@ -187,19 +189,23 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tok, plaintext, err := s.auth.CreateAPIToken(r.Context(), auth.CreateTokenRequest{
-		UserID: u.ID,
-		Name:   body.Name,
-		Role:   body.Role,
-		TTL:    ttl,
+		UserID:     u.ID,
+		Name:       body.Name,
+		Role:       body.Role,
+		Scopes:     body.Scopes,
+		ProjectIDs: body.ProjectIDs,
+		TTL:        ttl,
 	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	s.audit(r, "token.create", "token", tok.ID, map[string]any{
-		"name":   tok.Name,
-		"role":   tok.Role,
-		"prefix": tok.Prefix,
+		"name":        tok.Name,
+		"role":        tok.Role,
+		"scopes":      tok.Scopes,
+		"project_ids": tok.ProjectIDs,
+		"prefix":      tok.Prefix,
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{
 		"token":     tok,
@@ -330,4 +336,123 @@ func (s *Server) handleTestMetricsSink(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+// ---------------------------------------------------------------------------
+// Two-Factor Authentication (TOTP) & Project ACL
+
+func (s *Server) handleEnrollTOTP(w http.ResponseWriter, r *http.Request) {
+	u, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, auth.ErrUnauthenticated)
+		return
+	}
+	res, err := s.auth.BeginTOTPEnrollment(r.Context(), u.ID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "user.totp_enroll", "user", strconv.FormatInt(u.ID, 10), nil)
+	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *Server) handleConfirmTOTP(w http.ResponseWriter, r *http.Request) {
+	u, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, auth.ErrUnauthenticated)
+		return
+	}
+	var body struct {
+		Code string `json:"code"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	recovery, err := s.auth.ConfirmTOTPEnrollment(r.Context(), u.ID, body.Code)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "user.totp_enable", "user", strconv.FormatInt(u.ID, 10), nil)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"totp_enabled":   true,
+		"recovery_codes": recovery,
+	})
+}
+
+func (s *Server) handleDisableTOTP(w http.ResponseWriter, r *http.Request) {
+	u, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, auth.ErrUnauthenticated)
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+		Code     string `json:"code"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.auth.DisableTOTP(r.Context(), u.ID, body.Password, body.Code, r.RemoteAddr); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "user.totp_disable", "user", strconv.FormatInt(u.ID, 10), nil)
+	writeJSON(w, http.StatusOK, map[string]any{"totp_enabled": false})
+}
+
+func (s *Server) handleAdminResetUserTOTP(w http.ResponseWriter, r *http.Request) {
+	uid, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || uid <= 0 {
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "用户 ID 无效"))
+		return
+	}
+	if err := s.auth.AdminResetTOTP(r.Context(), uid); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "user.totp_reset", "user", strconv.FormatInt(uid, 10), nil)
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) handleGetProjectACL(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	if _, err := s.store.GetProject(pid); err != nil {
+		writeError(w, err)
+		return
+	}
+	acl, err := s.auth.GetProjectACL(r.Context(), pid)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, acl)
+}
+
+func (s *Server) handlePutProjectACL(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	if _, err := s.store.GetProject(pid); err != nil {
+		writeError(w, err)
+		return
+	}
+	var body struct {
+		Restricted bool                 `json:"restricted"`
+		Members    []auth.ProjectMember `json:"members"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	acl, err := s.auth.SetProjectACL(r.Context(), pid, body.Restricted, body.Members)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "project.acl_update", "project", pid, map[string]any{
+		"restricted": acl.Restricted,
+		"members":    len(acl.Members),
+	})
+	writeJSON(w, http.StatusOK, acl)
 }

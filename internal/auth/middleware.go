@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strings"
 )
 
@@ -107,6 +108,32 @@ func SessionFromContext(ctx context.Context) (*Session, bool) {
 func TokenFromContext(ctx context.Context) (*APIToken, bool) {
 	p, ok := ctx.Value(ctxKey{}).(principal)
 	return p.token, ok && p.token != nil
+}
+
+// WithEffectiveRole returns a copy of ctx with the user's effective role narrowed
+// to role (used after per-project ACL resolution).
+func WithEffectiveRole(ctx context.Context, role Role) context.Context {
+	p, ok := ctx.Value(ctxKey{}).(principal)
+	if !ok || p.user == nil {
+		return ctx
+	}
+	cp := *p.user
+	cp.Role = role
+	p.user = &cp
+	return context.WithValue(ctx, ctxKey{}, p)
+}
+
+// CheckScope verifies that an API token (when present) includes scope. Cookie
+// sessions and legacy unscoped tokens (len(tok.Scopes) == 0) are always allowed.
+func CheckScope(ctx context.Context, scope string) error {
+	tok, ok := TokenFromContext(ctx)
+	if !ok || len(tok.Scopes) == 0 {
+		return nil
+	}
+	if slices.Contains(tok.Scopes, scope) {
+		return nil
+	}
+	return ErrScopeForbidden
 }
 
 // BearerToken extracts the token from an "Authorization: Bearer <token>" header.

@@ -7,6 +7,9 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/http"
+	"slices"
+	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -19,6 +22,73 @@ const (
 	maxTokenNameRunes  = 100
 )
 
+// AllTokenScopes lists supported fine-grained capability scopes for API tokens.
+var AllTokenScopes = []string{"read", "write", "debug", "run", "mcp", "admin"}
+
+func normalizeTokenScopes(raw []string, isAdmin bool) ([]string, error) {
+	if len(raw) == 0 {
+		return nil, nil
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, s := range raw {
+		v := strings.ToLower(strings.TrimSpace(s))
+		if v == "" {
+			continue
+		}
+		if !slices.Contains(AllTokenScopes, v) {
+			return nil, &Error{
+				Code:    CodeInvalidTokenInput,
+				Status:  http.StatusBadRequest,
+				Message: fmt.Sprintf("无效的令牌权限范围 %q（可选：read、write、debug、run、mcp、admin）", s),
+			}
+		}
+		if v == "admin" && !isAdmin {
+			return nil, ErrForbidden
+		}
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+func normalizeTokenProjectIDs(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, s := range raw {
+		v := strings.TrimSpace(s)
+		if v != "" && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+func decodeCSVList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if v := strings.TrimSpace(p); v != "" {
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // APIToken describes a long-lived bearer credential for CLI/CI automation.
 // Only its SHA-256 digest is persisted in SQLite.
 type APIToken struct {
@@ -27,6 +97,8 @@ type APIToken struct {
 	Name       string     `json:"name"`
 	Prefix     string     `json:"prefix"`
 	Role       Role       `json:"role"`
+	Scopes     []string   `json:"scopes,omitempty"`
+	ProjectIDs []string   `json:"project_ids,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
@@ -34,10 +106,12 @@ type APIToken struct {
 
 // CreateTokenRequest configures a new API access token.
 type CreateTokenRequest struct {
-	UserID int64
-	Name   string
-	Role   Role
-	TTL    time.Duration
+	UserID     int64
+	Name       string
+	Role       Role
+	Scopes     []string
+	ProjectIDs []string
+	TTL        time.Duration
 }
 
 // CreateAPIToken mints a new token for req.UserID, caps its role to not exceed
@@ -59,6 +133,12 @@ func (s *Service) CreateAPIToken(ctx context.Context, req CreateTokenRequest) (*
 		return nil, "", ErrInvalidRole
 	}
 	role = EffectiveRole(owner.Role, role)
+
+	scopes, err := normalizeTokenScopes(req.Scopes, role.IsAdmin())
+	if err != nil {
+		return nil, "", err
+	}
+	projectIDs := normalizeTokenProjectIDs(req.ProjectIDs)
 
 	id, err := newSessionID()
 	if err != nil {
@@ -84,26 +164,28 @@ func (s *Service) CreateAPIToken(ctx context.Context, req CreateTokenRequest) (*
 	}
 
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO auth_tokens (id, user_id, name, token_prefix, token_hash, role, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, owner.ID, name, prefix, sum[:], string(role), now.UnixMilli(), expMS); err != nil {
+		`INSERT INTO auth_tokens (id, user_id, name, token_prefix, token_hash, role, scopes, project_ids, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, owner.ID, name, prefix, sum[:], string(role), strings.Join(scopes, ","), strings.Join(projectIDs, ","), now.UnixMilli(), expMS); err != nil {
 		return nil, "", fmt.Errorf("auth: create api token: %w", err)
 	}
 	return &APIToken{
-		ID:        id,
-		UserID:    owner.ID,
-		Name:      name,
-		Prefix:    prefix,
-		Role:      role,
-		CreatedAt: now,
-		ExpiresAt: expiresAt,
+		ID:         id,
+		UserID:     owner.ID,
+		Name:       name,
+		Prefix:     prefix,
+		Role:       role,
+		Scopes:     scopes,
+		ProjectIDs: projectIDs,
+		CreatedAt:  now,
+		ExpiresAt:  expiresAt,
 	}, plaintext, nil
 }
 
 // ListAPITokens returns API tokens owned by userID ordered newest first.
 func (s *Service) ListAPITokens(ctx context.Context, userID int64) ([]APIToken, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, user_id, name, token_prefix, role, created_at, last_used_at, expires_at
+		`SELECT id, user_id, name, token_prefix, role, scopes, project_ids, created_at, last_used_at, expires_at
 		   FROM auth_tokens
 		  WHERE user_id = ?
 		  ORDER BY created_at DESC, id DESC`, userID)
@@ -114,15 +196,17 @@ func (s *Service) ListAPITokens(ctx context.Context, userID int64) ([]APIToken, 
 	out := []APIToken{}
 	for rows.Next() {
 		var (
-			tok            APIToken
-			role           string
-			created        int64
-			lastUsed, exp  sql.NullInt64
+			tok                 APIToken
+			role, scopesRaw, pids string
+			created             int64
+			lastUsed, exp       sql.NullInt64
 		)
-		if err := rows.Scan(&tok.ID, &tok.UserID, &tok.Name, &tok.Prefix, &role, &created, &lastUsed, &exp); err != nil {
+		if err := rows.Scan(&tok.ID, &tok.UserID, &tok.Name, &tok.Prefix, &role, &scopesRaw, &pids, &created, &lastUsed, &exp); err != nil {
 			return nil, fmt.Errorf("auth: scan api token: %w", err)
 		}
 		tok.Role = Role(role)
+		tok.Scopes = decodeCSVList(scopesRaw)
+		tok.ProjectIDs = decodeCSVList(pids)
 		tok.CreatedAt = time.UnixMilli(created)
 		if lastUsed.Valid {
 			t := time.UnixMilli(lastUsed.Int64)
@@ -192,20 +276,21 @@ func (s *Service) AuthenticateBearerFrom(ctx context.Context, rawToken, remoteAd
 	}
 	sum := sha256.Sum256([]byte(rawToken))
 	var (
-		tok                          APIToken
-		u                            User
-		tokRole, userRole            string
-		tokCreated                   int64
-		lastUsed, exp                sql.NullInt64
-		userCreated, userPwChangedAt int64
+		tok                                 APIToken
+		u                                   User
+		tokRole, userRole, scopesRaw, pids  string
+		totpEnabled                         int
+		tokCreated                          int64
+		lastUsed, exp                       sql.NullInt64
+		userCreated, userPwChangedAt        int64
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT t.id, t.user_id, t.name, t.token_prefix, t.role, t.created_at, t.last_used_at, t.expires_at,
-		        u.username, u.role, u.created_at, u.password_changed_at
+		`SELECT t.id, t.user_id, t.name, t.token_prefix, t.role, t.scopes, t.project_ids, t.created_at, t.last_used_at, t.expires_at,
+		        u.username, u.role, u.totp_enabled, u.created_at, u.password_changed_at
 		   FROM auth_tokens t JOIN auth_users u ON u.id = t.user_id
 		  WHERE t.token_hash = ?`, sum[:]).
-		Scan(&tok.ID, &tok.UserID, &tok.Name, &tok.Prefix, &tokRole, &tokCreated, &lastUsed, &exp,
-			&u.Username, &userRole, &userCreated, &userPwChangedAt)
+		Scan(&tok.ID, &tok.UserID, &tok.Name, &tok.Prefix, &tokRole, &scopesRaw, &pids, &tokCreated, &lastUsed, &exp,
+			&u.Username, &userRole, &totpEnabled, &userCreated, &userPwChangedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fail(ErrUnauthenticated)
 	}
@@ -213,6 +298,8 @@ func (s *Service) AuthenticateBearerFrom(ctx context.Context, rawToken, remoteAd
 		return nil, nil, fmt.Errorf("auth: load api token: %w", err)
 	}
 	tok.Role = Role(tokRole)
+	tok.Scopes = decodeCSVList(scopesRaw)
+	tok.ProjectIDs = decodeCSVList(pids)
 	tok.CreatedAt = time.UnixMilli(tokCreated)
 	if lastUsed.Valid {
 		t := time.UnixMilli(lastUsed.Int64)
@@ -236,7 +323,9 @@ func (s *Service) AuthenticateBearerFrom(ctx context.Context, rawToken, remoteAd
 	}
 
 	u.ID = tok.UserID
+	u.RawRole = Role(userRole)
 	u.Role = EffectiveRole(Role(userRole), tok.Role)
+	u.TOTPEnabled = totpEnabled != 0
 	u.CreatedAt = time.UnixMilli(userCreated)
 	u.PasswordChangedAt = time.UnixMilli(userPwChangedAt)
 
