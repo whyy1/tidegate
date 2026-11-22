@@ -18,12 +18,18 @@ package testserver
 import (
 	"bufio"
 	"bytes"
+	"crypto/ecdsa"
+	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"hash/fnv"
 	"io"
+	"math/big"
 	"net"
 	"net/http"
 	"strconv"
@@ -41,9 +47,10 @@ const (
 
 // Server is a running test server.
 type Server struct {
-	ln     net.Listener
-	secret []byte
-	wg     sync.WaitGroup
+	ln      net.Listener
+	tlsMode bool
+	secret  []byte
+	wg      sync.WaitGroup
 	mu     sync.Mutex
 	conns  map[net.Conn]struct{}
 	closed atomic.Bool
@@ -87,6 +94,52 @@ func storeMax(v *atomic.Int64, d int64) {
 	}
 }
 
+// ListenTLS creates an HTTPS/1.1 test server with an in-memory self-signed ECDSA certificate.
+func ListenTLS(addr string) (*Server, error) {
+	cert, err := generateSelfSignedCert()
+	if err != nil {
+		return nil, err
+	}
+	tcpLn, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, err
+	}
+	tlsLn := tls.NewListener(tcpLn, &tls.Config{
+		Certificates: []tls.Certificate{cert},
+		NextProtos:   []string{"http/1.1"},
+	})
+	s := New(tlsLn)
+	s.tlsMode = true
+	return s, nil
+}
+
+func generateSelfSignedCert() (tls.Certificate, error) {
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 62))
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	now := time.Now()
+	tmpl := &x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: "tidegate-testserver"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1"), net.ParseIP("::1")},
+		DNSNames:     []string{"localhost"},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
+	if err != nil {
+		return tls.Certificate{}, err
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: priv}, nil
+}
+
 // Listen creates a server listening on addr (for example ":18080" or
 // "127.0.0.1:0").
 func Listen(addr string) (*Server, error) {
@@ -114,7 +167,11 @@ func (s *Server) URL() string {
 	if addr.IP.IsUnspecified() {
 		host = "127.0.0.1"
 	}
-	return "http://" + net.JoinHostPort(host, strconv.Itoa(addr.Port))
+	scheme := "http://"
+	if s.tlsMode {
+		scheme = "https://"
+	}
+	return scheme + net.JoinHostPort(host, strconv.Itoa(addr.Port))
 }
 
 // Requests returns the number of requests served so far (sampled per

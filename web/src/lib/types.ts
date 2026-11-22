@@ -424,6 +424,8 @@ export interface HTTPOptions {
   dns_overrides?: Record<string, string>
   proxy_url?: string
   connect_backoff?: string
+  max_dials_per_sec?: number
+  on_error?: 'continue' | 'abort_iteration' | 'abort_vu' | ''
   allowed_targets?: string[]
 }
 
@@ -462,6 +464,7 @@ export interface ScenarioStep {
   type?: ScenarioStepType | ''
   api_id?: string
   script?: string
+  on_error?: 'continue' | 'abort_iteration' | 'abort_vu' | ''
   disabled?: boolean
   override?: StepOverride | null
   think?: ThinkConfig | null

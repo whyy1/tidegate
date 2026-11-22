@@ -219,27 +219,62 @@ type dialTiming struct {
 
 // dialer opens counted connections, optionally with TLS on top.
 type dialer struct {
-	eng         *Engine
-	nd          net.Dialer
-	dns         *dnsCache
-	targetCheck func(host string, ip net.IP) error
-	tlsBase     *tls.Config
-	tlsTimeout  time.Duration
-	tlsByHost   sync.Map // host name -> *tls.Config
+	eng          *Engine
+	nd           net.Dialer
+	dns          *dnsCache
+	targetCheck  func(host string, ip net.IP) error
+	tlsBase      *tls.Config
+	tlsTimeout   time.Duration
+	tlsByHost    sync.Map // host name -> *tls.Config
+	dialInterval int64
+	nextDial     atomic.Int64
 }
 
 func newDialer(e *Engine, cfg *scenario.HTTPConfig, targetCheck func(host string, ip net.IP) error) *dialer {
+	var interval int64
+	if cfg.MaxDialsPerSec > 0 {
+		interval = max(1, int64(time.Second)/int64(cfg.MaxDialsPerSec))
+	}
 	return &dialer{
-		eng:         e,
-		nd:          net.Dialer{Timeout: cfg.ConnectTimeout, KeepAlive: 30 * time.Second},
-		dns:         newDNSCache(cfg.DNSRefresh, cfg.ConnectTimeout, cfg.DNSOverrides),
-		targetCheck: targetCheck,
+		eng:          e,
+		nd:           net.Dialer{Timeout: cfg.ConnectTimeout, KeepAlive: 30 * time.Second},
+		dns:          newDNSCache(cfg.DNSRefresh, cfg.ConnectTimeout, cfg.DNSOverrides),
+		targetCheck:  targetCheck,
+		dialInterval: interval,
 		tlsBase: &tls.Config{
 			InsecureSkipVerify: cfg.InsecureSkipVerify,
 			NextProtos:         []string{"http/1.1"}, // never negotiate HTTP/2
 			ClientSessionCache: tls.NewLRUClientSessionCache(1024),
 		},
 		tlsTimeout: cfg.TLSTimeout,
+	}
+}
+
+func (d *dialer) waitDialSlot(ctx context.Context) error {
+	if d.dialInterval <= 0 {
+		return nil
+	}
+	for {
+		now := nanotime()
+		prev := d.nextDial.Load()
+		slot := now
+		if prev > now {
+			slot = prev
+		}
+		if d.nextDial.CompareAndSwap(prev, slot+d.dialInterval) {
+			wait := time.Duration(slot - now)
+			if wait <= 0 {
+				return nil
+			}
+			timer := time.NewTimer(wait)
+			select {
+			case <-timer.C:
+				return nil
+			case <-ctx.Done():
+				timer.Stop()
+				return ctx.Err()
+			}
+		}
 	}
 }
 
@@ -264,6 +299,9 @@ func (d *dialer) dialTCP(ctx context.Context, o *scenario.Origin, t *dialTiming)
 	}
 	if err != nil {
 		return nil, &hopError{phase: phaseDNS, err: err}
+	}
+	if err := d.waitDialSlot(ctx); err != nil {
+		return nil, &hopError{phase: phaseDial, err: err}
 	}
 	t1 := nanotime()
 	n := len(e.addrs)

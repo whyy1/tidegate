@@ -15,11 +15,24 @@ import (
 )
 
 var (
-	k32                  = windows.NewLazySystemDLL("kernel32.dll")
-	procGetProcessMemory = k32.NewProc("K32GetProcessMemoryInfo")
-	iphlpapi             = windows.NewLazySystemDLL("iphlpapi.dll")
-	procGetTcpTable      = iphlpapi.NewProc("GetTcpTable")
+	k32                    = windows.NewLazySystemDLL("kernel32.dll")
+	procGetProcessMemory   = k32.NewProc("K32GetProcessMemoryInfo")
+	procSetProcessAffinity = k32.NewProc("SetProcessAffinityMask")
+	iphlpapi               = windows.NewLazySystemDLL("iphlpapi.dll")
+	procGetTcpTable        = iphlpapi.NewProc("GetTcpTable")
 )
+
+func setAffinityMask(pid int, mask uintptr) {
+	if mask == 0 || pid <= 0 {
+		return
+	}
+	h, err := windows.OpenProcess(windows.PROCESS_SET_INFORMATION|windows.PROCESS_QUERY_LIMITED_INFORMATION, false, uint32(pid))
+	if err != nil {
+		return
+	}
+	defer windows.CloseHandle(h)
+	_, _, _ = syscall.SyscallN(procSetProcessAffinity.Addr(), uintptr(h), mask)
+}
 
 type processMemoryCounters struct {
 	cb                         uint32

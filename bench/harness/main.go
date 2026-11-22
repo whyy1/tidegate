@@ -8,6 +8,7 @@ package main
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -24,10 +25,14 @@ import (
 )
 
 type benchCase struct {
-	Name   string        `json:"name"`
-	Target string        `json:"target"` // tidegate-fast, tidegate-std, k6
-	VUs    int           `json:"vus"`
-	Think  time.Duration `json:"think"`
+	Name       string        `json:"name"`
+	Target     string        `json:"target"` // tidegate-fast, tidegate-std, k6
+	Mode       string        `json:"mode,omitempty"`
+	RateTarget float64       `json:"rate_target,omitempty"`
+	TLS        bool          `json:"tls,omitempty"`
+	H2         bool          `json:"h2,omitempty"`
+	VUs        int           `json:"vus"`
+	Think      time.Duration `json:"think"`
 }
 
 type result struct {
@@ -62,6 +67,11 @@ func main() {
 	outDir := flag.String("out", "bench/out", "output directory")
 	addr := flag.String("addr", "127.0.0.1:18080", "test server address")
 	twLimit := flag.Int("time-wait-limit", 3000, "wait before large runs until fewer TIME_WAIT sockets remain")
+	mode := flag.String("mode", "vus", "load mode: vus or rate")
+	rateTarget := flag.Float64("rate", 50000, "target iterations per second when -mode rate")
+	useTLS := flag.Bool("tls", false, "enable HTTPS/1.1 self-signed testserver")
+	useH2 := flag.Bool("h2", false, "enable HTTPS/HTTP2 testserver (uses tidegate-std)")
+	splitCPU := flag.Bool("split-cpu", false, "split logical CPUs between testserver and load generator (Windows)")
 	flag.Parse()
 
 	must(os.MkdirAll(*outDir, 0o755))
@@ -86,26 +96,56 @@ func main() {
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		must(err)
 		for _, t := range strings.Split(*targets, ",") {
-			cases = append(cases, benchCase{Target: strings.TrimSpace(t), VUs: n})
+			tg := strings.TrimSpace(t)
+			if *useH2 && tg == "tidegate-fast" {
+				tg = "tidegate-std"
+			}
+			cases = append(cases, benchCase{Target: tg, VUs: n, Mode: *mode, RateTarget: *rateTarget, TLS: *useTLS || *useH2, H2: *useH2})
 		}
 	}
-	if *thinkVUs > 0 {
+	if *thinkVUs > 0 && *mode != "rate" {
 		for _, t := range strings.Split(*targets, ",") {
-			cases = append(cases, benchCase{Target: strings.TrimSpace(t), VUs: *thinkVUs, Think: *think})
+			tg := strings.TrimSpace(t)
+			if *useH2 && tg == "tidegate-fast" {
+				tg = "tidegate-std"
+			}
+			cases = append(cases, benchCase{Target: tg, VUs: *thinkVUs, Think: *think, Mode: *mode, TLS: *useTLS || *useH2, H2: *useH2})
 		}
 	}
 
+	srvArgs := []string{"testserver", "--addr", *addr}
+	scheme := "http://"
+	if *useH2 {
+		srvArgs = append(srvArgs, "--h2")
+		scheme = "https://"
+	} else if *useTLS {
+		srvArgs = append(srvArgs, "--tls")
+		scheme = "https://"
+	}
+
+	var srvMask, loadMask uintptr
+	if *splitCPU && runtime.NumCPU() >= 4 {
+		ncpu := min(runtime.NumCPU(), 64)
+		half := ncpu / 2
+		srvMask = (uintptr(1) << half) - 1
+		loadMask = ((uintptr(1) << ncpu) - 1) ^ srvMask
+		fmt.Printf("== 启用 CPU 亲和性隔离：被测服务核掩码 0x%x，发压端核掩码 0x%x\n", srvMask, loadMask)
+	}
+
 	fmt.Println("== 启动被测服务", *addr)
-	srv := exec.Command(exe, "testserver", "--addr", *addr)
+	srv := exec.Command(exe, srvArgs...)
 	srvLog, _ := os.Create(filepath.Join(*outDir, "testserver.log"))
 	srv.Stdout, srv.Stderr = srvLog, srvLog
 	must(srv.Start())
+	if srvMask != 0 {
+		setAffinityMask(srv.Process.Pid, srvMask)
+	}
 	defer func() {
 		srv.Process.Kill()
 		srv.Wait()
 		srvLog.Close()
 	}()
-	base := "http://" + *addr
+	base := scheme + *addr
 	must(waitReady(base + "/ping"))
 	srvWatch := watch(srv.Process.Pid)
 
@@ -113,6 +153,15 @@ func main() {
 	var results []result
 	for _, c := range cases {
 		c.Name = fmt.Sprintf("%s-%d", c.Target, c.VUs)
+		if c.Mode == "rate" {
+			c.Name = fmt.Sprintf("%s-rate%.0f", c.Target, c.RateTarget)
+		}
+		if c.TLS {
+			c.Name += "-tls"
+		}
+		if c.H2 {
+			c.Name += "-h2"
+		}
 		if c.Think > 0 {
 			c.Name += "-think"
 		}
@@ -124,7 +173,7 @@ func main() {
 			waitTimeWait(*twLimit)
 		}
 		fmt.Printf("== %s：%d 个虚拟用户，思考时间 %v，时长 %v\n", c.Name, c.VUs, c.Think, *duration)
-		r := runCase(c, exe, k6, base, *outDir, *duration, srvWatch)
+		r := runCase(c, exe, k6, base, *outDir, *duration, srvWatch, loadMask)
 		r.TimeWaitAfter, _ = timeWaitCount()
 		fmt.Printf("   每秒请求 %.0f  P50 %.3fms  P99 %.3fms  错误 %d  CPU %.2f 核  内存峰值 %.1f MB  被测服务 CPU %.2f 核\n",
 			r.RPS, r.P50, r.P99, r.Errors, r.CPUCores, float64(r.PeakRSS)/(1<<20), r.ServerCPU)
@@ -177,9 +226,15 @@ func findK6() string {
 }
 
 func waitReady(url string) error {
+	cl := &http.Client{
+		Timeout: 2 * time.Second,
+		Transport: &http.Transport{
+			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+		},
+	}
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
-		resp, err := http.Get(url)
+		resp, err := cl.Get(url)
 		if err == nil {
 			resp.Body.Close()
 			if resp.StatusCode == 200 {
@@ -241,7 +296,7 @@ steps:
   graceful_stop: 5s
 `
 
-func runCase(c benchCase, exe, k6, base, outDir string, d time.Duration, srvWatch *procWatch) result {
+func runCase(c benchCase, exe, k6, base, outDir string, d time.Duration, srvWatch *procWatch, loadMask uintptr) result {
 	r := result{benchCase: c}
 	resultPath := filepath.Join(outDir, c.Name+".json")
 	os.Remove(resultPath)
@@ -252,10 +307,30 @@ func runCase(c benchCase, exe, k6, base, outDir string, d time.Duration, srvWatc
 		if c.Think > 0 {
 			think = fmt.Sprintf("    think:\n      type: fixed\n      min: %s\n", c.Think)
 		}
-		scn := filepath.Join(outDir, fmt.Sprintf("scenario-%d-%s.yaml", c.VUs, strings.ReplaceAll(c.Think.String(), ".", "_")))
-		must(os.WriteFile(scn, []byte(fmt.Sprintf(scenarioTemplate, c.VUs, base, think, rampFor(c.VUs), c.VUs, d, c.VUs)), 0o644))
+		httpOpts := ""
+		if c.TLS || c.H2 {
+			ver := "http1"
+			if c.H2 {
+				ver = "http2"
+			}
+			httpOpts = fmt.Sprintf("http:\n  insecure_skip_verify: true\n  http_version: %s\n", ver)
+		}
+		var body string
+		if c.Mode == "rate" {
+			body = fmt.Sprintf("version: 1\nname: bench ping rate %.0f\n%ssteps:\n  - id: ping\n    request:\n      url: %s/ping\n%sload:\n  mode: rate\n  max_vus: %d\n  stages:\n    - duration: 2s\n      target: %.0f\n    - duration: %s\n      target: %.0f\n  graceful_stop: 5s\n",
+				c.RateTarget, httpOpts, base, think, max(c.VUs, 1000), c.RateTarget, d, c.RateTarget)
+		} else {
+			body = fmt.Sprintf("version: 1\nname: bench ping %d vus\n%ssteps:\n  - id: ping\n    request:\n      url: %s/ping\n%sload:\n  mode: vus\n  stages:\n    - duration: %s\n      target: %d\n    - duration: %s\n      target: %d\n  graceful_stop: 5s\n",
+				c.VUs, httpOpts, base, think, rampFor(c.VUs), c.VUs, d, c.VUs)
+		}
+		scn := filepath.Join(outDir, fmt.Sprintf("scenario-%s.yaml", c.Name))
+		must(os.WriteFile(scn, []byte(body), 0o644))
 		cmd = exec.Command(exe, "run", scn, "--quiet", "--out", resultPath, "--client", strings.TrimPrefix(c.Target, "tidegate-"))
 	case "k6":
+		if c.TLS || c.Mode == "rate" {
+			r.Note = "当前仅对比 closed/HTTP 模式"
+			return r
+		}
 		script := "bench/k6/ping.js"
 		if c.Think > 0 {
 			script = "bench/k6/ping-think.js"
@@ -278,6 +353,9 @@ func runCase(c benchCase, exe, k6, base, outDir string, d time.Duration, srvWatc
 	if err := cmd.Start(); err != nil {
 		r.ExitErr = err.Error()
 		return r
+	}
+	if loadMask != 0 {
+		setAffinityMask(cmd.Process.Pid, loadMask)
 	}
 	w := watch(cmd.Process.Pid)
 	stop := make(chan struct{})

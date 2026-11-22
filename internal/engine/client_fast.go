@@ -45,14 +45,23 @@ func (c *fastClient) close() {
 }
 
 type fastConn struct {
-	cc   *countConn
-	nc   net.Conn // cc, or a TLS connection on top of it
-	br   *bufio.Reader
-	addr string
-	tls  bool
+	cc         *countConn
+	nc         net.Conn // cc, or a TLS connection on top of it
+	br         *bufio.Reader
+	addr       string
+	tls        bool
+	brReturned atomic.Bool
 }
 
 func (fc *fastConn) matches(o *scenario.Origin) bool { return fc.addr == o.Addr && fc.tls == o.TLS }
+
+func (fc *fastConn) releaseReader() {
+	if fc.br != nil && fc.brReturned.CompareAndSwap(false, true) {
+		fc.br.Reset(nil)
+		bufioReaderPool.Put(fc.br)
+		fc.br = nil
+	}
+}
 
 type fastVU struct {
 	c       *fastClient
@@ -64,6 +73,18 @@ type fastVU struct {
 }
 
 const readBufSize = 4096
+
+var bufioReaderPool = sync.Pool{
+	New: func() any {
+		return bufio.NewReaderSize(nil, readBufSize)
+	},
+}
+
+func acquireBufioReader(nc net.Conn) *bufio.Reader {
+	br := bufioReaderPool.Get().(*bufio.Reader)
+	br.Reset(nc)
+	return br
+}
 
 // acquire returns a connection to o, dialing if needed.
 func (f *fastVU) acquire(o *scenario.Origin, r *hopResponse) (*fastConn, error) {
@@ -94,7 +115,7 @@ func (f *fastVU) acquire(o *scenario.Origin, r *hopResponse) (*fastConn, error) 
 		return nil, err
 	}
 	r.newConn = true
-	fc := &fastConn{cc: cc, nc: nc, br: bufio.NewReaderSize(nc, readBufSize), addr: o.Addr, tls: o.TLS}
+	fc := &fastConn{cc: cc, nc: nc, br: acquireBufioReader(nc), addr: o.Addr, tls: o.TLS}
 	f.track(fc)
 	if f.aborted.Load() {
 		nc.Close()
@@ -141,6 +162,7 @@ func (f *fastVU) discard(fc *fastConn, r *hopResponse) {
 	r.overRecv += rv
 	fc.nc.Close()
 	fc.cc.Close()
+	fc.releaseReader()
 }
 
 func (f *fastVU) closeAll() {
@@ -148,9 +170,13 @@ func (f *fastVU) closeAll() {
 	conns := f.conns
 	f.conns = nil
 	f.mu.Unlock()
+	aborted := f.aborted.Load()
 	for _, fc := range conns {
 		fc.nc.Close()
 		fc.cc.Close()
+		if !aborted {
+			fc.releaseReader()
+		}
 	}
 }
 
@@ -617,6 +643,7 @@ func (p *connPool) put(shard int, fc *fastConn) {
 	if p.closed.Load() {
 		fc.nc.Close()
 		fc.cc.Close()
+		fc.releaseReader()
 		return
 	}
 	s := &p.shards[shard%len(p.shards)]
@@ -636,6 +663,7 @@ func (p *connPool) closeAll() {
 		for _, fc := range idle {
 			fc.nc.Close()
 			fc.cc.Close()
+			fc.releaseReader()
 		}
 	}
 }

@@ -286,6 +286,7 @@ type ScenarioStep struct {
 	Type          string                   `yaml:"type,omitempty" json:"type,omitempty"`
 	APIID         string                   `yaml:"api_id,omitempty" json:"api_id,omitempty"`
 	Script        string                   `yaml:"script,omitempty" json:"script,omitempty"`
+	OnError       string                   `yaml:"on_error,omitempty" json:"on_error,omitempty"`
 	Disabled      bool                     `yaml:"disabled,omitempty" json:"disabled,omitempty"`
 	Override      *StepOverride            `yaml:"override,omitempty" json:"override,omitempty"`
 	Think         *scenario.Think          `yaml:"think,omitempty" json:"think,omitempty"`

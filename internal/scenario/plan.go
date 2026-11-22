@@ -96,6 +96,26 @@ func (m ConnMode) String() string {
 	return "per_vu"
 }
 
+// OnErrorPolicy selects what a virtual user does when a step fails.
+type OnErrorPolicy uint8
+
+const (
+	OnErrContinue OnErrorPolicy = iota
+	OnErrAbortIter
+	OnErrAbortVU
+)
+
+func (p OnErrorPolicy) String() string {
+	switch p {
+	case OnErrAbortIter:
+		return OnErrorAbortIteration
+	case OnErrAbortVU:
+		return OnErrorAbortVU
+	default:
+		return OnErrorContinue
+	}
+}
+
 // HTTPConfig are the resolved connection options.
 type HTTPConfig struct {
 	ConnMode           ConnMode
@@ -118,6 +138,8 @@ type HTTPConfig struct {
 	DNSOverrides   map[string]string
 	ProxyURL       *url.URL
 	ConnectBackoff time.Duration
+	MaxDialsPerSec int
+	OnError        OnErrorPolicy
 	AllowedTargets []string
 }
 
@@ -376,6 +398,7 @@ type HTTPStep struct {
 	Extract     []Extractor
 	Assert      []Assertion
 	Think       ThinkTime
+	OnError     OnErrorPolicy
 	// NeedBody is set when an extractor or assertion reads the body.
 	NeedBody bool
 	// HasStatusAssert disables the default "4xx/5xx is an error" rule:
@@ -412,6 +435,7 @@ type WSStep struct {
 	Extract         []Extractor
 	Assert          []Assertion
 	Think           ThinkTime
+	OnError         OnErrorPolicy
 	HasStatusAssert bool
 	HasUserAgent    bool
 	HasHost         bool
@@ -441,6 +465,7 @@ type GRPCStepPlan struct {
 	Assert           []Assertion
 	HasStatusAssert  bool
 	Think            ThinkTime
+	OnError          OnErrorPolicy
 }
 
 // Kind implements Node.
@@ -466,6 +491,7 @@ type SSEStepPlan struct {
 	Extract         []Extractor
 	Assert          []Assertion
 	Think           ThinkTime
+	OnError         OnErrorPolicy
 	HasStatusAssert bool
 	HasUserAgent    bool
 	HasHost         bool
@@ -480,8 +506,9 @@ func (s *SSEStepPlan) Info() StepInfo { return s.StepInfo }
 // ScriptStepPlan is a compiled sandboxed script step.
 type ScriptStepPlan struct {
 	StepInfo
-	Prog  *ScriptProgram
-	Think ThinkTime
+	Prog    *ScriptProgram
+	Think   ThinkTime
+	OnError OnErrorPolicy
 }
 
 // Kind implements Node.

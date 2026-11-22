@@ -14,6 +14,8 @@ import (
 
 // procWatch on Unix reads /proc where available; peak memory comes from
 // the exited process's rusage (maxRSS).
+func setAffinityMask(int, uintptr) {}
+
 type procWatch struct{ pid int }
 
 func watch(pid int) *procWatch                  { return &procWatch{pid: pid} }

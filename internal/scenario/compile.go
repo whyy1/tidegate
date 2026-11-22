@@ -144,7 +144,12 @@ func (c *compiler) compileHTTP() {
 		MaxBodyRead:        o.MaxBodyRead,
 		DNSRefresh:         o.DNSRefresh.D(),
 		ConnectBackoff:     DefaultConnectBackoff,
+		MaxDialsPerSec:     o.MaxDialsPerSec,
 	}
+	if h.MaxDialsPerSec < 0 {
+		c.fail("http.max_dials_per_sec", "不能是负数")
+	}
+	h.OnError = c.compileOnError("http.on_error", o.OnError, OnErrContinue)
 	switch o.ConnMode {
 	case "", "per_vu":
 		h.ConnMode = ConnPerVU
@@ -804,6 +809,22 @@ func (c *compiler) compileStepAuth(w func(string) string, fieldPrefix string, ba
 	return basicUser, basicPass, oaPlan
 }
 
+func (c *compiler) compileOnError(where, raw string, fallback OnErrorPolicy) OnErrorPolicy {
+	switch strings.ToLower(strings.TrimSpace(raw)) {
+	case "":
+		return fallback
+	case OnErrorContinue:
+		return OnErrContinue
+	case OnErrorAbortIteration:
+		return OnErrAbortIter
+	case OnErrorAbortVU:
+		return OnErrAbortVU
+	default:
+		c.fail(where, "取值 %q 无效，可选 continue、abort_iteration 或 abort_vu", raw)
+		return fallback
+	}
+}
+
 func (c *compiler) compileStepExtractAssert(w func(string) string, st *Step, minStatus int) (extracts []Extractor, asserts []Assertion, needBody, hasStatusAssert bool) {
 	for j, ex := range st.Extract {
 		if ex.Disabled {
@@ -842,7 +863,10 @@ func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 	}
 	info := StepInfo{Index: len(c.plan.FlatSteps), ID: st.ID, Name: name}
 	c.plan.FlatSteps = append(c.plan.FlatSteps, info)
-	s := &HTTPStep{StepInfo: info}
+	s := &HTTPStep{
+		StepInfo: info,
+		OnError:  c.compileOnError(w("on_error"), st.OnError, c.plan.HTTP.OnError),
+	}
 
 	s.Method = strings.ToUpper(strings.TrimSpace(req.Method))
 	if s.Method == "" {
@@ -892,6 +916,7 @@ func (c *compiler) compileWSStep(i int, st *Step) *WSStep {
 		RecvCount:    ws.RecvCount,
 		IdleTimeout:  ws.IdleTimeout.D(),
 		Subprotocols: append([]string(nil), ws.Subprotocols...),
+		OnError:      c.compileOnError(w("on_error"), st.OnError, c.plan.HTTP.OnError),
 	}
 	if s.RecvCount < 0 {
 		c.fail(w("websocket.recv_count"), "不能为负数")
@@ -951,6 +976,7 @@ func (c *compiler) compileGRPCStep(i int, st *Step) *GRPCStepPlan {
 		StepInfo:       info,
 		ExpectedStatus: g.ExpectedStatus,
 		Timeout:        g.Timeout.D(),
+		OnError:        c.compileOnError(w("on_error"), st.OnError, c.plan.HTTP.OnError),
 	}
 	if g.TLS != nil {
 		s.HasTLSOverride = true
@@ -1063,6 +1089,7 @@ func (c *compiler) compileSSEStep(i int, st *Step) *SSEStepPlan {
 		StepInfo:  info,
 		MaxEvents: se.MaxEvents,
 		Timeout:   se.Timeout.D(),
+		OnError:   c.compileOnError(w("on_error"), st.OnError, c.plan.HTTP.OnError),
 	}
 	if se.StopContains != "" {
 		s.StopContains = []byte(se.StopContains)
@@ -1116,7 +1143,10 @@ func (c *compiler) compileScriptStep(i int, st *Step) *ScriptStepPlan {
 	}
 	info := StepInfo{Index: len(c.plan.FlatSteps), ID: st.ID, Name: name}
 	c.plan.FlatSteps = append(c.plan.FlatSteps, info)
-	s := &ScriptStepPlan{StepInfo: info}
+	s := &ScriptStepPlan{
+		StepInfo: info,
+		OnError:  c.compileOnError(w("on_error"), st.OnError, c.plan.HTTP.OnError),
+	}
 	if strings.TrimSpace(st.Script.Code) == "" {
 		c.fail(w("script.code"), "脚本文本不能为空")
 		return s

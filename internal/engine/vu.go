@@ -176,6 +176,9 @@ func (v *vu) sleep(d time.Duration) bool {
 	if d <= 0 {
 		return !v.stopped()
 	}
+	if d >= 100*time.Millisecond {
+		v.shrinkIdleBuffers()
+	}
 	if v.timer == nil {
 		v.timer = time.NewTimer(d)
 	} else {
@@ -191,6 +194,26 @@ func (v *vu) sleep(d time.Duration) bool {
 	return false
 }
 
+const idleBufShrinkThreshold = 16 << 10
+
+func (v *vu) shrinkIdleBuffers() {
+	if cap(v.bodyBuf) > idleBufShrinkThreshold {
+		v.bodyBuf = nil
+	}
+	if cap(v.gzBuf) > idleBufShrinkThreshold {
+		v.gzBuf = nil
+	}
+	if cap(v.resp.body) > idleBufShrinkThreshold {
+		v.resp.body = nil
+	}
+	if cap(v.resp.arena) > idleBufShrinkThreshold {
+		v.resp.arena = nil
+	}
+	if fv, ok := v.client.(*fastVU); ok && cap(fv.wbuf) > idleBufShrinkThreshold {
+		fv.wbuf = nil
+	}
+}
+
 func (v *vu) pickRows() {
 	for i, d := range v.eng.data {
 		if !d.ds.Used {
@@ -203,6 +226,30 @@ func (v *vu) pickRows() {
 			v.env.Rows[i] = d.rows[v.rng.IntN(len(d.rows))]
 		}
 	}
+}
+
+type execStatus uint8
+
+const (
+	execOK execStatus = iota
+	execAbortIter
+	execStopVU
+)
+
+func (v *vu) applyOnError(policy scenario.OnErrorPolicy, ok bool, k metrics.ErrorKind) execStatus {
+	if !ok {
+		return execStopVU
+	}
+	if k != metrics.ErrNone {
+		switch policy {
+		case scenario.OnErrAbortIter:
+			return execAbortIter
+		case scenario.OnErrAbortVU:
+			v.stop()
+			return execStopVU
+		}
+	}
+	return execOK
 }
 
 // iteration runs the scenario once. planned is the scheduled start in the
@@ -220,11 +267,15 @@ func (v *vu) iteration(planned int64) {
 			if v.stopped() {
 				return
 			}
-			ok, _ := v.runHTTP(st, planned)
-			if !ok {
+			ok, k := v.runHTTP(st, planned)
+			planned = 0
+			switch v.applyOnError(st.s.OnError, ok, k) {
+			case execStopVU:
+				return
+			case execAbortIter:
+				v.rec.RecordIteration()
 				return
 			}
-			planned = 0
 			if th := st.s.Think; th.Kind != scenario.ThinkNone {
 				if !v.sleep(th.Duration(v.rng)) {
 					return
@@ -235,16 +286,16 @@ func (v *vu) iteration(planned int64) {
 		return
 	}
 	var iterErr metrics.ErrorKind = metrics.ErrNone
-	if !v.execNodes(v.eng.plan.Steps, &planned, &iterErr) {
+	if v.execNodes(v.eng.plan.Steps, &planned, &iterErr) == execStopVU {
 		return
 	}
 	v.rec.RecordIteration()
 }
 
-func (v *vu) execNodes(nodes []scenario.Node, planned *int64, stepErr *metrics.ErrorKind) bool {
+func (v *vu) execNodes(nodes []scenario.Node, planned *int64, stepErr *metrics.ErrorKind) execStatus {
 	for _, n := range nodes {
 		if v.stopped() {
-			return false
+			return execStopVU
 		}
 		var think scenario.ThinkTime
 		switch st := n.(type) {
@@ -255,8 +306,8 @@ func (v *vu) execNodes(nodes []scenario.Node, planned *int64, stepErr *metrics.E
 			if k != metrics.ErrNone && *stepErr == metrics.ErrNone {
 				*stepErr = k
 			}
-			if !ok {
-				return false
+			if status := v.applyOnError(st.OnError, ok, k); status != execOK {
+				return status
 			}
 			think = st.Think
 		case *scenario.WSStep:
@@ -265,8 +316,8 @@ func (v *vu) execNodes(nodes []scenario.Node, planned *int64, stepErr *metrics.E
 			if k != metrics.ErrNone && *stepErr == metrics.ErrNone {
 				*stepErr = k
 			}
-			if !ok {
-				return false
+			if status := v.applyOnError(st.OnError, ok, k); status != execOK {
+				return status
 			}
 			think = st.Think
 		case *scenario.GRPCStepPlan:
@@ -275,8 +326,8 @@ func (v *vu) execNodes(nodes []scenario.Node, planned *int64, stepErr *metrics.E
 			if k != metrics.ErrNone && *stepErr == metrics.ErrNone {
 				*stepErr = k
 			}
-			if !ok {
-				return false
+			if status := v.applyOnError(st.OnError, ok, k); status != execOK {
+				return status
 			}
 			think = st.Think
 		case *scenario.SSEStepPlan:
@@ -285,8 +336,8 @@ func (v *vu) execNodes(nodes []scenario.Node, planned *int64, stepErr *metrics.E
 			if k != metrics.ErrNone && *stepErr == metrics.ErrNone {
 				*stepErr = k
 			}
-			if !ok {
-				return false
+			if status := v.applyOnError(st.OnError, ok, k); status != execOK {
+				return status
 			}
 			think = st.Think
 		case *scenario.ScriptStepPlan:
@@ -295,15 +346,16 @@ func (v *vu) execNodes(nodes []scenario.Node, planned *int64, stepErr *metrics.E
 			if k != metrics.ErrNone && *stepErr == metrics.ErrNone {
 				*stepErr = k
 			}
-			if !ok {
-				return false
+			if status := v.applyOnError(st.OnError, ok, k); status != execOK {
+				return status
 			}
 			think = st.Think
 		case *scenario.GroupNode:
 			t0 := nanotime()
 			childErr := metrics.ErrNone
-			if !v.execNodes(st.Children, planned, &childErr) {
-				return false
+			status := v.execNodes(st.Children, planned, &childErr)
+			if status == execStopVU {
+				return execStopVU
 			}
 			mrec := metrics.RequestRecord{
 				Step:    st.Index,
@@ -313,6 +365,9 @@ func (v *vu) execNodes(nodes []scenario.Node, planned *int64, stepErr *metrics.E
 			v.rec.RecordRequest(&mrec)
 			if childErr != metrics.ErrNone && *stepErr == metrics.ErrNone {
 				*stepErr = childErr
+			}
+			if status == execAbortIter {
+				return execAbortIter
 			}
 			think = st.Think
 		case *scenario.LoopNode:
@@ -324,10 +379,10 @@ func (v *vu) execNodes(nodes []scenario.Node, planned *int64, stepErr *metrics.E
 					break
 				}
 				if v.stopped() || v.eng.requestsExhausted() {
-					return false
+					return execStopVU
 				}
-				if !v.execNodes(st.Children, planned, stepErr) {
-					return false
+				if status := v.execNodes(st.Children, planned, stepErr); status != execOK {
+					return status
 				}
 			}
 			think = st.Think
@@ -336,25 +391,27 @@ func (v *vu) execNodes(nodes []scenario.Node, planned *int64, stepErr *metrics.E
 			if st.Cond.Eval(&v.env) {
 				branch = st.Then
 			}
-			if len(branch) > 0 && !v.execNodes(branch, planned, stepErr) {
-				return false
+			if len(branch) > 0 {
+				if status := v.execNodes(branch, planned, stepErr); status != execOK {
+					return status
+				}
 			}
 			think = st.Think
 		case *scenario.WeightedNode:
 			if br := pickWeightedBranch(st, v.rng); br != nil && len(br.Steps) > 0 {
-				if !v.execNodes(br.Steps, planned, stepErr) {
-					return false
+				if status := v.execNodes(br.Steps, planned, stepErr); status != execOK {
+					return status
 				}
 			}
 			think = st.Think
 		}
 		if think.Kind != scenario.ThinkNone {
 			if !v.sleep(think.Duration(v.rng)) {
-				return false
+				return execStopVU
 			}
 		}
 	}
-	return true
+	return execOK
 }
 
 func pickWeightedBranch(wn *scenario.WeightedNode, rng *rand.Rand) *scenario.WeightedBranchNode {

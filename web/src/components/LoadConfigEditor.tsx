@@ -499,6 +499,40 @@ export function LoadConfigEditor({ load, onChange, http, onHTTPChange, stepOptio
                   className="w-full px-2 py-1 border border-slate-300 rounded font-mono bg-white"
                 />
               </div>
+              <div>
+                <label className="block text-slate-600 mb-1">默认失败策略</label>
+                <select
+                  value={http?.on_error || 'continue'}
+                  onChange={(e) =>
+                    onHTTPChange({
+                      ...(http || {}),
+                      on_error: (e.target.value === 'continue' ? '' : e.target.value) as
+                        | ''
+                        | 'abort_iteration'
+                        | 'abort_vu',
+                    })
+                  }
+                  className="w-full px-2 py-1 border border-slate-300 rounded bg-white"
+                >
+                  <option value="continue">继续执行后续步骤</option>
+                  <option value="abort_iteration">失败立即中止本轮迭代</option>
+                  <option value="abort_vu">失败立即停止当前 VU</option>
+                </select>
+              </div>
+              <div>
+                <label className="block text-slate-600 mb-1">建连速率上限 (dials/s)</label>
+                <input
+                  type="number"
+                  min={0}
+                  placeholder="0 (不限)"
+                  value={http?.max_dials_per_sec || ''}
+                  onChange={(e) => {
+                    const n = parseInt(e.target.value, 10)
+                    onHTTPChange({ ...(http || {}), max_dials_per_sec: n > 0 ? n : undefined })
+                  }}
+                  className="w-full px-2 py-1 border border-slate-300 rounded font-mono tg-tabular bg-white"
+                />
+              </div>
               <div className="col-span-2 sm:col-span-4">
                 <label className="block text-slate-600 mb-1">自定义 Host / DNS 覆写（每行一条 `域名=IP:端口` 或 `域名=IP`）</label>
                 <textarea

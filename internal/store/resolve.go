@@ -557,12 +557,14 @@ func (r *resolver) step(id string, src *stepSource) (scenario.Step, error) {
 	extract, assert := a.Extract, a.Assert
 	name := a.Name
 	var think *scenario.Think
+	onError := ""
 
 	if st := src.step; st != nil {
 		if st.Name != "" {
 			name = st.Name
 		}
 		think = st.Think
+		onError = st.OnError
 		if o := st.Override; o != nil {
 			if o.Method != "" {
 				method = strings.ToUpper(strings.TrimSpace(o.Method))
@@ -595,6 +597,7 @@ func (r *resolver) step(id string, src *stepSource) (scenario.Step, error) {
 	step := scenario.Step{
 		ID:      id,
 		Name:    name,
+		OnError: onError,
 		Extract: append([]scenario.Extract(nil), extract...),
 		Assert:  append([]scenario.Assert(nil), assert...),
 		Think:   think,
@@ -996,10 +999,11 @@ func (r *resolver) buildScenarioSteps(trees []*resolvedStepTree) ([]scenario.Ste
 			out = append(out, step)
 		case "script":
 			out = append(out, scenario.Step{
-				ID:     st.ID,
-				Name:   st.Name,
-				Think:  st.Think,
-				Script: &scenario.ScriptStep{Code: st.Script},
+				ID:      st.ID,
+				Name:    st.Name,
+				OnError: st.OnError,
+				Think:   st.Think,
+				Script:  &scenario.ScriptStep{Code: st.Script},
 			})
 		case "group":
 			ch, err := r.buildScenarioSteps(tn.children)

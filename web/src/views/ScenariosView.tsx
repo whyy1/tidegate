@@ -1109,6 +1109,29 @@ function ScenarioStepListEditor({
                   )}
 
                   {isAPI && (
+                    <select
+                      value={st.on_error || ''}
+                      title="步骤失败策略"
+                      onChange={(e) =>
+                        updateStep({
+                          on_error: (e.target.value || undefined) as
+                            | ''
+                            | 'continue'
+                            | 'abort_iteration'
+                            | 'abort_vu'
+                            | undefined,
+                        })
+                      }
+                      className="px-1.5 py-1 border border-slate-300 rounded bg-white text-slate-700"
+                    >
+                      <option value="">继承默认策略</option>
+                      <option value="continue">继续</option>
+                      <option value="abort_iteration">中止本轮迭代</option>
+                      <option value="abort_vu">停止当前 VU</option>
+                    </select>
+                  )}
+
+                  {isAPI && (
                     <button
                       type="button"
                       onClick={() => setExpandedOverride((m) => ({ ...m, [idx]: !m[idx] }))}

@@ -25,6 +25,13 @@ type Definition struct {
 	Load      Load              `yaml:"load" json:"load"`
 }
 
+// Error handling policies for step execution.
+const (
+	OnErrorContinue       = "continue"
+	OnErrorAbortIteration = "abort_iteration"
+	OnErrorAbortVU        = "abort_vu"
+)
+
 // HTTPOptions are connection options. Every field has a default.
 type HTTPOptions struct {
 	ConnMode           string            `yaml:"conn_mode,omitempty" json:"conn_mode,omitempty"`
@@ -41,6 +48,8 @@ type HTTPOptions struct {
 	DNSOverrides       map[string]string `yaml:"dns_overrides,omitempty" json:"dns_overrides,omitempty"`
 	ProxyURL           string            `yaml:"proxy_url,omitempty" json:"proxy_url,omitempty"`
 	ConnectBackoff     *Duration         `yaml:"connect_backoff,omitempty" json:"connect_backoff,omitempty"`
+	MaxDialsPerSec     int               `yaml:"max_dials_per_sec,omitempty" json:"max_dials_per_sec,omitempty"`
+	OnError            string            `yaml:"on_error,omitempty" json:"on_error,omitempty"`
 	AllowedTargets     []string          `yaml:"allowed_targets,omitempty" json:"allowed_targets,omitempty"`
 }
 
@@ -65,6 +74,7 @@ type DataSource struct {
 type Step struct {
 	ID        string         `yaml:"id" json:"id"`
 	Name      string         `yaml:"name,omitempty" json:"name,omitempty"`
+	OnError   string         `yaml:"on_error,omitempty" json:"on_error,omitempty"`
 	Request   *Request       `yaml:"request,omitempty" json:"request,omitempty"`
 	WebSocket *WebSocketStep `yaml:"websocket,omitempty" json:"websocket,omitempty"`
 	GRPC      *GRPCStep      `yaml:"grpc,omitempty" json:"grpc,omitempty"`

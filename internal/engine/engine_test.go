@@ -722,3 +722,105 @@ load: {stages: [{duration: 0s, target: 1}, {duration: 350ms, target: 1}]}
 		t.Fatalf("errors=%v requests=%d", s.Total.Errors, s.Total.Requests)
 	}
 }
+
+func TestOnErrorAbortIterationAndVU(t *testing.T) {
+	var step2Calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login":
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+		case "/items":
+			step2Calls.Add(1)
+			io.WriteString(w, "items")
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	defer srv.Close()
+
+	// 1. abort_iteration: step 1 fails, step 2 never runs, VU starts next iteration.
+	pIter := compile(t, `
+steps:
+  - id: login
+    on_error: abort_iteration
+    request: {url: BASE/login}
+  - id: items
+    request: {url: BASE/items}
+load: {stages: [{duration: 0s, target: 1}, {duration: 250ms, target: 1}]}
+`, srv.URL, nil)
+	rIter := run(t, pIter, Options{Client: ClientFast})
+	if step2Calls.Load() != 0 {
+		t.Fatalf("step2 called %d times under abort_iteration, want 0", step2Calls.Load())
+	}
+	if rIter.summary.Total.Requests < 2 {
+		t.Fatalf("expected multiple aborted iterations over 250ms, got %d requests", rIter.summary.Total.Requests)
+	}
+	if rIter.summary.Iterations < 2 {
+		t.Fatalf("expected iterations >= 2, got %d", rIter.summary.Iterations)
+	}
+
+	// 2. abort_vu: single failure terminates the virtual user after 1 attempt.
+	step2Calls.Store(0)
+	pVU := compile(t, `
+http: {on_error: abort_vu}
+steps:
+  - id: login
+    request: {url: BASE/login}
+  - id: items
+    request: {url: BASE/items}
+load: {stages: [{duration: 0s, target: 2}, {duration: 300ms, target: 2}]}
+`, srv.URL, nil)
+	rVU := run(t, pVU, Options{Client: ClientFast})
+	if step2Calls.Load() != 0 {
+		t.Fatalf("step2 called %d times under abort_vu, want 0", step2Calls.Load())
+	}
+	if rVU.summary.Total.Requests != 2 {
+		t.Fatalf("expected exactly 2 requests (1 per VU before exit), got %d", rVU.summary.Total.Requests)
+	}
+}
+
+func TestMaxDialsPerSecPacing(t *testing.T) {
+	var conns atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, "ok")
+	}))
+	srv.Config.ConnState = func(_ net.Conn, st http.ConnState) {
+		if st == http.StateNew {
+			conns.Add(1)
+		}
+	}
+	srv.Start()
+	defer srv.Close()
+
+	// Force connection close every request; 10 dials/sec over 350ms should dial <= 8 connections cleanly.
+	p := compile(t, `
+http:
+  keep_alive: false
+  max_dials_per_sec: 10
+steps:
+  - id: ping
+    request: {url: BASE/ping}
+load: {stages: [{duration: 0s, target: 4}, {duration: 350ms, target: 4}]}
+`, srv.URL, nil)
+	r := run(t, p, Options{Client: ClientFast})
+	if r.summary.Total.Requests == 0 || r.summary.Total.Requests > 8 {
+		t.Fatalf("expected 1..8 paced requests at 10 dials/s over 350ms, got %d (conns=%d)", r.summary.Total.Requests, conns.Load())
+	}
+}
+
+func TestFastConnPooledReaderChurn(t *testing.T) {
+	srv := startTestServer(t)
+	p := compile(t, `
+http:
+  max_requests_per_conn: 2
+steps:
+  - id: ping
+    request: {url: BASE/ping}
+    think: {type: fixed, min: 105ms}
+load: {stages: [{duration: 0s, target: 6}, {duration: 450ms, target: 6}]}
+`, srv.URL(), nil)
+	r := run(t, p, Options{Client: ClientFast})
+	if r.summary.Total.ErrorCount() != 0 || r.summary.Total.Requests < 12 {
+		t.Fatalf("unexpected churn errors=%v reqs=%d", r.summary.Total.Errors, r.summary.Total.Requests)
+	}
+}
