@@ -3,6 +3,9 @@ package engine
 import (
 	"compress/gzip"
 	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -822,5 +825,107 @@ load: {stages: [{duration: 0s, target: 6}, {duration: 450ms, target: 6}]}
 	r := run(t, p, Options{Client: ClientFast})
 	if r.summary.Total.ErrorCount() != 0 || r.summary.Total.Requests < 12 {
 		t.Fatalf("unexpected churn errors=%v reqs=%d", r.summary.Total.Errors, r.summary.Total.Requests)
+	}
+}
+
+func TestStepPreAndPostScripts(t *testing.T) {
+	mac := hmac.New(sha256.New, []byte("k1"))
+	mac.Write([]byte("payload"))
+	wantSig := hex.EncodeToString(mac.Sum(nil))
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("X-Sig") != wantSig {
+			http.Error(w, "bad sig", http.StatusForbidden)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("X-Echo-Tag", "tidegate-ok")
+		_, _ = io.WriteString(w, `{"token":"tok-script-77"}`)
+	}))
+	defer srv.Close()
+
+	// Compile must reject resp.* access in pre_script.
+	badDef := &scenario.Definition{
+		Version: 1,
+		Steps: []scenario.Step{{
+			ID:        "s1",
+			PreScript: `vars.bad = resp.status`,
+			Request:   &scenario.Request{Method: "GET", URL: srv.URL},
+		}},
+		Load: scenario.Load{Mode: "vus", Stages: []scenario.Stage{{Duration: scenario.Duration(100 * time.Millisecond), Target: 1}}, MaxRequests: 1},
+	}
+	if _, err := scenario.Compile(badDef, scenario.CompileOptions{}); err == nil {
+		t.Fatal("expected pre_script resp.status to fail compilation")
+	}
+
+	p := compile(t, `
+steps:
+  - id: signed
+    pre_script: |
+      vars.sig = hmac_sha256("k1", "payload");
+    request:
+      method: GET
+      url: BASE
+      headers:
+        X-Sig: "{{sig}}"
+    post_script: |
+      assert(resp.status == 200, "status 200");
+      assert(resp.header("X-Echo-Tag") == "tidegate-ok", "echo header");
+      vars.tok = resp.json("$.token");
+      vars.tok2 = jsonpath(resp.body, "$.token");
+      assert(vars.tok == "tok-script-77" && vars.tok2 == "tok-script-77", "token match");
+load:
+  stages:
+    - duration: 150ms
+      target: 1
+`, srv.URL, nil)
+
+	// 1. Load hot path across both Fast and Std clients.
+	r := run(t, p, Options{Client: ClientFast})
+	if r.summary.Total.ErrorCount() != 0 || r.summary.Total.Requests == 0 {
+		t.Fatalf("load run with pre/post scripts failed: reqs=%d errs=%v", r.summary.Total.Requests, r.summary.Total.Errors)
+	}
+
+	// 2. Debug path captures asserts and written variables.
+	dbg, err := RunDebug(context.Background(), p, DebugOptions{Client: ClientFast})
+	if err != nil {
+		t.Fatalf("RunDebug: %v", err)
+	}
+	if !dbg.Passed || len(dbg.Steps) != 1 {
+		t.Fatalf("expected debug pass, got %+v", dbg)
+	}
+	st := dbg.Steps[0]
+	if st.ExtractedVars["sig"] != wantSig || st.ExtractedVars["tok"] != "tok-script-77" || st.ExtractedVars["tok2"] != "tok-script-77" {
+		t.Fatalf("unexpected script vars: %+v", st.ExtractedVars)
+	}
+	if len(st.Asserts) != 3 {
+		t.Fatalf("expected 3 post_script asserts, got %+v", st.Asserts)
+	}
+
+	// 3. Failing post_script assert fails debug cleanly without short-circuiting.
+	pFail := compile(t, `
+steps:
+  - id: failcheck
+    pre_script: |
+      vars.sig = hmac_sha256("k1", "payload");
+    request:
+      method: GET
+      url: BASE
+      headers:
+        X-Sig: "{{sig}}"
+    post_script: |
+      assert(resp.status == 201, "want 201");
+      assert(resp.json("$.token") == "tok-script-77", "second still runs");
+load:
+  stages:
+    - duration: 100ms
+      target: 1
+`, srv.URL, nil)
+	dbgFail, err := RunDebug(context.Background(), pFail, DebugOptions{Client: ClientFast})
+	if err != nil {
+		t.Fatalf("RunDebug fail case: %v", err)
+	}
+	if dbgFail.Passed || len(dbgFail.Steps[0].Asserts) != 2 || dbgFail.Steps[0].Asserts[0].Passed || !dbgFail.Steps[0].Asserts[1].Passed {
+		t.Fatalf("expected non-short-circuit asserts [false, true], got %+v", dbgFail.Steps[0])
 	}
 }

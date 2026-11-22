@@ -485,6 +485,9 @@ func (v *vu) runWS(s *scenario.WSStep, planned int64) (bool, metrics.ErrorKind) 
 	if !v.takeRequestSlot() {
 		return false, metrics.ErrNone
 	}
+	if failed, kind := v.execProtoPreScriptLoad(s.Index, s.ID, "WS", s.PreScript, planned); failed {
+		return true, kind
+	}
 	maxKeep := v.eng.plan.HTTP.MaxBodyRead
 	if maxKeep <= 0 {
 		maxKeep = DefaultDebugMaxBodyBytes
@@ -516,7 +519,7 @@ func (v *vu) runWS(s *scenario.WSStep, planned int64) (bool, metrics.ErrorKind) 
 				return []byte(val), true
 			},
 		}
-		kind, msg = v.evalNonHTTPUponResponse(initKind, initMsg, s.Extract, s.Assert, &view)
+		kind, msg = v.evalNonHTTPUponResponse(initKind, initMsg, s.Extract, s.Assert, s.PostScript, &view)
 	}
 	v.recordGeneric(s.Index, wr.status, kind, time.Duration(wr.end-start), wr.sent, wr.recv, wr.overSent, wr.overRecv, wr.newConn, wr.dial, wr.writeStart, wr.firstByte, wr.end)
 	v.maybeSampleGeneric(s.Index, s.ID, "WS", wr.url, wr.reqHeaders, wr.reqBodySummary, wr.status, wr.respHeaders, wr.body, wr.bodyTruncated, kind, msg, start, wr.end)
@@ -531,6 +534,10 @@ func (v *vu) runWSDebug(s *scenario.WSStep, maxBody int64) DebugStepResult {
 	res := DebugStepResult{
 		StepID:   s.ID,
 		StepName: s.Name,
+	}
+	if !v.execStepPreScriptDebug(s.PreScript, &res) {
+		res.ActualRequest = DebugActualRequest{Method: "WS"}
+		return res
 	}
 	wr := v.execWS(s, maxBody)
 	res.ActualRequest = DebugActualRequest{
@@ -563,7 +570,7 @@ func (v *vu) runWSDebug(s *scenario.WSStep, maxBody int64) DebugStepResult {
 			return []byte(val), true
 		},
 	}
-	v.evalDebugResponse(initKind, initMsg, s.Extract, s.Assert, &view, &res)
+	v.evalDebugResponse(initKind, initMsg, s.Extract, s.Assert, s.PostScript, &view, &res)
 	return res
 }
 

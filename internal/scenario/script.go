@@ -36,6 +36,14 @@ type ScriptCompileOptions struct {
 	ResolveSlot  func(name string) (slot int, ok bool)
 	ResolveConst func(name string) (tmpl *Template, ok bool)
 	ResolveData  func(alias, col string) (dataIdx, colIdx int, err error)
+	DisallowResp bool
+}
+
+// ScriptResponse provides read-only response data for post-request scripts.
+type ScriptResponse struct {
+	Status int
+	Body   []byte
+	Header func(name string) ([]byte, bool)
 }
 
 // ScriptAssertOutcome records one assert() evaluation inside a script step.
@@ -106,17 +114,30 @@ func CompileScript(code string, opts *ScriptCompileOptions) (*ScriptProgram, err
 // Exec executes the script against env, short-circuiting on the first runtime or
 // assert error (used on load-generation hot paths).
 func (p *ScriptProgram) Exec(env *Env) error {
-	_, err := p.exec(env, true)
+	_, err := p.execWithResp(env, nil, true)
 	return err
 }
 
 // ExecDebug executes the script and captures all assert outcomes and written
 // variable values without short-circuiting assertions.
 func (p *ScriptProgram) ExecDebug(env *Env) (*ScriptOutcome, error) {
-	return p.exec(env, false)
+	return p.execWithResp(env, nil, false)
 }
 
-func (p *ScriptProgram) exec(env *Env, stopOnAssertFail bool) (*ScriptOutcome, error) {
+// ExecWithResponse executes a post-request script with read-only response inspection
+// on the load-generation hot path.
+func (p *ScriptProgram) ExecWithResponse(env *Env, resp *ScriptResponse) error {
+	_, err := p.execWithResp(env, resp, true)
+	return err
+}
+
+// ExecDebugWithResponse executes a post-request script in debug mode with response
+// context and captures all assert outcomes and written variable values.
+func (p *ScriptProgram) ExecDebugWithResponse(env *Env, resp *ScriptResponse) (*ScriptOutcome, error) {
+	return p.execWithResp(env, resp, false)
+}
+
+func (p *ScriptProgram) execWithResp(env *Env, resp *ScriptResponse, stopOnAssertFail bool) (*ScriptOutcome, error) {
 	var localEnv Env
 	if env == nil {
 		localEnv = Env{Vars: make([][]byte, len(p.OwnVars))}
@@ -125,6 +146,7 @@ func (p *ScriptProgram) exec(env *Env, stopOnAssertFail bool) (*ScriptOutcome, e
 	r := scriptRunner{
 		prog:             p,
 		env:              env,
+		resp:             resp,
 		locals:           make([]scriptVal, p.localsCount),
 		stopOnAssertFail: stopOnAssertFail,
 		rng:              env.Rand,
@@ -568,6 +590,22 @@ type exprSetVar struct {
 	val  scriptExpr
 }
 
+type respFieldKind uint8
+
+const (
+	respFieldStatus respFieldKind = iota
+	respFieldBody
+	respFieldHeader
+	respFieldJSON
+)
+
+type exprResp struct {
+	kind     respFieldKind
+	args     []scriptExpr
+	jsonPath *JSONPath
+	line     int
+}
+
 func (*exprLit) isScriptExpr()       {}
 func (*exprLocal) isScriptExpr()     {}
 func (*exprSlotVar) isScriptExpr()   {}
@@ -578,6 +616,7 @@ func (*exprBinary) isScriptExpr()    {}
 func (*exprTernary) isScriptExpr()   {}
 func (*exprCall) isScriptExpr()      {}
 func (*exprSetVar) isScriptExpr()    {}
+func (*exprResp) isScriptExpr()      {}
 
 // ---------------------------------------------------------------------------
 // Parser
@@ -830,7 +869,7 @@ func (p *scriptParser) parseStmt() (scriptStmt, bool, error) {
 
 	// <ident> = <expr> (local shorthand)
 	if t.kind == sTokIdent && p.peekAt(1).kind == sTokAssign {
-		if t.val == "vars" || t.val == "env" || t.val == "data" {
+		if t.val == "vars" || t.val == "env" || t.val == "data" || t.val == "resp" {
 			return nil, false, fmt.Errorf("脚本第 %d 行：不能直接覆盖保留对象 %q", t.line, t.val)
 		}
 		p.next()
@@ -1032,6 +1071,8 @@ func (p *scriptParser) parsePrimary() (scriptExpr, error) {
 			return p.parseVarRead(t)
 		case "data":
 			return p.parseDataRead(t)
+		case "resp":
+			return p.parseRespExpr(t)
 		}
 		if p.peek().kind == sTokLParen {
 			return p.parseCall(t)
@@ -1133,7 +1174,10 @@ func (p *scriptParser) parseDataRead(prefix sTok) (scriptExpr, error) {
 	return &exprDataCol{dataIdx: di, colIdx: ci, alias: aliasTok.val, col: colTok.val}, nil
 }
 
-func (p *scriptParser) parseCall(fnTok sTok) (scriptExpr, error) {
+func (p *scriptParser) parseCallArgs(fnLabel string) ([]scriptExpr, error) {
+	if p.peek().kind != sTokLParen {
+		return nil, fmt.Errorf("脚本第 %d 行：%s 后缺少 (", p.peek().line, fnLabel)
+	}
 	p.next() // consume '('
 	var args []scriptExpr
 	if p.peek().kind != sTokRParen {
@@ -1151,9 +1195,83 @@ func (p *scriptParser) parseCall(fnTok sTok) (scriptExpr, error) {
 		}
 	}
 	if p.peek().kind != sTokRParen {
-		return nil, fmt.Errorf("脚本第 %d 行：函数 %s(...) 缺少闭合括号 )", p.peek().line, fnTok.val)
+		return nil, fmt.Errorf("脚本第 %d 行：函数 %s(...) 缺少闭合括号 )", p.peek().line, fnLabel)
 	}
 	p.next()
+	return args, nil
+}
+
+func compileStaticJSONPathArg(fnLabel string, args []scriptExpr, idx, line int) (*JSONPath, error) {
+	if idx < 0 || idx >= len(args) {
+		return nil, nil
+	}
+	lit, ok := args[idx].(*exprLit)
+	if !ok || lit.val.kind != valString {
+		return nil, nil
+	}
+	jp, err := CompileJSONPath(lit.val.s)
+	if err != nil {
+		return nil, fmt.Errorf("脚本第 %d 行：%s 路径无效：%v", line, fnLabel, err)
+	}
+	return jp, nil
+}
+
+func (p *scriptParser) parseRespExpr(prefix sTok) (scriptExpr, error) {
+	if !p.discoverOnly && p.opts != nil && p.opts.DisallowResp {
+		return nil, fmt.Errorf("脚本第 %d 行：前置脚本尚无响应对象，不能访问 resp", prefix.line)
+	}
+	if p.peek().kind != sTokDot {
+		return nil, fmt.Errorf("脚本第 %d 行：resp 后需要 .status、.body、.header(...) 或 .json([path])", p.peek().line)
+	}
+	p.next()
+	id := p.peek()
+	if id.kind != sTokIdent {
+		return nil, fmt.Errorf("脚本第 %d 行：resp. 后需要属性或方法名", id.line)
+	}
+	p.next()
+	switch id.val {
+	case "status":
+		if p.peek().kind == sTokLParen {
+			return nil, fmt.Errorf("脚本第 %d 行：resp.status 是只读属性，无需加 ()", id.line)
+		}
+		return &exprResp{kind: respFieldStatus, line: id.line}, nil
+	case "body":
+		if p.peek().kind == sTokLParen {
+			return nil, fmt.Errorf("脚本第 %d 行：resp.body 是只读属性，无需加 ()", id.line)
+		}
+		return &exprResp{kind: respFieldBody, line: id.line}, nil
+	case "header":
+		args, err := p.parseCallArgs("resp.header")
+		if err != nil {
+			return nil, err
+		}
+		if len(args) != 1 {
+			return nil, fmt.Errorf("脚本第 %d 行：resp.header(name) 需要 1 个参数", id.line)
+		}
+		return &exprResp{kind: respFieldHeader, args: args, line: id.line}, nil
+	case "json":
+		args, err := p.parseCallArgs("resp.json")
+		if err != nil {
+			return nil, err
+		}
+		if len(args) > 1 {
+			return nil, fmt.Errorf("脚本第 %d 行：resp.json([path]) 最多接受 1 个参数", id.line)
+		}
+		jp, err := compileStaticJSONPathArg("resp.json", args, 0, id.line)
+		if err != nil {
+			return nil, err
+		}
+		return &exprResp{kind: respFieldJSON, args: args, jsonPath: jp, line: id.line}, nil
+	default:
+		return nil, fmt.Errorf("脚本第 %d 行：resp 不支持成员 %q（支持 status、body、header、json）", id.line, id.val)
+	}
+}
+
+func (p *scriptParser) parseCall(fnTok sTok) (scriptExpr, error) {
+	args, err := p.parseCallArgs(fnTok.val)
+	if err != nil {
+		return nil, err
+	}
 
 	switch fnTok.val {
 	case "set":
@@ -1178,17 +1296,13 @@ func (p *scriptParser) parseCall(fnTok sTok) (scriptExpr, error) {
 			return nil, fmt.Errorf("脚本第 %d 行：get 的参数必须是常量字符串变量名", fnTok.line)
 		}
 		return p.resolveVarRead(lit.val.s, fnTok.line)
-	case "json_get":
+	case "json_get", "jsonpath":
 		if len(args) != 2 {
-			return nil, fmt.Errorf("脚本第 %d 行：json_get(jsonStr, path) 需要 2 个参数", fnTok.line)
+			return nil, fmt.Errorf("脚本第 %d 行：%s(jsonStr, path) 需要 2 个参数", fnTok.line, fnTok.val)
 		}
-		var jp *JSONPath
-		if lit, ok := args[1].(*exprLit); ok && lit.val.kind == valString {
-			compiled, err := CompileJSONPath(lit.val.s)
-			if err != nil {
-				return nil, fmt.Errorf("脚本第 %d 行：json_get 路径无效：%v", fnTok.line, err)
-			}
-			jp = compiled
+		jp, err := compileStaticJSONPathArg(fnTok.val, args, 1, fnTok.line)
+		if err != nil {
+			return nil, err
 		}
 		return &exprCall{name: fnTok.val, args: args, jsonPath: jp, line: fnTok.line}, nil
 	case "hmac_sha256", "hmac_sha256_base64", "contains", "starts_with", "ends_with":
@@ -1232,6 +1346,7 @@ func (p *scriptParser) parseCall(fnTok sTok) (scriptExpr, error) {
 type scriptRunner struct {
 	prog             *ScriptProgram
 	env              *Env
+	resp             *ScriptResponse
 	locals           []scriptVal
 	ops              int
 	stopOnAssertFail bool
@@ -1378,6 +1493,68 @@ func (r *scriptRunner) eval(ex scriptExpr) (scriptVal, error) {
 		return strVal(s)
 	case *exprCall:
 		return r.evalCall(e)
+	case *exprResp:
+		return r.evalResp(e)
+	}
+	return nullVal(), nil
+}
+
+func (r *scriptRunner) lookupJSONPathDoc(fnLabel string, doc []byte, jp *JSONPath, pathStr string, line int) (scriptVal, error) {
+	if jp == nil {
+		compiled, err := CompileJSONPath(pathStr)
+		if err != nil {
+			return scriptVal{}, fmt.Errorf("脚本第 %d 行：%s 路径无效：%w", line, fnLabel, err)
+		}
+		jp = compiled
+	}
+	if raw, ok := jp.Lookup(doc); ok {
+		if out, ok := AppendJSONText(nil, raw); ok {
+			return strVal(string(out))
+		}
+	}
+	return nullVal(), nil
+}
+
+func (r *scriptRunner) evalResp(e *exprResp) (scriptVal, error) {
+	if r.resp == nil {
+		if e.kind == respFieldStatus {
+			return intVal(0), nil
+		}
+		if e.kind == respFieldBody {
+			return strVal("")
+		}
+		return nullVal(), nil
+	}
+	switch e.kind {
+	case respFieldStatus:
+		return intVal(int64(r.resp.Status)), nil
+	case respFieldBody:
+		return strVal(string(r.resp.Body))
+	case respFieldHeader:
+		nameVal, err := r.eval(e.args[0])
+		if err != nil {
+			return scriptVal{}, err
+		}
+		if r.resp.Header == nil {
+			return nullVal(), nil
+		}
+		if v, ok := r.resp.Header(nameVal.asString()); ok {
+			return strVal(string(v))
+		}
+		return nullVal(), nil
+	case respFieldJSON:
+		if len(e.args) == 0 {
+			return strVal(string(r.resp.Body))
+		}
+		var pathStr string
+		if e.jsonPath == nil {
+			pv, err := r.eval(e.args[0])
+			if err != nil {
+				return scriptVal{}, err
+			}
+			pathStr = pv.asString()
+		}
+		return r.lookupJSONPathDoc("resp.json", r.resp.Body, e.jsonPath, pathStr, e.line)
 	}
 	return nullVal(), nil
 }
@@ -1593,21 +1770,8 @@ func (r *scriptRunner) evalCall(c *exprCall) (scriptVal, error) {
 		return strVal(s)
 	case "hex_encode":
 		return strVal(hex.EncodeToString([]byte(args[0].asString())))
-	case "json_get":
-		jp := c.jsonPath
-		if jp == nil {
-			compiled, err := CompileJSONPath(args[1].asString())
-			if err != nil {
-				return scriptVal{}, fmt.Errorf("脚本第 %d 行：json_get 路径无效：%w", c.line, err)
-			}
-			jp = compiled
-		}
-		if raw, ok := jp.Lookup([]byte(args[0].asString())); ok {
-			if out, ok := AppendJSONText(nil, raw); ok {
-				return strVal(string(out))
-			}
-		}
-		return nullVal(), nil
+	case "json_get", "jsonpath":
+		return r.lookupJSONPathDoc(c.name, []byte(args[0].asString()), c.jsonPath, args[1].asString(), c.line)
 	case "len":
 		return intVal(int64(len(args[0].asString()))), nil
 	case "upper":

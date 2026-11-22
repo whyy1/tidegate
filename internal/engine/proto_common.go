@@ -61,6 +61,7 @@ func (v *vu) evalNonHTTPUponResponse(
 	initMsg string,
 	extract []scenario.Extractor,
 	assert []scenario.Assertion,
+	postScript *scenario.ScriptProgram,
 	view *scenario.ResponseView,
 ) (metrics.ErrorKind, string) {
 	kind, msg := initKind, initMsg
@@ -79,7 +80,7 @@ func (v *vu) evalNonHTTPUponResponse(
 			kind, msg = metrics.ErrAssertion, m
 		}
 	}
-	return kind, msg
+	return v.execStepPostScriptLoad(postScript, view, kind, msg)
 }
 
 func (v *vu) evalDebugResponse(
@@ -87,6 +88,7 @@ func (v *vu) evalDebugResponse(
 	initMsg string,
 	extract []scenario.Extractor,
 	assert []scenario.Assertion,
+	postScript *scenario.ScriptProgram,
 	view *scenario.ResponseView,
 	res *DebugStepResult,
 ) {
@@ -148,6 +150,8 @@ func (v *vu) evalDebugResponse(
 			res.Asserts = append(res.Asserts, ar)
 		}
 	}
+
+	passed, firstKind, firstMsg = v.execStepPostScriptDebug(postScript, view, res, passed, firstKind, firstMsg)
 
 	res.Passed = passed
 	if !passed {

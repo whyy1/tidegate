@@ -133,6 +133,22 @@ func planHasScripts(nodes []scenario.Node) bool {
 		switch st := n.(type) {
 		case *scenario.ScriptStepPlan:
 			return true
+		case *scenario.HTTPStep:
+			if st.PreScript != nil || st.PostScript != nil {
+				return true
+			}
+		case *scenario.WSStep:
+			if st.PreScript != nil || st.PostScript != nil {
+				return true
+			}
+		case *scenario.GRPCStepPlan:
+			if st.PreScript != nil || st.PostScript != nil {
+				return true
+			}
+		case *scenario.SSEStepPlan:
+			if st.PreScript != nil || st.PostScript != nil {
+				return true
+			}
 		case *scenario.GroupNode:
 			if planHasScripts(st.Children) {
 				return true

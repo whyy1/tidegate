@@ -698,6 +698,10 @@ func (v *vu) runHTTP(rt *stepRT, planned int64) (bool, metrics.ErrorKind) {
 	e := v.eng
 	s := rt.s
 	cfg := &e.plan.HTTP
+	if kind, msg := v.execStepPreScriptLoad(s.PreScript); kind != metrics.ErrNone {
+		v.recordFailure(rt, planned, kind, msg)
+		return true, kind
+	}
 	if !v.buildRequest(rt) {
 		msg := v.buildErr
 		if msg == "" {
@@ -773,7 +777,7 @@ func (v *vu) evaluate(rt *stepRT, stepDur time.Duration) (metrics.ErrorKind, str
 			kind, msg = metrics.ErrHTTP4xx, "HTTP "+strconv.Itoa(r.status)
 		}
 	}
-	if len(s.Extract) == 0 && len(s.Assert) == 0 {
+	if len(s.Extract) == 0 && len(s.Assert) == 0 && s.PostScript == nil {
 		return kind, msg
 	}
 	view := scenario.ResponseView{Status: r.status, Duration: stepDur, Body: v.decodedBody(), Header: v.headerFn}
@@ -792,7 +796,7 @@ func (v *vu) evaluate(rt *stepRT, stepDur time.Duration) (metrics.ErrorKind, str
 			kind, msg = metrics.ErrAssertion, m
 		}
 	}
-	return kind, msg
+	return v.execStepPostScriptLoad(s.PostScript, &view, kind, msg)
 }
 
 const maxDecodedBody = 64 << 20

@@ -791,6 +791,49 @@ func buildTools() []toolDef {
 				}
 			},
 		},
+
+		// 16. run_collection_test
+		{
+			readOnly: false,
+			longOp:   true,
+			spec: Tool{
+				Name:        "run_collection_test",
+				Description: "按目录树顺序批量执行项目或指定目录下的全部接口功能回归测试（支持跨接口变量传递、前置/后置脚本与断言，敏感响应已自动脱敏）。",
+				InputSchema: map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"project_id":     map[string]any{"type": "string", "description": "项目 ID"},
+						"folder_id":      map[string]any{"type": "string", "description": "可选，仅运行指定目录（支持目录 ID、名称或路径）"},
+						"api_ids":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "可选，按给定顺序执行指定接口 ID 列表"},
+						"environment_id": map[string]any{"type": "string", "description": "可选环境 ID"},
+						"variables":      map[string]any{"type": "object", "description": "可选临时覆盖变量"},
+						"stop_on_error":  map[string]any{"type": "boolean", "description": "是否在首个失败接口后停止"},
+					},
+					"required": []string{"project_id"},
+				},
+				Annotations: wr("批量运行目录或接口回归测试", false, true),
+			},
+			run: func(s *Server, ctx context.Context, _ *auth.User, _ controller.SecurityPolicy, raw json.RawMessage) (any, error) {
+				in, err := decodeArgs[struct {
+					ProjectID     string                     `json:"project_id"`
+					FolderID      string                     `json:"folder_id"`
+					APIIDs        []string                   `json:"api_ids"`
+					EnvironmentID string                     `json:"environment_id"`
+					Variables     map[string]scenario.Scalar `json:"variables"`
+					StopOnError   bool                       `json:"stop_on_error"`
+				}](raw)
+				if err != nil || strings.TrimSpace(in.ProjectID) == "" {
+					return nil, errors.New("必须提供有效的 project_id")
+				}
+				return s.ctrl.RunCollectionTest(ctx, strings.TrimSpace(in.ProjectID), controller.CollectionTestRequest{
+					FolderID:      strings.TrimSpace(in.FolderID),
+					APIIDs:        in.APIIDs,
+					EnvironmentID: strings.TrimSpace(in.EnvironmentID),
+					Variables:     in.Variables,
+					StopOnError:   in.StopOnError,
+				})
+			},
+		},
 	}
 }
 

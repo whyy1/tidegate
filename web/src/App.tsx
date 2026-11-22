@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
 import { AccountModal, type AccountModalTab } from './components/AccountModal'
 import { AuthGate } from './components/AuthGate'
 import { CommandPalette } from './components/CommandPalette'
@@ -21,12 +21,15 @@ import type {
   User,
 } from './lib/types'
 import { wsClient } from './lib/ws'
-import { AgentsView } from './views/AgentsView'
-import { GovernanceView } from './views/GovernanceView'
-import { HistoryCompareView } from './views/HistoryCompareView'
-import { LiveRunView } from './views/LiveRunView'
-import { ScenariosView } from './views/ScenariosView'
 import { WorkbenchView } from './views/WorkbenchView'
+
+const AgentsView = lazy(() => import('./views/AgentsView').then((m) => ({ default: m.AgentsView })))
+const GovernanceView = lazy(() => import('./views/GovernanceView').then((m) => ({ default: m.GovernanceView })))
+const HistoryCompareView = lazy(() =>
+  import('./views/HistoryCompareView').then((m) => ({ default: m.HistoryCompareView }))
+)
+const LiveRunView = lazy(() => import('./views/LiveRunView').then((m) => ({ default: m.LiveRunView })))
+const ScenariosView = lazy(() => import('./views/ScenariosView').then((m) => ({ default: m.ScenariosView })))
 
 let toastSeq = 1
 let replaySeq = 1
@@ -328,6 +331,8 @@ export function App() {
             <div className={activeTab === 'workbench' ? 'flex-1 flex min-h-0 overflow-hidden' : 'hidden'}>
               <WorkbenchView
                 projectId={activeProject.id}
+                environments={environments}
+                projectVariables={activeProject.variables || []}
                 activeEnvId={activeEnvId}
                 tempVars={tempVars}
                 canWrite={user.role !== 'viewer'}
@@ -347,77 +352,83 @@ export function App() {
               />
             </div>
 
-            {activeTab === 'scenarios' && (
-              <ScenariosView
-                projectId={activeProject.id}
-                environments={environments}
-                activeEnvId={activeEnvId}
-                tempVars={tempVars}
-                canWrite={user.role !== 'viewer'}
-                onLaunchScenario={(scenarioId) => {
-                  setQuickLoadAPI(null)
-                  setInspectRunId('')
-                  setPreloadedScenarioId(scenarioId)
-                  setActiveTab('run')
-                }}
-                onToast={pushToast}
-              />
-            )}
+            <Suspense
+              fallback={
+                <div className="flex-1 flex items-center justify-center text-xs text-slate-500">正在按需加载视图模块...</div>
+              }
+            >
+              {activeTab === 'scenarios' && (
+                <ScenariosView
+                  projectId={activeProject.id}
+                  environments={environments}
+                  activeEnvId={activeEnvId}
+                  tempVars={tempVars}
+                  canWrite={user.role !== 'viewer'}
+                  onLaunchScenario={(scenarioId) => {
+                    setQuickLoadAPI(null)
+                    setInspectRunId('')
+                    setPreloadedScenarioId(scenarioId)
+                    setActiveTab('run')
+                  }}
+                  onToast={pushToast}
+                />
+              )}
 
-            {activeTab === 'run' && (
-              <LiveRunView
-                projectId={activeProject.id}
-                environments={environments}
-                activeEnvId={activeEnvId}
-                tempVars={tempVars}
-                agents={liveAgents}
-                canWrite={user.role !== 'viewer'}
-                preloadedAPI={quickLoadAPI}
-                preloadedScenarioId={preloadedScenarioId}
-                inspectRunId={inspectRunId}
-                onClearPreloads={() => {
-                  setQuickLoadAPI(null)
-                  setPreloadedScenarioId('')
-                  setInspectRunId('')
-                }}
-                onReplaySample={(sample) => {
-                  setIncomingReplay({ seq: replaySeq++, api: sampleToDraftAPI(sample) })
-                  setActiveTab('workbench')
-                  pushToast('info', '已将异常采样带入工作台，可直接调整并重发调试')
-                }}
-                onToast={pushToast}
-              />
-            )}
+              {activeTab === 'run' && (
+                <LiveRunView
+                  projectId={activeProject.id}
+                  environments={environments}
+                  activeEnvId={activeEnvId}
+                  tempVars={tempVars}
+                  agents={liveAgents}
+                  canWrite={user.role !== 'viewer'}
+                  preloadedAPI={quickLoadAPI}
+                  preloadedScenarioId={preloadedScenarioId}
+                  inspectRunId={inspectRunId}
+                  onClearPreloads={() => {
+                    setQuickLoadAPI(null)
+                    setPreloadedScenarioId('')
+                    setInspectRunId('')
+                  }}
+                  onReplaySample={(sample) => {
+                    setIncomingReplay({ seq: replaySeq++, api: sampleToDraftAPI(sample) })
+                    setActiveTab('workbench')
+                    pushToast('info', '已将异常采样带入工作台，可直接调整并重发调试')
+                  }}
+                  onToast={pushToast}
+                />
+              )}
 
-            {activeTab === 'history' && (
-              <HistoryCompareView
-                projectId={activeProject.id}
-                canWrite={user.role !== 'viewer'}
-                onInspectRun={(runId) => {
-                  setQuickLoadAPI(null)
-                  setPreloadedScenarioId('')
-                  setInspectRunId(runId)
-                  setActiveTab('run')
-                }}
-                onToast={pushToast}
-              />
-            )}
+              {activeTab === 'history' && (
+                <HistoryCompareView
+                  projectId={activeProject.id}
+                  canWrite={user.role !== 'viewer'}
+                  onInspectRun={(runId) => {
+                    setQuickLoadAPI(null)
+                    setPreloadedScenarioId('')
+                    setInspectRunId(runId)
+                    setActiveTab('run')
+                  }}
+                  onToast={pushToast}
+                />
+              )}
 
-            {activeTab === 'agents' && (
-              <AgentsView
-                agents={liveAgents}
-                isAdmin={user.role === 'admin'}
-                onAgentsRefresh={async () => {
-                  const list = await api.listAgents()
-                  setAgents(list)
-                }}
-                onToast={pushToast}
-              />
-            )}
+              {activeTab === 'agents' && (
+                <AgentsView
+                  agents={liveAgents}
+                  isAdmin={user.role === 'admin'}
+                  onAgentsRefresh={async () => {
+                    const list = await api.listAgents()
+                    setAgents(list)
+                  }}
+                  onToast={pushToast}
+                />
+              )}
 
-            {activeTab === 'governance' && (
-              <GovernanceView currentUser={user} onToast={pushToast} />
-            )}
+              {activeTab === 'governance' && (
+                <GovernanceView currentUser={user} onToast={pushToast} />
+              )}
+            </Suspense>
           </div>
         )}
       </div>

@@ -901,6 +901,27 @@ func (s *Server) handleDebugScenario(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (s *Server) handleRunCollectionTest(w http.ResponseWriter, r *http.Request) {
+	pid := r.PathValue("pid")
+	var req controller.CollectionTestRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.ctrl.RunCollectionTest(r.Context(), pid, req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "collection.test", "project", pid, map[string]any{
+		"folder_id": req.FolderID,
+		"total":     out.Total,
+		"passed":    out.PassedCount,
+		"failed":    out.FailedCount,
+	})
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) handleListDebugHistory(w http.ResponseWriter, r *http.Request) {
 	pid := r.PathValue("pid")
 	if _, err := s.store.GetProject(pid); err != nil {

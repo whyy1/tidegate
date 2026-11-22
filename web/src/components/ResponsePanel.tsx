@@ -7,6 +7,7 @@ export type RespSubTab = 'body' | 'extract_assert' | 'actual' | 'headers' | 'his
 
 interface Props {
   projectId: string
+  activeEnvId?: string
   debugResp: DebugAPIResponse | null
   historyList: DebugRecord[]
   loadingDebug: boolean
@@ -15,6 +16,7 @@ interface Props {
   onPickExtractJSONPath: (expr: string, suggestedName: string) => void
   onPickAssertJSONPath: (expr: string, sampleVal: string) => void
   onPushTempVars: (vars: Record<string, string>) => void
+  onSaveEnvVars?: (vars: Record<string, string>) => Promise<void>
   onRefreshHistory: () => Promise<void>
   onLoadHistoryRecord: (id: string) => Promise<void>
   onClearHistory: () => Promise<void>
@@ -27,6 +29,7 @@ function formatBytes(n: number): string {
 }
 
 export function ResponsePanel({
+  activeEnvId,
   debugResp,
   historyList,
   loadingDebug,
@@ -35,6 +38,7 @@ export function ResponsePanel({
   onPickExtractJSONPath,
   onPickAssertJSONPath,
   onPushTempVars,
+  onSaveEnvVars,
   onRefreshHistory,
   onLoadHistoryRecord,
   onClearHistory,
@@ -71,7 +75,10 @@ export function ResponsePanel({
               {
                 id: 'extract_assert' as const,
                 label: '提取与断言',
-                count: (step?.extracts?.length || 0) + (step?.asserts?.length || 0),
+                count:
+                  (step?.extracts?.length || 0) +
+                  (step?.asserts?.length || 0) +
+                  (step?.extracts?.length ? 0 : Object.keys(step?.extracted_vars || {}).length),
               },
               { id: 'actual' as const, label: '实际请求', count: 0 },
               { id: 'headers' as const, label: '响应头', count: step?.response_headers?.length || 0 },
@@ -344,15 +351,39 @@ export function ResponsePanel({
                     <span>调试提取成功时自动同步写入顶部临时变量池</span>
                   </label>
                   {step.extracted_vars && Object.keys(step.extracted_vars).length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => onPushTempVars(step.extracted_vars!)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-50 border border-amber-300 text-amber-800 hover:bg-amber-100"
-                    >
-                      <Zap className="w-3.5 h-3.5" /> 立即同步本次提取变量（{Object.keys(step.extracted_vars).length}）
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => onPushTempVars(step.extracted_vars!)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-50 border border-amber-300 text-amber-800 hover:bg-amber-100"
+                      >
+                        <Zap className="w-3.5 h-3.5" /> 立即同步本次提取变量（{Object.keys(step.extracted_vars).length}）
+                      </button>
+                      {activeEnvId && onSaveEnvVars && (
+                        <button
+                          type="button"
+                          onClick={() => void onSaveEnvVars(step.extracted_vars!)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-sky-50 border border-sky-300 text-sky-800 hover:bg-sky-100"
+                        >
+                          <Zap className="w-3.5 h-3.5" /> 写入当前环境（{Object.keys(step.extracted_vars).length}）
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
+
+                {step.extracted_vars && Object.keys(step.extracted_vars).length > 0 && (
+                  <div className="bg-white border border-slate-200 rounded-lg p-3 space-y-1.5">
+                    <h4 className="font-semibold text-slate-700">脚本写入与提取变量快照</h4>
+                    <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
+                      {Object.entries(step.extracted_vars).map(([k, val]) => (
+                        <span key={k} className="px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-800">
+                          <span className="text-sky-700 font-semibold">{k}</span>={val}
+                        </span>
+                      ))}
+                    </div>
+                  </div>
+                )}
 
                 <div>
                   <h4 className="font-semibold text-slate-700 mb-1.5">变量提取结果（全量非短路执行）</h4>

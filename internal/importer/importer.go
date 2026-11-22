@@ -779,6 +779,19 @@ func smartMergeAPI(cur *store.API, incoming store.API) (merged store.API, change
 		preserved = append(preserved, fmt.Sprintf("断言(%d)", len(cur.Assert)))
 	}
 
+	if strings.TrimSpace(incoming.PreScript) == "" && strings.TrimSpace(cur.PreScript) != "" {
+		merged.PreScript = cur.PreScript
+		preserved = append(preserved, "前置脚本")
+	} else if incoming.PreScript != cur.PreScript && strings.TrimSpace(incoming.PreScript) != "" {
+		changed = append(changed, "前置脚本")
+	}
+	if strings.TrimSpace(incoming.PostScript) == "" && strings.TrimSpace(cur.PostScript) != "" {
+		merged.PostScript = cur.PostScript
+		preserved = append(preserved, "后置脚本")
+	} else if incoming.PostScript != cur.PostScript && strings.TrimSpace(incoming.PostScript) != "" {
+		changed = append(changed, "后置脚本")
+	}
+
 	return merged, changed, preserved
 }
 

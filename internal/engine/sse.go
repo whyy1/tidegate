@@ -331,6 +331,9 @@ func (v *vu) runSSE(s *scenario.SSEStepPlan, planned int64) (bool, metrics.Error
 	if !v.takeRequestSlot() {
 		return false, metrics.ErrNone
 	}
+	if failed, kind := v.execProtoPreScriptLoad(s.Index, s.ID, "SSE", s.PreScript, planned); failed {
+		return true, kind
+	}
 	maxKeep := v.eng.plan.HTTP.MaxBodyRead
 	if maxKeep <= 0 {
 		maxKeep = DefaultDebugMaxBodyBytes
@@ -362,7 +365,7 @@ func (v *vu) runSSE(s *scenario.SSEStepPlan, planned int64) (bool, metrics.Error
 				return []byte(val), true
 			},
 		}
-		kind, msg = v.evalNonHTTPUponResponse(initKind, initMsg, s.Extract, s.Assert, &view)
+		kind, msg = v.evalNonHTTPUponResponse(initKind, initMsg, s.Extract, s.Assert, s.PostScript, &view)
 	}
 	v.recordGeneric(s.Index, sr.status, kind, time.Duration(sr.end-start), sr.sent, sr.recv, sr.overSent, sr.overRecv, sr.newConn, sr.dial, sr.writeStart, sr.firstByte, sr.end)
 	v.maybeSampleGeneric(s.Index, s.ID, sr.method, sr.url, sr.reqHeaders, sr.reqBody, sr.status, sr.respHeaders, sr.body, sr.bodyTruncated, kind, msg, start, sr.end)
@@ -377,6 +380,10 @@ func (v *vu) runSSEDebug(s *scenario.SSEStepPlan, maxBody int64) DebugStepResult
 	res := DebugStepResult{
 		StepID:   s.ID,
 		StepName: s.Name,
+	}
+	if !v.execStepPreScriptDebug(s.PreScript, &res) {
+		res.ActualRequest = DebugActualRequest{Method: s.Method}
+		return res
 	}
 	sr := v.execSSE(s, maxBody)
 	res.ActualRequest = DebugActualRequest{
@@ -410,6 +417,6 @@ func (v *vu) runSSEDebug(s *scenario.SSEStepPlan, maxBody int64) DebugStepResult
 			return []byte(val), true
 		},
 	}
-	v.evalDebugResponse(initKind, initMsg, s.Extract, s.Assert, &view, &res)
+	v.evalDebugResponse(initKind, initMsg, s.Extract, s.Assert, s.PostScript, &view, &res)
 	return res
 }

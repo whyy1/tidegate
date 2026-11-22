@@ -264,6 +264,38 @@ func (src *stepSource) extractors() []scenario.Extract {
 	return src.api.Extract
 }
 
+func (src *stepSource) preScript() string {
+	if src.step != nil && src.step.Override != nil && src.step.Override.PreScript != nil {
+		return *src.step.Override.PreScript
+	}
+	return src.api.PreScript
+}
+
+func (src *stepSource) postScript() string {
+	if src.step != nil && src.step.Override != nil && src.step.Override.PostScript != nil {
+		return *src.step.Override.PostScript
+	}
+	return src.api.PostScript
+}
+
+func registerMutableStepSource(r *resolver, src *stepSource) {
+	for _, ex := range src.extractors() {
+		if !ex.Disabled {
+			r.mutable[ex.Name] = true
+		}
+	}
+	for _, code := range []string{src.preScript(), src.postScript()} {
+		if strings.TrimSpace(code) == "" {
+			continue
+		}
+		if assigned, err := scenario.ExtractAssignedVars(code); err == nil {
+			for _, name := range assigned {
+				r.mutable[name] = true
+			}
+		}
+	}
+}
+
 // mergeNameValues appends enabled items from src onto dst, replacing any
 // existing entry from an earlier layer whose name matches (case-insensitively
 // when caseFold is true). Multiple items with the same name inside src itself
@@ -595,12 +627,14 @@ func (r *resolver) step(id string, src *stepSource) (scenario.Step, error) {
 		proto = "ws"
 	}
 	step := scenario.Step{
-		ID:      id,
-		Name:    name,
-		OnError: onError,
-		Extract: append([]scenario.Extract(nil), extract...),
-		Assert:  append([]scenario.Assert(nil), assert...),
-		Think:   think,
+		ID:         id,
+		Name:       name,
+		OnError:    onError,
+		PreScript:  src.preScript(),
+		PostScript: src.postScript(),
+		Extract:    append([]scenario.Extract(nil), extract...),
+		Assert:     append([]scenario.Assert(nil), assert...),
+		Think:      think,
 	}
 
 	switch proto {
@@ -929,11 +963,7 @@ func (p *project) collectStepTrees(r *resolver, prefix string, steps []ScenarioS
 				return nil, err
 			}
 			src := &stepSource{field: field, api: a, folderRel: dirOf(e.rel), step: st}
-			for _, ex := range src.extractors() {
-				if !ex.Disabled {
-					r.mutable[ex.Name] = true
-				}
-			}
+			registerMutableStepSource(r, src)
 			node.src = src
 		case "script":
 			if strings.TrimSpace(st.Script) == "" {
@@ -1130,11 +1160,7 @@ func (p *project) resolveAPI(a *API, folderRel string, opts APIRunOptions) (*Res
 		return nil, err
 	}
 	src := &stepSource{api: a, folderRel: folderRel}
-	for _, ex := range src.extractors() {
-		if !ex.Disabled {
-			r.mutable[ex.Name] = true
-		}
-	}
+	registerMutableStepSource(r, src)
 	step, err := r.step("step1", src)
 	if err != nil {
 		return nil, err

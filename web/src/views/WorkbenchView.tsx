@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowDown,
   ArrowUp,
@@ -12,6 +12,7 @@ import {
   FolderOpen,
   FolderPlus,
   Import,
+  ListChecks,
   PanelLeftClose,
   PanelLeftOpen,
   Pencil,
@@ -27,12 +28,15 @@ import {
   Zap,
 } from 'lucide-react'
 import { AuthEditor } from '../components/AuthEditor'
+import { CodeEditor } from '../components/CodeEditor'
+import { CollectionRunnerModal } from '../components/CollectionRunnerModal'
 import { CurlModal } from '../components/CurlModal'
 import { FolderModal } from '../components/FolderModal'
 import { ImportModal } from '../components/ImportModal'
 import { KeyValueEditor } from '../components/KeyValueEditor'
 import { ResponsePanel } from '../components/ResponsePanel'
 import { SaveAPIModal } from '../components/SaveAPIModal'
+import { VariableInput } from '../components/VariableInput'
 import { api, APIError } from '../lib/api'
 import type {
   API,
@@ -44,16 +48,20 @@ import type {
   DebugAPIResponse,
   DebugRecord,
   EffectiveAPIPreview,
+  Environment,
   ExtractRule,
   Folder,
   GRPCSchemaCatalog,
   KeyValue,
+  ResolvedVariable,
   Tree,
   TreeNode,
 } from '../lib/types'
 
 interface Props {
   projectId: string
+  environments?: Environment[]
+  projectVariables?: KeyValue[]
   activeEnvId: string
   tempVars: Record<string, string>
   canWrite?: boolean
@@ -66,7 +74,7 @@ interface Props {
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
 }
 
-type ReqSubTab = 'params' | 'headers' | 'body' | 'auth' | 'extract' | 'assert' | 'docs'
+type ReqSubTab = 'params' | 'headers' | 'body' | 'auth' | 'extract' | 'assert' | 'scripts' | 'docs'
 
 interface OpenTab {
   tabKey: string
@@ -140,6 +148,8 @@ function looksLikeCurl(text: string): boolean {
 
 export function WorkbenchView({
   projectId,
+  environments = [],
+  projectVariables = [],
   activeEnvId,
   tempVars,
   canWrite = true,
@@ -154,6 +164,77 @@ export function WorkbenchView({
   const [tree, setTree] = useState<Tree>({ children: [] })
   const [files, setFiles] = useState<DataFile[]>([])
   const [history, setHistory] = useState<DebugRecord[]>([])
+  const [runnerModal, setRunnerModal] = useState<{ open: boolean; folderId: string }>({
+    open: false,
+    folderId: '',
+  })
+
+  const variableHints = useMemo<ResolvedVariable[]>(() => {
+    const byName = new Map<string, ResolvedVariable>()
+    for (const kv of projectVariables) {
+      if (!kv.disabled && kv.name.trim()) {
+        byName.set(kv.name.trim(), {
+          name: kv.name.trim(),
+          value: kv.value,
+          source: 'project',
+          description: kv.description,
+          secret: kv.secret,
+        })
+      }
+    }
+    const envObj = environments.find((e) => e.id === activeEnvId)
+    for (const kv of envObj?.variables || []) {
+      if (!kv.disabled && kv.name.trim()) {
+        byName.set(kv.name.trim(), {
+          name: kv.name.trim(),
+          value: kv.value,
+          source: 'environment',
+          description: kv.description,
+          secret: kv.secret,
+        })
+      }
+    }
+    for (const [k, v] of Object.entries(tempVars)) {
+      if (k.trim()) {
+        byName.set(k.trim(), { name: k.trim(), value: v, source: 'override' })
+      }
+    }
+    return Array.from(byName.values())
+  }, [projectVariables, environments, activeEnvId, tempVars])
+
+  const handleSaveEnvVars = async (vars: Record<string, string>) => {
+    if (!activeEnvId) {
+      onToast('error', '请先在顶部选择一个目标环境')
+      return
+    }
+    try {
+      const freshEnvs = await api.listEnvironments(projectId)
+      const envObj = freshEnvs.find((item) => item.id === activeEnvId)
+      if (!envObj) {
+        onToast('error', '未找到当前选中环境')
+        return
+      }
+      const list = [...(envObj.variables || [])]
+      for (const [k, val] of Object.entries(vars)) {
+        const idx = list.findIndex((item) => item.name === k)
+        if (idx >= 0) {
+          list[idx] = { ...list[idx], value: val, disabled: false }
+        } else {
+          list.push({ name: k, value: val })
+        }
+      }
+      await api.updateEnvironment(projectId, activeEnvId, {
+        name: envObj.name,
+        base_url: envObj.base_url,
+        variables: list,
+        version: envObj.version,
+      })
+      await onWorkspaceMutated()
+      onToast('success', `已写入环境「${envObj.name}」（${Object.keys(vars).length} 项变量）`)
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : '写入环境变量失败')
+    }
+  }
   const [search, setSearch] = useState('')
   const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
   const [treeCollapsed, setTreeCollapsed] = useState(false)
@@ -611,6 +692,14 @@ export function WorkbenchView({
               >
                 <button
                   type="button"
+                  title="批量测试此目录"
+                  onClick={() => setRunnerModal({ open: true, folderId: node.id })}
+                  className="p-0.5 text-slate-500 hover:text-emerald-600 rounded"
+                >
+                  <Play className="w-3 h-3" />
+                </button>
+                <button
+                  type="button"
                   title="在此目录下新建草稿接口"
                   onClick={() => addScratchTab(node.id)}
                   className="p-0.5 text-slate-500 hover:text-sky-600 rounded"
@@ -881,15 +970,26 @@ export function WorkbenchView({
             </div>
             <div className="flex items-center justify-between text-[11px] px-0.5">
               <span className="text-slate-500 font-medium">接口目录树</span>
-              {canWrite && (
+              <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => setFolderModal({ open: true, folder: null, parentId: '' })}
-                  className="inline-flex items-center gap-1 text-sky-700 hover:underline font-medium"
+                  disabled={!canWrite}
+                  onClick={() => setRunnerModal({ open: true, folderId: '' })}
+                  className="inline-flex items-center gap-1 text-emerald-700 hover:underline font-medium disabled:opacity-45"
+                  title="批量回归测试全部接口"
                 >
-                  <FolderPlus className="w-3 h-3" /> 新建目录
+                  <ListChecks className="w-3 h-3" /> 批量测试
                 </button>
-              )}
+                {canWrite && (
+                  <button
+                    type="button"
+                    onClick={() => setFolderModal({ open: true, folder: null, parentId: '' })}
+                    className="inline-flex items-center gap-1 text-sky-700 hover:underline font-medium"
+                  >
+                    <FolderPlus className="w-3 h-3" /> 新建目录
+                  </button>
+                )}
+              </div>
             </div>
           </div>
 
@@ -1077,15 +1177,14 @@ export function WorkbenchView({
               </span>
             )}
 
-            <input
-              type="text"
+            <VariableInput
               value={req.url || ''}
+              variables={variableHints}
               onPaste={(e) => {
                 const txt = e.clipboardData.getData('text')
                 void handleURLPaste(txt, e)
               }}
-              onChange={(e) => {
-                const nextURL = e.target.value
+              onChange={(nextURL) => {
                 updateActiveAPI((cur) => ({
                   ...cur,
                   request: {
@@ -1097,14 +1196,14 @@ export function WorkbenchView({
               }}
               placeholder={
                 protocol === 'ws'
-                  ? '输入 WebSocket 地址 ws:// 或 wss://...'
+                  ? '输入 WebSocket 地址 ws:// 或 wss://...（输入 {{ 补全变量）'
                   : protocol === 'grpc'
                     ? '输入 gRPC 目标地址，如 127.0.0.1:9090 或 grpc://host:9090'
                     : protocol === 'sse'
                       ? '输入 SSE 流式接口 URL，如 /api/events'
-                      : '输入相对路径 /users/:id、完整 URL，或直接粘贴 curl 命令...'
+                      : '输入相对路径 /users/:id、完整 URL，输入 {{ 补全变量，或粘贴 cURL...'
               }
-              className="flex-1 min-w-[240px] px-3 py-2 rounded-lg border border-slate-300 font-mono text-xs focus:border-sky-500 focus:outline-none"
+              className="px-3 py-2 rounded-lg border border-slate-300 font-mono text-xs focus:border-sky-500 focus:outline-none"
             />
 
             <button
@@ -1192,6 +1291,11 @@ export function WorkbenchView({
                     { id: 'auth' as const, label: `认证 · ${activeTab.api.auth?.type || 'inherit'}`, count: 0 },
                     { id: 'extract' as const, label: '提取', count: extracts.length },
                     { id: 'assert' as const, label: '断言', count: asserts.length },
+                    {
+                      id: 'scripts' as const,
+                      label: '前后置脚本',
+                      count: (activeTab.api.pre_script?.trim() ? 1 : 0) + (activeTab.api.post_script?.trim() ? 1 : 0),
+                    },
                     { id: 'docs' as const, label: '文档', count: examples.length + responseFields.length },
                   ] as const
                 ).map((st) => {
@@ -2091,6 +2195,64 @@ export function WorkbenchView({
               </div>
             )}
 
+            {reqSubTab === 'scripts' && (
+              <div className="space-y-5">
+                <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-3 text-[11px] text-sky-900 leading-relaxed">
+                  内置安全沙箱脚本支持读写场景变量 <code className="font-mono font-semibold">vars.name</code>、时间戳与加密函数（
+                  <code className="font-mono">now_sec()</code> / <code className="font-mono">uuid()</code> /{' '}
+                  <code className="font-mono">hmac_sha256(key, data)</code>）；后置脚本额外支持响应检查{' '}
+                  <code className="font-mono">resp.status</code>、<code className="font-mono">resp.header("X-Req-Id")</code>、{' '}
+                  <code className="font-mono">resp.json("$.data.id")</code>、<code className="font-mono">jsonpath(s, expr)</code> 与{' '}
+                  <code className="font-mono">assert(cond, msg)</code>。
+                </div>
+
+                <div className="space-y-2">
+                  <div>
+                    <h4 className="font-semibold text-slate-800">前置脚本 (Pre-request Script)</h4>
+                    <p className="text-[11px] text-slate-500">在发送请求与渲染请求模板前执行，可将签名/时间戳写入变量供请求引用</p>
+                  </div>
+                  <CodeEditor
+                    ariaLabel="前置脚本编辑器"
+                    rows={6}
+                    disabled={!canWrite}
+                    value={activeTab.api.pre_script || ''}
+                    onChange={(next) => updateActiveAPI((cur) => ({ ...cur, pre_script: next }))}
+                    placeholder={'// 例如生成时间戳与签名：\nvars.ts = to_string(now_sec());\nvars.sig = hmac_sha256("secret", vars.ts);'}
+                    snippets={[
+                      {
+                        label: 'HMAC-SHA256 签名',
+                        code: 'vars.ts = to_string(now_sec());\nvars.sig = hmac_sha256("secret", vars.ts);',
+                      },
+                      { label: '生成 UUID', code: 'vars.req_id = uuid();' },
+                      { label: '毫秒时间戳', code: 'vars.nonce_ms = to_string(now_ms());' },
+                      { label: 'Base64 编码', code: 'vars.auth_b64 = base64_encode("user:pass");' },
+                    ]}
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <div>
+                    <h4 className="font-semibold text-slate-800">后置脚本 (Post-response Script)</h4>
+                    <p className="text-[11px] text-slate-500">在提取与断言之后执行，可直接读取 resp 状态码、响应头和 JSON 字段并进行脚本断言</p>
+                  </div>
+                  <CodeEditor
+                    ariaLabel="后置脚本编辑器"
+                    rows={6}
+                    disabled={!canWrite}
+                    value={activeTab.api.post_script || ''}
+                    onChange={(next) => updateActiveAPI((cur) => ({ ...cur, post_script: next }))}
+                    placeholder={'// 例如校验响应并提取 token：\nassert(resp.status == 200, "响应状态必须为 200");\nvars.token = resp.json("$.token");'}
+                    snippets={[
+                      { label: '断言状态 200', code: 'assert(resp.status == 200, "状态码必须为 200");' },
+                      { label: 'JSONPath 提取', code: 'vars.token = resp.json("$.data.token");' },
+                      { label: '读取响应头', code: 'vars.trace_id = resp.header("X-Trace-Id");' },
+                      { label: '断言业务码', code: 'assert(resp.json("$.code") == "0", "业务 code 异常");' },
+                    ]}
+                  />
+                </div>
+              </div>
+            )}
+
             {reqSubTab === 'docs' && (
               <div className="space-y-4">
                 <div>
@@ -2354,6 +2516,7 @@ export function WorkbenchView({
           <div className="tg-split-pane flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
             <ResponsePanel
               projectId={projectId}
+              activeEnvId={activeEnvId}
               debugResp={activeTab.debugResp}
               historyList={history}
               loadingDebug={sending}
@@ -2365,6 +2528,7 @@ export function WorkbenchView({
                 onTempVarsChange({ ...tempVars, ...vars })
                 onToast('success', '已写入顶部临时变量池')
               }}
+              onSaveEnvVars={canWrite ? handleSaveEnvVars : undefined}
               onRefreshHistory={async () => {
                 try {
                   setHistory(await api.listDebugHistory(projectId, 40, false))
@@ -2426,6 +2590,19 @@ export function WorkbenchView({
         treeNodes={tree.children}
         onClose={() => setSaveModalOpen(false)}
         onConfirm={handleConfirmCreateSaved}
+      />
+
+      <CollectionRunnerModal
+        open={runnerModal.open}
+        projectId={projectId}
+        treeNodes={tree.children}
+        environments={environments}
+        initialFolderId={runnerModal.folderId}
+        initialEnvId={activeEnvId}
+        tempVars={tempVars}
+        canWrite={canWrite}
+        onClose={() => setRunnerModal({ open: false, folderId: '' })}
+        onToast={onToast}
       />
     </div>
   )

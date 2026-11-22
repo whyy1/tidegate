@@ -1535,3 +1535,79 @@ func TestSecurityAuditHardeningB1toB3(t *testing.T) {
 		t.Fatalf("expected ErrScaleLimitExceeded on MCP run > %d VUs, got %v", DefaultMCPMaxVUs, err)
 	}
 }
+
+func TestCollectionRunnerAndScriptsDisabled(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/login":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"token":"tok-abc-123"}`)
+		case "/profile":
+			if r.Header.Get("Authorization") != "Bearer tok-abc-123" {
+				http.Error(w, "missing auth", http.StatusUnauthorized)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"ok":true}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	ctx := context.Background()
+	c, st, _ := newTestController(t, nil)
+
+	pr, err := st.CreateProject(&store.Project{Name: "CollectionProj"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	folder, err := st.CreateFolder(pr.ID, &store.Folder{Name: "AuthFlow"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPI(pr.ID, &store.API{
+		Name:     "01-Login",
+		FolderID: folder.ID,
+		Order:    1,
+		Request: store.APIRequest{
+			Method: "POST",
+			URL:    ts.URL + "/login",
+		},
+		PostScript: `assert(resp.status == 200, "login status"); vars.session_tok = resp.json("$.token");`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPI(pr.ID, &store.API{
+		Name:     "02-Profile",
+		FolderID: folder.ID,
+		Order:    2,
+		Request: store.APIRequest{
+			Method:  "GET",
+			URL:     ts.URL + "/profile",
+			Headers: store.KeyValueList{{Name: "Authorization", Value: "Bearer {{session_tok}}"}},
+		},
+		PostScript: `assert(resp.json("$.ok") == "true", "profile ok");`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res, err := c.RunCollectionTest(ctx, pr.ID, CollectionTestRequest{FolderID: folder.ID})
+	if err != nil {
+		t.Fatalf("RunCollectionTest: %v", err)
+	}
+	if !res.Passed || res.Total != 2 || res.PassedCount != 2 || res.FailedCount != 0 {
+		t.Fatalf("unexpected collection result: %+v", res)
+	}
+	if res.FinalVars["session_tok"] != "tok-abc-123" {
+		t.Fatalf("expected FinalVars session_tok=tok-abc-123, got %v", res.FinalVars)
+	}
+
+	// Disabling scripts rejects APIs carrying pre_script/post_script.
+	if _, err := c.SetSecurityPolicy(ctx, SecurityPolicy{ScriptsDisabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.RunCollectionTest(ctx, pr.ID, CollectionTestRequest{FolderID: folder.ID}); !errors.Is(err, ErrScriptsDisabled) {
+		t.Fatalf("expected ErrScriptsDisabled, got %v", err)
+	}
+}

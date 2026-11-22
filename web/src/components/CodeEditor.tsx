@@ -1,0 +1,116 @@
+import { useMemo, useRef, type KeyboardEvent } from 'react'
+
+export interface CodeSnippet {
+  label: string
+  code: string
+}
+
+interface Props {
+  value: string
+  onChange: (next: string) => void
+  snippets?: CodeSnippet[]
+  placeholder?: string
+  rows?: number
+  disabled?: boolean
+  ariaLabel?: string
+}
+
+export function CodeEditor({
+  value,
+  onChange,
+  snippets = [],
+  placeholder = '',
+  rows = 7,
+  disabled = false,
+  ariaLabel,
+}: Props) {
+  const areaRef = useRef<HTMLTextAreaElement>(null)
+
+  const lineCount = useMemo(() => {
+    if (!value) return 1
+    return Math.max(1, value.split('\n').length)
+  }, [value])
+
+  const lineNumbers = useMemo(() => {
+    const out: number[] = []
+    for (let i = 1; i <= lineCount; i++) out.push(i)
+    return out
+  }, [lineCount])
+
+  const insertSnippet = (code: string) => {
+    const trimmed = value.trimEnd()
+    const next = trimmed ? `${trimmed}\n${code}` : code
+    onChange(next)
+    requestAnimationFrame(() => {
+      const el = areaRef.current
+      if (el) {
+        el.focus()
+        const end = next.length
+        el.setSelectionRange(end, end)
+      }
+    })
+  }
+
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.nativeEvent.isComposing || e.keyCode === 229) {
+      return
+    }
+    if (e.key === 'Tab') {
+      e.preventDefault()
+      const el = e.currentTarget
+      const start = el.selectionStart
+      const end = el.selectionEnd
+      const next = value.slice(0, start) + '  ' + value.slice(end)
+      onChange(next)
+      requestAnimationFrame(() => {
+        el.setSelectionRange(start + 2, start + 2)
+      })
+    }
+  }
+
+  return (
+    <div className="space-y-1.5">
+      {snippets.length > 0 && (
+        <div className="flex flex-wrap items-center gap-1.5">
+          <span className="text-[11px] text-slate-500">常用片段：</span>
+          {snippets.map((s) => (
+            <button
+              key={s.label}
+              type="button"
+              disabled={disabled}
+              onClick={() => insertSnippet(s.code)}
+              className="px-2 py-0.5 rounded border border-slate-200 bg-slate-50 hover:bg-sky-50 hover:border-sky-300 text-[11px] text-slate-700 font-medium transition-colors disabled:opacity-45"
+            >
+              + {s.label}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="flex rounded-lg border border-slate-300 bg-white overflow-hidden focus-within:border-sky-500 focus-within:ring-1 focus-within:ring-sky-500/30">
+        <div
+          aria-hidden="true"
+          className="select-none bg-slate-50 border-r border-slate-200 px-2 py-2 text-right font-mono text-[11px] leading-[1.5rem] text-slate-400 min-w-[2.25rem]"
+        >
+          {lineNumbers.map((n) => (
+            <div key={n}>{n}</div>
+          ))}
+        </div>
+        <textarea
+          ref={areaRef}
+          rows={rows}
+          value={value}
+          disabled={disabled}
+          aria-label={ariaLabel}
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          onKeyDown={handleKeyDown}
+          onChange={(e) => onChange(e.target.value)}
+          placeholder={placeholder}
+          className="flex-1 min-w-0 px-2.5 py-2 font-mono text-xs leading-[1.5rem] bg-white text-slate-900 focus:outline-none resize-y"
+        />
+      </div>
+    </div>
+  )
+}

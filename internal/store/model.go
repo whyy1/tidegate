@@ -235,6 +235,8 @@ type API struct {
 	Auth           *Auth                `yaml:"auth,omitempty" json:"auth,omitempty"`
 	Extract        []scenario.Extract   `yaml:"extract,omitempty" json:"extract,omitempty"`
 	Assert         []scenario.Assert    `yaml:"assert,omitempty" json:"assert,omitempty"`
+	PreScript      string               `yaml:"pre_script,omitempty" json:"pre_script,omitempty"`
+	PostScript     string               `yaml:"post_script,omitempty" json:"post_script,omitempty"`
 	Examples       []APIResponseExample `yaml:"examples,omitempty" json:"examples,omitempty"`
 	ResponseFields []APIFieldDoc        `yaml:"response_fields,omitempty" json:"response_fields,omitempty"`
 	// FolderID is the containing folder, empty for the top level. It is
@@ -315,6 +317,8 @@ type StepOverride struct {
 	Auth       *Auth               `yaml:"auth,omitempty" json:"auth,omitempty"`
 	Extract    *[]scenario.Extract `yaml:"extract,omitempty" json:"extract,omitempty"`
 	Assert     *[]scenario.Assert  `yaml:"assert,omitempty" json:"assert,omitempty"`
+	PreScript  *string             `yaml:"pre_script,omitempty" json:"pre_script,omitempty"`
+	PostScript *string             `yaml:"post_script,omitempty" json:"post_script,omitempty"`
 }
 
 const maxNameRunes = 200

@@ -207,9 +207,10 @@ func (s *Server) buildHandler() http.Handler {
 	apiMux.Handle("GET /api/v1/projects/{pid}/files/{name}/preview", authed(s.handlePreviewFile))
 	apiMux.Handle("DELETE /api/v1/projects/{pid}/files/{name}", writer(s.handleDeleteFile))
 
-	// Interactive debug, dry-run, history, cURL conversion.
+	// Interactive debug, dry-run, collection runner, history, cURL conversion.
 	apiMux.Handle("POST /api/v1/projects/{pid}/debug", writer(s.handleDebugAPI))
 	apiMux.Handle("POST /api/v1/projects/{pid}/scenarios/debug", writer(s.handleDebugScenario))
+	apiMux.Handle("POST /api/v1/projects/{pid}/tests/run", writer(s.handleRunCollectionTest))
 	apiMux.Handle("GET /api/v1/projects/{pid}/debug-history", authed(s.handleListDebugHistory))
 	apiMux.Handle("GET /api/v1/projects/{pid}/debug-history/{id}", authed(s.handleGetDebugRecord))
 	apiMux.Handle("DELETE /api/v1/projects/{pid}/debug-history", writer(s.handleClearDebugHistory))

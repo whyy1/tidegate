@@ -7,6 +7,7 @@
 //	tidegate mcp --url https://127.0.0.1:8080 --token tg_...
 //	tidegate reset-password [--data ./data] [--user admin] [--password-file FILE]
 //	tidegate run <scenario> [--out result.json] [--csv result.csv] [--quiet]
+//	tidegate test <project-dir-or-archive> [--folder ID] [--env ID] [--junit junit.xml]
 //	tidegate testserver [--addr :18080]
 //	tidegate version
 package main
@@ -32,6 +33,7 @@ const usage = `Tidegate：API 管理与压测一体化工具
   tidegate mcp [选项]                   以 Stdio MCP 代理模式连接运行中的 Tidegate 服务
   tidegate reset-password [选项]        重置管理员账户密码
   tidegate run <场景文件> [选项]        直接运行单次 CLI 压测（YAML 或 JSON）
+  tidegate test <项目或归档> [选项]     批量运行项目/目录功能回归测试并可导出 JUnit XML
   tidegate testserver [--addr :18080]   启动内置的高性能被测服务
   tidegate version                      显示版本
 
@@ -66,6 +68,15 @@ run 常用选项：
   --jtl <文件>                   写出 JMeter 兼容 JTL 日志
   --quiet                        不输出每秒摘要，只输出汇总
   --client fast|std              HTTP 客户端实现，默认 fast
+
+test 常用选项：
+  --project <ID或名称>           当数据目录包含多个项目时指定目标项目
+  --folder <目录>                仅运行指定目录（支持目录 ID、名称或路径）
+  --env <环境>                   指定环境 ID 或名称
+  --stop-on-error                首个接口失败后立即终止后续步骤
+  --out <文件>                   写出完整功能回归 JSON 报告
+  --junit <文件>                 写出 JUnit XML 报告（CI/CD 集成）
+  --quiet                        仅输出汇总行
 `
 
 func main() {
@@ -103,6 +114,8 @@ func runMainWithIO(args []string, stdin io.Reader, stdout, stderr io.Writer) int
 		return cmdResetPassword(args[1:], stdin, stdout, stderr)
 	case "run":
 		return cmdRun(args[1:], stdout, stderr)
+	case "test":
+		return cmdTest(args[1:], stdout, stderr)
 	case "testserver":
 		return cmdTestServer(args[1:], stdout, stderr)
 	case "version":

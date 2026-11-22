@@ -399,6 +399,8 @@ type HTTPStep struct {
 	ContentType string    // default Content-Type when the user set none
 	Extract     []Extractor
 	Assert      []Assertion
+	PreScript   *ScriptProgram
+	PostScript  *ScriptProgram
 	Think       ThinkTime
 	OnError     OnErrorPolicy
 	// NeedBody is set when an extractor or assertion reads the body.
@@ -436,6 +438,8 @@ type WSStep struct {
 	IdleTimeout     time.Duration
 	Extract         []Extractor
 	Assert          []Assertion
+	PreScript       *ScriptProgram
+	PostScript      *ScriptProgram
 	Think           ThinkTime
 	OnError         OnErrorPolicy
 	HasStatusAssert bool
@@ -468,6 +472,8 @@ type GRPCStepPlan struct {
 	Timeout          time.Duration
 	Extract          []Extractor
 	Assert           []Assertion
+	PreScript        *ScriptProgram
+	PostScript       *ScriptProgram
 	HasStatusAssert  bool
 	Think            ThinkTime
 	OnError          OnErrorPolicy
@@ -495,6 +501,8 @@ type SSEStepPlan struct {
 	Timeout         time.Duration
 	Extract         []Extractor
 	Assert          []Assertion
+	PreScript       *ScriptProgram
+	PostScript      *ScriptProgram
 	Think           ThinkTime
 	OnError         OnErrorPolicy
 	HasStatusAssert bool

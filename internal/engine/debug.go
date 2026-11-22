@@ -340,6 +340,13 @@ func (v *vu) runStepDebug(rt *stepRT, maxBody int64) DebugStepResult {
 		StepName: s.Name,
 	}
 
+	if !v.execStepPreScriptDebug(s.PreScript, &res) {
+		res.ActualRequest = DebugActualRequest{
+			Method: s.Method,
+		}
+		return res
+	}
+
 	if !v.buildRequest(rt) {
 		res.ErrorKind = metrics.ErrOther.String()
 		if v.buildErr != "" {
@@ -511,6 +518,8 @@ func (v *vu) runStepDebug(rt *stepRT, maxBody int64) DebugStepResult {
 				res.Asserts = append(res.Asserts, ar)
 			}
 		}
+
+		passed, firstErrKind, firstErrMsg = v.execStepPostScriptDebug(s.PostScript, &view, &res, passed, firstErrKind, firstErrMsg)
 
 		res.Passed = passed
 		if !passed {

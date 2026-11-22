@@ -441,6 +441,9 @@ func (v *vu) runGRPC(s *scenario.GRPCStepPlan, planned int64) (bool, metrics.Err
 	if !v.takeRequestSlot() {
 		return false, metrics.ErrNone
 	}
+	if failed, kind := v.execProtoPreScriptLoad(s.Index, s.ID, "GRPC", s.PreScript, planned); failed {
+		return true, kind
+	}
 	maxKeep := v.eng.plan.HTTP.MaxBodyRead
 	if maxKeep <= 0 {
 		maxKeep = DefaultDebugMaxBodyBytes
@@ -472,7 +475,7 @@ func (v *vu) runGRPC(s *scenario.GRPCStepPlan, planned int64) (bool, metrics.Err
 				return []byte(val), true
 			},
 		}
-		kind, msg = v.evalNonHTTPUponResponse(initKind, initMsg, s.Extract, s.Assert, &view)
+		kind, msg = v.evalNonHTTPUponResponse(initKind, initMsg, s.Extract, s.Assert, s.PostScript, &view)
 	}
 	v.recordGeneric(s.Index, gr.status, kind, time.Duration(gr.end-start), gr.sent, gr.recv, 0, 0, gr.newConn, gr.dial, gr.writeStart, gr.end, gr.end)
 	v.maybeSampleGeneric(s.Index, s.ID, "GRPC", gr.targetStr, gr.reqHeaders, gr.reqBody, gr.status, gr.respHeaders, gr.respBody, gr.bodyTruncated, kind, msg, start, gr.end)
@@ -487,6 +490,10 @@ func (v *vu) runGRPCDebug(s *scenario.GRPCStepPlan, maxBody int64) DebugStepResu
 	res := DebugStepResult{
 		StepID:   s.ID,
 		StepName: s.Name,
+	}
+	if !v.execStepPreScriptDebug(s.PreScript, &res) {
+		res.ActualRequest = DebugActualRequest{Method: "GRPC"}
+		return res
 	}
 	gr := v.execGRPC(s, maxBody)
 	res.ActualRequest = DebugActualRequest{
@@ -519,6 +526,6 @@ func (v *vu) runGRPCDebug(s *scenario.GRPCStepPlan, maxBody int64) DebugStepResu
 			return []byte(val), true
 		},
 	}
-	v.evalDebugResponse(initKind, initMsg, s.Extract, s.Assert, &view, &res)
+	v.evalDebugResponse(initKind, initMsg, s.Extract, s.Assert, s.PostScript, &view, &res)
 	return res
 }

@@ -6,6 +6,8 @@ import type {
   AgentView,
   ApplyResult,
   AuditEntry,
+  CollectionTestRequest,
+  CollectionTestResult,
   CreateAPITokenResult,
   DataFile,
   DebugAPIResponse,
@@ -351,6 +353,11 @@ export const api = {
     request<DebugRunResult>(`/api/v1/projects/${encodeURIComponent(pid)}/scenarios/debug`, {
       method: 'POST',
       jsonBody: payload,
+    }),
+  runCollectionTest: (pid: string, body: CollectionTestRequest) =>
+    request<CollectionTestResult>(`/api/v1/projects/${encodeURIComponent(pid)}/tests/run`, {
+      method: 'POST',
+      jsonBody: body,
     }),
   listDebugHistory: async (pid: string, limit = 50, includeData = false) =>
     (await request<DebugRecord[] | null>(

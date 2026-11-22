@@ -24,6 +24,19 @@ export default defineConfig({
     outDir: distDir,
     emptyOutDir: true,
     chunkSizeWarningLimit: 750,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes('node_modules/uplot')) {
+            return 'uplot'
+          }
+          if (id.includes('node_modules/react') || id.includes('node_modules/scheduler')) {
+            return 'react-vendor'
+          }
+          return undefined
+        },
+      },
+    },
   },
   server: {
     proxy: {

@@ -195,6 +195,8 @@ export interface API {
   auth?: AuthConfig | null
   extract?: ExtractRule[]
   assert?: AssertRule[]
+  pre_script?: string
+  post_script?: string
   examples?: APIResponseExample[]
   response_fields?: APIFieldDoc[]
   folder_id: string
@@ -469,6 +471,50 @@ export interface StepOverride {
   auth?: AuthConfig | null
   extract?: ExtractRule[]
   assert?: AssertRule[]
+  pre_script?: string
+  post_script?: string
+}
+
+export interface CollectionTestRequest {
+  folder_id?: string
+  api_ids?: string[]
+  environment_id?: string
+  variables?: Record<string, string>
+  stop_on_error?: boolean
+  max_body_bytes?: number
+}
+
+export interface CollectionTestItem {
+  step_id: string
+  api_id: string
+  api_name: string
+  folder_path?: string
+  protocol: string
+  method: string
+  passed: boolean
+  skipped?: boolean
+  status?: number
+  duration_ms: number
+  error_kind?: string
+  error?: string
+  assert_total: number
+  assert_passed: number
+  step: DebugStepResult
+}
+
+export interface CollectionTestResult {
+  project_id: string
+  folder_id?: string
+  scope_name: string
+  environment_id?: string
+  passed: boolean
+  total: number
+  passed_count: number
+  failed_count: number
+  skipped_count: number
+  duration_ms: number
+  items: CollectionTestItem[]
+  final_vars?: Record<string, string>
 }
 
 export type ScenarioStepType = 'http' | 'ws' | 'grpc' | 'sse' | 'script' | 'group' | 'loop' | 'if' | 'weighted'

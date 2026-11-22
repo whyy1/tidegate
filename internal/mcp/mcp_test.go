@@ -242,7 +242,7 @@ func TestMCPHandshakeToolsRBACSecretsSSRFAndAudit(t *testing.T) {
 		t.Fatalf("unauthenticated POST /api/v1/mcp = %d, want 401", st)
 	}
 
-	// 2. Initialize + notification + tools/list -> verify all 15 tools + annotations.
+	// 2. Initialize + notification + tools/list -> verify all 16 tools + annotations.
 	st, initOut := callMCPRPC(t, env.srv.URL, env.viewerToken, map[string]any{
 		"jsonrpc": "2.0",
 		"id":      1,
@@ -276,8 +276,8 @@ func TestMCPHandshakeToolsRBACSecretsSSRFAndAudit(t *testing.T) {
 		t.Fatalf("tools/list = %d", st)
 	}
 	toolsList := listOut["result"].(map[string]any)["tools"].([]any)
-	if len(toolsList) != 15 {
-		t.Fatalf("expected 15 MCP tools, got %d", len(toolsList))
+	if len(toolsList) != 16 {
+		t.Fatalf("expected 16 MCP tools, got %d", len(toolsList))
 	}
 	for _, rawTool := range toolsList {
 		toolObj := rawTool.(map[string]any)

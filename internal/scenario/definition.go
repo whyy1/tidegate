@@ -72,10 +72,12 @@ type DataSource struct {
 // Step is one scenario step. Each step sets exactly one execution node:
 // Request, WebSocket, GRPC, SSE, Script, Group, Loop, If, or Weighted.
 type Step struct {
-	ID        string         `yaml:"id" json:"id"`
-	Name      string         `yaml:"name,omitempty" json:"name,omitempty"`
-	OnError   string         `yaml:"on_error,omitempty" json:"on_error,omitempty"`
-	Request   *Request       `yaml:"request,omitempty" json:"request,omitempty"`
+	ID         string         `yaml:"id" json:"id"`
+	Name       string         `yaml:"name,omitempty" json:"name,omitempty"`
+	OnError    string         `yaml:"on_error,omitempty" json:"on_error,omitempty"`
+	PreScript  string         `yaml:"pre_script,omitempty" json:"pre_script,omitempty"`
+	PostScript string         `yaml:"post_script,omitempty" json:"post_script,omitempty"`
+	Request    *Request       `yaml:"request,omitempty" json:"request,omitempty"`
 	WebSocket *WebSocketStep `yaml:"websocket,omitempty" json:"websocket,omitempty"`
 	GRPC      *GRPCStep      `yaml:"grpc,omitempty" json:"grpc,omitempty"`
 	SSE       *SSEStep       `yaml:"sse,omitempty" json:"sse,omitempty"`

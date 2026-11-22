@@ -6,9 +6,11 @@ import (
 	"crypto/tls"
 	"encoding/csv"
 	"encoding/json"
+	"encoding/xml"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +23,7 @@ import (
 
 	"tidegate/internal/auth"
 	"tidegate/internal/scenario"
+	"tidegate/internal/store"
 	"tidegate/internal/testserver"
 )
 
@@ -681,5 +684,89 @@ load:
 	}
 	if !strings.Contains(err3.String(), "触发中止阈值") {
 		t.Fatalf("expected abort message on stderr, got:\n%s", &err3)
+	}
+}
+
+func TestCLICollectionTestAndJUnit(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/ok":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, `{"status":"ok"}`)
+		case "/fail":
+			http.Error(w, "boom", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer ts.Close()
+
+	dataDir := t.TempDir()
+	st, err := store.Open(dataDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pr, err := st.CreateProject(&store.Project{Name: "CLITestProj"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fPass, err := st.CreateFolder(pr.ID, &store.Folder{Name: "PassSuite"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPI(pr.ID, &store.API{
+		Name:     "HealthOK",
+		FolderID: fPass.ID,
+		Request:  store.APIRequest{Method: "GET", URL: ts.URL + "/ok"},
+		PostScript: `assert(resp.json("$.status") == "ok", "health status ok");`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	fFail, err := st.CreateFolder(pr.ID, &store.Folder{Name: "FailSuite"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CreateAPI(pr.ID, &store.API{
+		Name:     "ServerFail",
+		FolderID: fFail.ID,
+		Request:  store.APIRequest{Method: "GET", URL: ts.URL + "/fail"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	junitPass := filepath.Join(t.TempDir(), "pass-junit.xml")
+	var out1, err1 bytes.Buffer
+	code := runMain([]string{"test", dataDir, "--folder", "PassSuite", "--junit", junitPass}, &out1, &err1)
+	if code != 0 {
+		t.Fatalf("expected exit 0 on passing suite, got %d\nstdout=%s\nstderr=%s", code, &out1, &err1)
+	}
+	xmlBytes, err := os.ReadFile(junitPass)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var parsed struct {
+		Tests    int `xml:"tests,attr"`
+		Failures int `xml:"failures,attr"`
+	}
+	if err := xml.Unmarshal(xmlBytes, &parsed); err != nil {
+		t.Fatalf("invalid junit xml: %v\n%s", err, xmlBytes)
+	}
+	if parsed.Tests != 1 || parsed.Failures != 0 {
+		t.Fatalf("unexpected passing junit summary: %+v", parsed)
+	}
+
+	junitFail := filepath.Join(t.TempDir(), "fail-junit.xml")
+	var out2, err2 bytes.Buffer
+	code = runMain([]string{"test", dataDir, "--folder", "FailSuite", "--junit", junitFail}, &out2, &err2)
+	if code != 3 {
+		t.Fatalf("expected exit 3 on failing suite, got %d\nstdout=%s\nstderr=%s", code, &out2, &err2)
+	}
+	failXML, err := os.ReadFile(junitFail)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(failXML), `<failure`) {
+		t.Fatalf("expected <failure> element in junit xml:\n%s", failXML)
 	}
 }

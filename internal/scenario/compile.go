@@ -352,13 +352,11 @@ func (c *compiler) collectExtractVars(prefix string, steps []Step) {
 			}
 			c.allocMutableVar(ex.Name)
 		}
-		if st.Script != nil && strings.TrimSpace(st.Script.Code) != "" {
-			if assigned, err := ExtractAssignedVars(st.Script.Code); err == nil {
-				for _, name := range assigned {
-					c.allocMutableVar(name)
-				}
-			}
+		if st.Script != nil {
+			c.collectAssignedScriptVars(st.Script.Code)
 		}
+		c.collectAssignedScriptVars(st.PreScript)
+		c.collectAssignedScriptVars(st.PostScript)
 		if st.Group != nil {
 			c.collectExtractVars(prefix+"group.", st.Group.Children)
 		}
@@ -898,6 +896,10 @@ func (c *compiler) compileHTTPStep(i int, st *Step) *HTTPStep {
 	}
 
 	s.Extract, s.Assert, s.NeedBody, s.HasStatusAssert = c.compileStepExtractAssert(w, st, 100)
+	s.PreScript, s.PostScript = c.compileStepScripts(w, st)
+	if s.PostScript != nil {
+		s.NeedBody = true
+	}
 	if st.Think != nil {
 		s.Think = c.compileThink(w("think"), st.Think)
 		c.plan.ThinkMax += thinkMaxBound(s.Think)
@@ -959,6 +961,7 @@ func (c *compiler) compileWSStep(i int, st *Step) *WSStep {
 	}
 
 	s.Extract, s.Assert, _, s.HasStatusAssert = c.compileStepExtractAssert(w, st, 100)
+	s.PreScript, s.PostScript = c.compileStepScripts(w, st)
 	if st.Think != nil {
 		s.Think = c.compileThink(w("think"), st.Think)
 		c.plan.ThinkMax += thinkMaxBound(s.Think)
@@ -1122,6 +1125,7 @@ func (c *compiler) compileGRPCStep(i int, st *Step) *GRPCStepPlan {
 	}
 
 	s.Extract, s.Assert, _, s.HasStatusAssert = c.compileStepExtractAssert(w, st, 0)
+	s.PreScript, s.PostScript = c.compileStepScripts(w, st)
 	if st.Think != nil {
 		s.Think = c.compileThink(w("think"), st.Think)
 		c.plan.ThinkMax += thinkMaxBound(s.Think)
@@ -1181,11 +1185,60 @@ func (c *compiler) compileSSEStep(i int, st *Step) *SSEStepPlan {
 		s.ContentType = ""
 	}
 	s.Extract, s.Assert, _, s.HasStatusAssert = c.compileStepExtractAssert(w, st, 100)
+	s.PreScript, s.PostScript = c.compileStepScripts(w, st)
 	if st.Think != nil {
 		s.Think = c.compileThink(w("think"), st.Think)
 		c.plan.ThinkMax += thinkMaxBound(s.Think)
 	}
 	return s
+}
+
+func (c *compiler) collectAssignedScriptVars(code string) {
+	if strings.TrimSpace(code) == "" {
+		return
+	}
+	if assigned, err := ExtractAssignedVars(code); err == nil {
+		for _, name := range assigned {
+			c.allocMutableVar(name)
+		}
+	}
+}
+
+func (c *compiler) compileScriptCode(where, code string, disallowResp bool) *ScriptProgram {
+	if strings.TrimSpace(code) == "" {
+		return nil
+	}
+	opts := &ScriptCompileOptions{
+		ResolveSlot: func(name string) (int, bool) {
+			slot, ok := c.slots[name]
+			return slot, ok
+		},
+		ResolveConst: func(name string) (*Template, bool) {
+			lit, ok := c.consts[name]
+			if !ok {
+				return nil, false
+			}
+			segs, err := parseTemplate(lit, c, escapeNone, 0)
+			if err != nil {
+				return nil, false
+			}
+			return newTemplate(lit, segs), true
+		},
+		ResolveData:  c.resolveData,
+		DisallowResp: disallowResp,
+	}
+	prog, err := CompileScript(code, opts)
+	if err != nil {
+		c.fail(where, "%v", err)
+		return nil
+	}
+	return prog
+}
+
+func (c *compiler) compileStepScripts(w func(string) string, st *Step) (pre, post *ScriptProgram) {
+	pre = c.compileScriptCode(w("pre_script"), st.PreScript, true)
+	post = c.compileScriptCode(w("post_script"), st.PostScript, false)
+	return pre, post
 }
 
 func (c *compiler) compileScriptStep(i int, st *Step) *ScriptStepPlan {
@@ -1204,30 +1257,7 @@ func (c *compiler) compileScriptStep(i int, st *Step) *ScriptStepPlan {
 		c.fail(w("script.code"), "脚本文本不能为空")
 		return s
 	}
-	opts := &ScriptCompileOptions{
-		ResolveSlot: func(name string) (int, bool) {
-			slot, ok := c.slots[name]
-			return slot, ok
-		},
-		ResolveConst: func(name string) (*Template, bool) {
-			lit, ok := c.consts[name]
-			if !ok {
-				return nil, false
-			}
-			segs, err := parseTemplate(lit, c, escapeNone, 0)
-			if err != nil {
-				return nil, false
-			}
-			return newTemplate(lit, segs), true
-		},
-		ResolveData: c.resolveData,
-	}
-	prog, err := CompileScript(st.Script.Code, opts)
-	if err != nil {
-		c.fail(w("script.code"), "%v", err)
-		return s
-	}
-	s.Prog = prog
+	s.Prog = c.compileScriptCode(w("script.code"), st.Script.Code, false)
 	if st.Think != nil {
 		s.Think = c.compileThink(w("think"), st.Think)
 		c.plan.ThinkMax += thinkMaxBound(s.Think)
