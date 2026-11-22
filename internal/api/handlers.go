@@ -13,6 +13,7 @@ import (
 	"tidegate/internal/controller"
 	"tidegate/internal/curl"
 	"tidegate/internal/importer"
+	"tidegate/internal/metrics"
 	"tidegate/internal/scenario"
 	"tidegate/internal/store"
 )
@@ -1066,6 +1067,20 @@ func (s *Server) handleStartRun(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, out)
 }
 
+func (s *Server) handleEstimateRun(w http.ResponseWriter, r *http.Request) {
+	var req controller.StartRunRequest
+	if err := decodeJSON(w, r, &req); err != nil {
+		writeError(w, err)
+		return
+	}
+	out, err := s.ctrl.EstimateRun(r.Context(), r.PathValue("pid"), req)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	pid := r.PathValue("pid")
 	if _, err := s.store.GetProject(pid); err != nil {
@@ -1091,6 +1106,22 @@ func (s *Server) handleListRuns(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+func evaluateRunThresholds(run *store.Run) ([]scenario.ThresholdResult, *bool) {
+	if run == nil || len(run.Summary) == 0 || len(run.Scenario) == 0 {
+		return nil, nil
+	}
+	def, err := run.Definition()
+	if err != nil || len(def.Load.Thresholds) == 0 {
+		return nil, nil
+	}
+	var sv metrics.SnapshotView
+	if err := json.Unmarshal(run.Summary, &sv); err != nil {
+		return nil, nil
+	}
+	res, passed := scenario.EvaluateThresholds(def.Load.Thresholds, &sv)
+	return res, &passed
+}
+
 func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	run, err := s.results.GetRun(r.Context(), id)
@@ -1103,12 +1134,17 @@ func (s *Server) handleGetRun(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	thresholds, thresholdsPassed := evaluateRunThresholds(run)
 	writeJSON(w, http.StatusOK, struct {
 		*store.Run
-		Alerts []store.Alert `json:"alerts"`
+		Alerts           []store.Alert              `json:"alerts"`
+		Thresholds       []scenario.ThresholdResult `json:"thresholds,omitempty"`
+		ThresholdsPassed *bool                      `json:"thresholds_passed,omitempty"`
 	}{
-		Run:    run,
-		Alerts: alerts,
+		Run:              run,
+		Alerts:           alerts,
+		Thresholds:       thresholds,
+		ThresholdsPassed: thresholdsPassed,
 	})
 }
 

@@ -306,6 +306,25 @@ func printSummary(w io.Writer, p *scenario.Plan, s *metrics.Snapshot) {
 	fmt.Fprintln(w)
 }
 
+func printThresholds(w io.Writer, res []scenario.ThresholdResult, passed bool) {
+	if len(res) == 0 {
+		return
+	}
+	status := "全部通过"
+	if !passed {
+		status = "未达标"
+	}
+	fmt.Fprintf(w, "  阈值校验（%s）：\n", status)
+	for _, r := range res {
+		mark := "✓"
+		if !r.Passed {
+			mark = "✗"
+		}
+		fmt.Fprintf(w, "    %s %s\n", mark, r.Message)
+	}
+	fmt.Fprintln(w)
+}
+
 func phaseName(p metrics.Phase) string {
 	switch p {
 	case metrics.PhaseDNS:

@@ -183,7 +183,9 @@ func (s *Server) buildHandler() http.Handler {
 
 	// Runs, snapshots, samples, export.
 	apiMux.Handle("POST /api/v1/projects/{pid}/runs", authed(s.handleStartRun))
+	apiMux.Handle("POST /api/v1/projects/{pid}/runs/estimate", authed(s.handleEstimateRun))
 	apiMux.Handle("GET /api/v1/projects/{pid}/runs", authed(s.handleListRuns))
+	apiMux.Handle("GET /api/v1/runs/compare", authed(s.handleCompareRuns))
 	apiMux.Handle("GET /api/v1/runs/{id}", authed(s.handleGetRun))
 	apiMux.Handle("GET /api/v1/runs/{id}/snapshots", authed(s.handleRunSnapshots))
 	apiMux.Handle("GET /api/v1/runs/{id}/samples", authed(s.handleRunSamples))

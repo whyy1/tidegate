@@ -11,15 +11,18 @@ import (
 	"time"
 
 	"tidegate/internal/metrics"
+	"tidegate/internal/scenario"
 	"tidegate/internal/store"
 )
 
 type htmlReportPayload struct {
-	Run       *store.Run             `json:"run"`
-	Summary   *metrics.SnapshotView  `json:"summary,omitempty"`
-	Snapshots []json.RawMessage      `json:"snapshots"`
-	Alerts    []store.Alert          `json:"alerts"`
-	Samples   []store.SampleRecord   `json:"samples"`
+	Run              *store.Run                 `json:"run"`
+	Summary          *metrics.SnapshotView      `json:"summary,omitempty"`
+	Snapshots        []json.RawMessage          `json:"snapshots"`
+	Alerts           []store.Alert              `json:"alerts"`
+	Samples          []store.SampleRecord       `json:"samples"`
+	Thresholds       []scenario.ThresholdResult `json:"thresholds,omitempty"`
+	ThresholdsPassed *bool                      `json:"thresholds_passed,omitempty"`
 }
 
 // ExportRunHTML writes a self-contained single-file Chinese HTML load test
@@ -47,12 +50,24 @@ func ExportRunHTML(
 		}
 	}
 
+	var threshRes []scenario.ThresholdResult
+	var threshPassed *bool
+	if summary != nil && len(run.Scenario) > 0 {
+		if def, derr := run.Definition(); derr == nil && len(def.Load.Thresholds) > 0 {
+			res, ok := scenario.EvaluateThresholds(def.Load.Thresholds, summary)
+			threshRes = res
+			threshPassed = &ok
+		}
+	}
+
 	payloadJSON, err := json.Marshal(htmlReportPayload{
-		Run:       run,
-		Summary:   summary,
-		Snapshots: snapMsgs,
-		Alerts:    alerts,
-		Samples:   redactSampleRecords(samples),
+		Run:              run,
+		Summary:          summary,
+		Snapshots:        snapMsgs,
+		Alerts:           alerts,
+		Samples:          redactSampleRecords(samples),
+		Thresholds:       threshRes,
+		ThresholdsPassed: threshPassed,
 	})
 	if err != nil {
 		return err
@@ -155,6 +170,36 @@ func ExportRunHTML(
     <div class="kpi"><div class="lbl">P50 / P95 / P99</div><div class="val">` + fmt.Sprintf("%.1f / %.1f / %.1f ms", summary.Latency.P50, summary.Latency.P95, summary.Latency.P99) + `</div></div>
     <div class="kpi"><div class="lbl">峰值并发 / 连接</div><div class="val">` + fmt.Sprintf("%d VU / %d", summary.ActiveVUs, summary.ActiveConns) + `</div></div>
     <div class="kpi"><div class="lbl">总流量（上/下行）</div><div class="val">` + fmt.Sprintf("%s / %s", formatBytesIEC(summary.BytesSent), formatBytesIEC(summary.BytesReceived)) + `</div></div>
+  </div>
+`)
+	}
+
+	if len(threshRes) > 0 {
+		badgeCls := "finished"
+		badgeText := "全部通过"
+		if threshPassed != nil && !*threshPassed {
+			badgeCls = "failed"
+			badgeText = "未通过"
+		}
+		out.WriteString(`  <div class="card">
+    <h2>阈值评估 <span class="badge ` + badgeCls + `">` + badgeText + `</span></h2>
+    <table>
+      <thead><tr><th>状态</th><th>指标</th><th>作用域</th><th>说明</th></tr></thead>
+      <tbody>
+`)
+		for _, tr := range threshRes {
+			stLabel := "✓ 通过"
+			if !tr.Passed {
+				stLabel = "✗ 失败"
+			}
+			scope := tr.Step
+			if scope == "" {
+				scope = "全局"
+			}
+			out.WriteString(`        <tr><td>` + html.EscapeString(stLabel) + `</td><td>` + html.EscapeString(tr.Metric+" "+tr.Op+" "+strconv.FormatFloat(tr.Value, 'f', -1, 64)) + `</td><td>` + html.EscapeString(scope) + `</td><td>` + html.EscapeString(tr.Message) + "</td></tr>\n")
+		}
+		out.WriteString(`      </tbody>
+    </table>
   </div>
 `)
 	}

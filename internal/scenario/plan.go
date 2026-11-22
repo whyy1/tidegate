@@ -116,6 +116,7 @@ type LoadPlan struct {
 	GracefulStop  time.Duration
 	TotalDuration time.Duration
 	PeakTarget    float64
+	Thresholds    []Threshold
 }
 
 // Origin is the scheme and authority of a URL, prepared for dialing.

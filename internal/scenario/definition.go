@@ -147,11 +147,12 @@ type Think struct {
 
 // Load describes the load model.
 type Load struct {
-	Mode         string    `yaml:"mode" json:"mode"`
-	Stages       []Stage   `yaml:"stages" json:"stages"`
-	MaxVUs       int       `yaml:"max_vus,omitempty" json:"max_vus,omitempty"`
-	MaxRequests  int64     `yaml:"max_requests,omitempty" json:"max_requests,omitempty"`
-	GracefulStop *Duration `yaml:"graceful_stop,omitempty" json:"graceful_stop,omitempty"`
+	Mode         string      `yaml:"mode" json:"mode"`
+	Stages       []Stage     `yaml:"stages" json:"stages"`
+	MaxVUs       int         `yaml:"max_vus,omitempty" json:"max_vus,omitempty"`
+	MaxRequests  int64       `yaml:"max_requests,omitempty" json:"max_requests,omitempty"`
+	GracefulStop *Duration   `yaml:"graceful_stop,omitempty" json:"graceful_stop,omitempty"`
+	Thresholds   []Threshold `yaml:"thresholds,omitempty" json:"thresholds,omitempty"`
 }
 
 // Stage ramps linearly from the previous target to Target over Duration.

@@ -906,5 +906,46 @@ func (c *compiler) compileLoad() {
 			lp.MaxVUs = int(min(max(math.Ceil(need), 10), maxAutoVUs))
 		}
 	}
+	for i, raw := range l.Thresholds {
+		where := fmt.Sprintf("load.thresholds[%d]", i)
+		metric, ok := normalizeThresholdMetric(raw.Metric)
+		if !ok {
+			c.fail(where+".metric", "不支持的指标 %q（支持 p50_ms、p90_ms、p95_ms、p99_ms、max_ms、mean_ms、error_rate、error_rate_pct、rps）", raw.Metric)
+			continue
+		}
+		op, opOK := normalizeThresholdOp(raw.Op, metric)
+		if !opOK {
+			c.fail(where+".op", "不支持的比较符 %q（仅支持 <、<=、>、>=）", raw.Op)
+			continue
+		}
+		if math.IsNaN(raw.Value) || math.IsInf(raw.Value, 0) || raw.Value < 0 {
+			c.fail(where+".value", "阈值必须是非负有限数字")
+			continue
+		}
+		if raw.GracePeriod < 0 {
+			c.fail(where+".grace_period", "宽限期不能是负数")
+			continue
+		}
+		stepRef := strings.TrimSpace(raw.Step)
+		if stepRef != "" {
+			matched := false
+			for _, node := range c.plan.Steps {
+				info := node.Info()
+				if info.ID == stepRef || info.Name == stepRef {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				c.fail(where+".step", "未找到步骤 %q", stepRef)
+				continue
+			}
+		}
+		norm := raw
+		norm.Metric = metric
+		norm.Op = op
+		norm.Step = stepRef
+		lp.Thresholds = append(lp.Thresholds, norm)
+	}
 	c.plan.Load = lp
 }

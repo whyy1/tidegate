@@ -526,9 +526,11 @@ type Node struct {
 	lastSeen  atomic.Int64 // Server.now() of the last received message
 	pingNonce atomic.Uint64
 
-	mu     sync.Mutex
-	rtt    time.Duration
-	offset time.Duration
+	mu        sync.Mutex
+	rtt       time.Duration
+	offset    time.Duration
+	sentNonce uint64
+	sentAt    time.Time
 }
 
 func (s *Server) newNode(h *Hello, remote string) *Node {
@@ -689,10 +691,16 @@ func (n *Node) watch(ctx context.Context) {
 
 // ping queues a Ping unless one is already waiting to be sent.
 func (n *Node) ping() {
-	f, err := encodeController(&Ping{Nonce: n.pingNonce.Add(1), Time: time.Now()}, n.srv.opts.MaxMessageSize)
+	nonce := n.pingNonce.Add(1)
+	sent := time.Now()
+	f, err := encodeController(&Ping{Nonce: nonce, Time: sent}, n.srv.opts.MaxMessageSize)
 	if err != nil {
 		return
 	}
+	n.mu.Lock()
+	n.sentNonce = nonce
+	n.sentAt = sent
+	n.mu.Unlock()
 	select {
 	case n.pingq <- f:
 	default:
@@ -704,11 +712,20 @@ func (n *Node) onPong(p *Pong) {
 		return
 	}
 	now := time.Now()
-	rtt := now.Sub(p.PingTime)
+	n.mu.Lock()
+	var rtt time.Duration
+	if p.Nonce != 0 && p.Nonce == n.sentNonce && !n.sentAt.IsZero() {
+		rtt = now.Sub(n.sentAt)
+	} else {
+		rtt = now.Sub(p.PingTime)
+	}
 	if rtt < 0 {
+		n.mu.Unlock()
 		return
 	}
-	n.mu.Lock()
+	if rtt == 0 {
+		rtt = time.Nanosecond
+	}
 	n.rtt = rtt
 	if !p.NodeTime.IsZero() {
 		n.offset = p.NodeTime.Sub(p.PingTime.Add(rtt / 2))

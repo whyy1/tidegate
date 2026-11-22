@@ -136,11 +136,21 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	go func() { errc <- eng.Run(ctx) }()
 	var elapsed time.Duration
 	rows := 0
+	abortOnce := false
+	abortedMsg := ""
 	var htmlSnaps []store.SnapshotRecord
 	var htmlSamples []store.SampleRecord
 	for snap := range eng.Snapshots() {
 		elapsed += snap.Duration
 		view := snap.View()
+		if !abortOnce && len(plan.Load.Thresholds) > 0 {
+			if msg, hit := scenario.CheckAbortThresholds(plan.Load.Thresholds, view, elapsed); hit {
+				abortOnce = true
+				abortedMsg = msg
+				fmt.Fprintf(stderr, "\n触发中止阈值：%s，正在停止压测。\n", msg)
+				cancel()
+			}
+		}
 		if outF != nil {
 			result.Snapshots = append(result.Snapshots, view)
 		}
@@ -189,6 +199,15 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	summary := eng.Summary()
 	printSummary(w, plan, summary)
 
+	exitCode := 0
+	if len(plan.Load.Thresholds) > 0 {
+		threshRes, passed := scenario.EvaluateThresholds(plan.Load.Thresholds, summary.View())
+		printThresholds(w, threshRes, passed)
+		if !passed || abortedMsg != "" {
+			exitCode = 3
+		}
+	}
+
 	if csvW != nil {
 		if err := csvW.flush(); err != nil {
 			fmt.Fprintf(stderr, "写入 CSV 失败：%v\n", err)
@@ -208,13 +227,22 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	}
 	if htmlF != nil {
 		sumJSON, _ := json.Marshal(summary.View())
+		scenJSON, _ := json.Marshal(def)
+		runStatus := store.RunFinished
+		runErr := ""
+		if abortedMsg != "" {
+			runStatus = store.RunFailed
+			runErr = "触发中止阈值：" + abortedMsg
+		}
 		runMeta := &store.Run{
 			ID:           "cli-" + result.StartedAt.UTC().Format("20060102-150405"),
 			ScenarioName: plan.Name,
-			Status:       store.RunFinished,
+			Scenario:     scenJSON,
+			Status:       runStatus,
 			CreatedAt:    result.StartedAt,
 			StartedAt:    result.StartedAt,
 			FinishedAt:   time.Now(),
+			Error:        runErr,
 			Summary:      sumJSON,
 		}
 		if err := exporter.ExportRunHTML(runMeta, htmlSnaps, nil, htmlSamples, htmlF); err != nil {
@@ -231,5 +259,5 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 			f.Close()
 		}
 	}
-	return 0
+	return exitCode
 }

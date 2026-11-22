@@ -25,6 +25,8 @@ import (
 	"tidegate/internal/auth"
 	"tidegate/internal/controller"
 	"tidegate/internal/importer"
+	"tidegate/internal/metrics"
+	"tidegate/internal/scenario"
 	"tidegate/internal/store"
 	"tidegate/internal/testserver"
 )
@@ -995,6 +997,264 @@ paths:
 	resp.Body.Close()
 	if resp.StatusCode != 200 || !strings.Contains(string(harBytes), `"version": "1.2"`) {
 		t.Fatalf("export har = %d: %s", resp.StatusCode, harBytes)
+	}
+}
+
+func TestEstimateThresholdsAndCompareRuns(t *testing.T) {
+	tsrv, err := testserver.Listen("127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tsrv.Start()
+	defer tsrv.Close()
+
+	env := newAPITestEnv(t, false)
+	cl := newCookieClient(t)
+
+	agentDeadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(agentDeadline) {
+		if ag, _ := env.ctrl.Agents(context.Background()); len(ag) >= 1 {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	resp := doJSONReq(t, cl, "POST", env.baseURL+"/api/v1/setup", map[string]string{
+		"code": env.setupCod, "username": "admin", "password": "strong password 123",
+	}, true)
+	resp.Body.Close()
+	if resp.StatusCode != 201 {
+		t.Fatalf("setup = %d", resp.StatusCode)
+	}
+
+	resp = doJSONReq(t, cl, "GET", env.baseURL+"/api/v1/projects", nil, false)
+	var projects []store.Project
+	decodeBody(t, resp, &projects)
+	pid := projects[0].ID
+
+	resp = doJSONReq(t, cl, "POST", env.baseURL+"/api/v1/projects/"+pid+"/environments", map[string]any{
+		"name":     "local",
+		"base_url": tsrv.URL(),
+	}, true)
+	var envObj store.Environment
+	decodeBody(t, resp, &envObj)
+
+	// Set a small manual bandwidth ceiling on local agent to trigger >80% warning reliably.
+	resp = doJSONReq(t, cl, "GET", env.baseURL+"/api/v1/agents", nil, false)
+	var agents []controller.AgentView
+	decodeBody(t, resp, &agents)
+	if len(agents) == 0 {
+		t.Fatal("expected local agent")
+	}
+	resp = doJSONReq(t, cl, "PATCH", env.baseURL+"/api/v1/agents/"+agents[0].ID, map[string]any{
+		"bandwidth_bps": 1000000, // 1 Mbps
+	}, true)
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("patch agent = %d", resp.StatusCode)
+	}
+
+	// 1. Pre-run bandwidth & capacity estimate.
+	payload := strings.Repeat("x", 1024)
+	resp = doJSONReq(t, cl, "POST", env.baseURL+"/api/v1/projects/"+pid+"/runs/estimate", map[string]any{
+		"environment_id": envObj.ID,
+		"api": map[string]any{
+			"name": "heavy-post",
+			"request": map[string]any{
+				"method": "POST",
+				"url":    "/echo",
+				"body":   map[string]any{"type": "raw", "content": payload},
+			},
+		},
+		"load": map[string]any{
+			"mode":   "rate",
+			"stages": []map[string]any{{"duration": "1s", "target": 500}},
+		},
+	}, true)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("estimate = %d: %s", resp.StatusCode, b)
+	}
+	var est controller.RunEstimate
+	decodeBody(t, resp, &est)
+	if est.EstimatedPeakRPS != 500 || est.AvgRequestBytes < 1024 || est.AvailableUplinkBps != 1000000 || len(est.Warnings) == 0 {
+		t.Fatalf("unexpected estimate result: %+v", est)
+	}
+
+	// Remove manual tight cap before running real tests.
+	resp = doJSONReq(t, cl, "PATCH", env.baseURL+"/api/v1/agents/"+agents[0].ID, map[string]any{
+		"bandwidth_bps": 0,
+	}, true)
+	resp.Body.Close()
+
+	// Create saved API for repeatable step IDs in comparison.
+	resp = doJSONReq(t, cl, "POST", env.baseURL+"/api/v1/projects/"+pid+"/apis", map[string]any{
+		"name":    "ping-api",
+		"request": map[string]any{"method": "GET", "url": "/ping"},
+	}, true)
+	var pingAPI store.API
+	decodeBody(t, resp, &pingAPI)
+
+	startAndWait := func(scenPayload map[string]any) store.Run {
+		rresp := doJSONReq(t, cl, "POST", env.baseURL+"/api/v1/projects/"+pid+"/runs", scenPayload, true)
+		if rresp.StatusCode != 201 {
+			b, _ := io.ReadAll(rresp.Body)
+			rresp.Body.Close()
+			t.Fatalf("start run = %d: %s", rresp.StatusCode, b)
+		}
+		var run store.Run
+		decodeBody(t, rresp, &run)
+
+		deadline := time.Now().Add(8 * time.Second)
+		for time.Now().Before(deadline) {
+			gr := doJSONReq(t, cl, "GET", env.baseURL+"/api/v1/runs/"+run.ID, nil, false)
+			var cur store.Run
+			decodeBody(t, gr, &cur)
+			if !cur.Status.Active() {
+				return cur
+			}
+			time.Sleep(40 * time.Millisecond)
+		}
+		t.Fatalf("run %s did not finish in time", run.ID)
+		return store.Run{}
+	}
+
+	// Run 1: passing threshold.
+	r1 := startAndWait(map[string]any{
+		"environment_id": envObj.ID,
+		"api_id":         pingAPI.ID,
+		"load": map[string]any{
+			"mode":   "vus",
+			"stages": []map[string]any{{"duration": "400ms", "target": 1}},
+			"thresholds": []map[string]any{
+				{"metric": "p99_ms", "op": "<=", "value": 5000},
+			},
+		},
+	})
+	if r1.Status != store.RunFinished {
+		t.Fatalf("r1 status=%s err=%q", r1.Status, r1.Error)
+	}
+
+	resp = doJSONReq(t, cl, "GET", env.baseURL+"/api/v1/runs/"+r1.ID, nil, false)
+	var getR1 struct {
+		store.Run
+		Alerts           []store.Alert              `json:"alerts"`
+		Thresholds       []scenario.ThresholdResult `json:"thresholds"`
+		ThresholdsPassed *bool                      `json:"thresholds_passed"`
+	}
+	decodeBody(t, resp, &getR1)
+	if getR1.ThresholdsPassed == nil || !*getR1.ThresholdsPassed || len(getR1.Thresholds) != 1 {
+		t.Fatalf("expected passing thresholds on r1, got %+v", getR1)
+	}
+
+	resp = doJSONReq(t, cl, "GET", env.baseURL+"/api/v1/runs/"+r1.ID+"/export?format=html", nil, false)
+	htmlR1, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != 200 || !strings.Contains(string(htmlR1), "阈值评估") || !strings.Contains(string(htmlR1), "全部通过") {
+		t.Fatalf("expected HTML threshold section in run report")
+	}
+
+	// Run 2: failing threshold without abort.
+	r2 := startAndWait(map[string]any{
+		"environment_id": envObj.ID,
+		"api_id":         pingAPI.ID,
+		"load": map[string]any{
+			"mode":   "vus",
+			"stages": []map[string]any{{"duration": "400ms", "target": 2}},
+			"thresholds": []map[string]any{
+				{"metric": "rps", "op": ">=", "value": 99999999},
+			},
+		},
+	})
+	resp = doJSONReq(t, cl, "GET", env.baseURL+"/api/v1/runs/"+r2.ID, nil, false)
+	var getR2 struct {
+		store.Run
+		ThresholdsPassed *bool `json:"thresholds_passed"`
+	}
+	decodeBody(t, resp, &getR2)
+	if getR2.ThresholdsPassed == nil || *getR2.ThresholdsPassed {
+		t.Fatalf("expected failing threshold on r2, got %+v", getR2)
+	}
+
+	// Run 3: abort_on_fail triggers mid-run stop and RunFailed status + threshold alert.
+	abortStart := time.Now()
+	r3 := startAndWait(map[string]any{
+		"environment_id": envObj.ID,
+		"api_id":         pingAPI.ID,
+		"load": map[string]any{
+			"mode": "vus",
+			"stages": []map[string]any{
+				{"duration": "0s", "target": 2},
+				{"duration": "8s", "target": 2},
+			},
+			"thresholds": []map[string]any{
+				{"metric": "rps", "op": ">=", "value": 99999999, "abort_on_fail": true, "grace_period": "200ms"},
+			},
+		},
+	})
+	if time.Since(abortStart) >= 4*time.Second || r3.Status != store.RunFailed || !strings.Contains(r3.Error, "触发中止阈值") {
+		t.Fatalf("expected abort_on_fail run failure <4s, got elapsed=%v status=%s err=%q", time.Since(abortStart), r3.Status, r3.Error)
+	}
+	resp = doJSONReq(t, cl, "GET", env.baseURL+"/api/v1/runs/"+r3.ID, nil, false)
+	var getR3 struct {
+		store.Run
+		Alerts []store.Alert `json:"alerts"`
+	}
+	decodeBody(t, resp, &getR3)
+	foundThreshAlert := false
+	for _, al := range getR3.Alerts {
+		if al.Kind == "threshold" && al.Level == store.AlertCritical {
+			foundThreshAlert = true
+		}
+	}
+	if !foundThreshAlert {
+		t.Fatalf("expected critical threshold alert in r3: %+v", getR3.Alerts)
+	}
+
+	// Compare Run 1 vs Run 2 via GET /api/v1/runs/compare?ids=r1,r2.
+	resp = doJSONReq(t, cl, "GET", env.baseURL+"/api/v1/runs/compare?ids="+r1.ID, nil, false)
+	resp.Body.Close()
+	if resp.StatusCode != 400 {
+		t.Fatalf("compare single ID status = %d, want 400", resp.StatusCode)
+	}
+
+	resp = doJSONReq(t, cl, "GET", env.baseURL+"/api/v1/runs/compare?ids="+r1.ID+","+r2.ID, nil, false)
+	if resp.StatusCode != 200 {
+		b, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		t.Fatalf("compare runs = %d: %s", resp.StatusCode, b)
+	}
+	var cmpRes struct {
+		BaselineID string `json:"baseline_id"`
+		Runs       []struct {
+			Run     store.Run             `json:"run"`
+			Summary *metrics.SnapshotView `json:"summary"`
+			Delta   *RunDelta             `json:"delta"`
+		} `json:"runs"`
+	}
+	decodeBody(t, resp, &cmpRes)
+	if cmpRes.BaselineID != r1.ID || len(cmpRes.Runs) != 2 || cmpRes.Runs[0].Delta != nil || cmpRes.Runs[1].Delta == nil || len(cmpRes.Runs[1].Delta.StepDeltas) == 0 {
+		t.Fatalf("unexpected run comparison response: %+v", cmpRes)
+	}
+}
+
+func TestDownsampleSnapshots(t *testing.T) {
+	in := make([]store.SnapshotRecord, 1000)
+	for i := range in {
+		in[i] = store.SnapshotRecord{Seq: int64(i)}
+	}
+	out := downsampleSnapshots(in, 60)
+	if len(out) != 60 {
+		t.Fatalf("len(out) = %d, want 60", len(out))
+	}
+	if out[0].Seq != 0 || out[len(out)-1].Seq != 999 {
+		t.Fatalf("expected endpoints preserved, got first=%d last=%d", out[0].Seq, out[len(out)-1].Seq)
+	}
+	for i := 1; i < len(out); i++ {
+		if out[i].Seq <= out[i-1].Seq {
+			t.Fatalf("non-increasing seq at %d: %d <= %d", i, out[i].Seq, out[i-1].Seq)
+		}
 	}
 }
 

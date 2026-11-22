@@ -566,3 +566,111 @@ func TestServeWithRealAgentSubprocess(t *testing.T) {
 		t.Fatalf("serve exit code = %d\nstderr=%s", code, stderr.String())
 	}
 }
+
+func TestRunThresholdsAndExitCode(t *testing.T) {
+	srv := startServer(t)
+	dir := t.TempDir()
+
+	writeScen := func(name, thresholdsYAML, dur string) string {
+		p := filepath.Join(dir, name)
+		src := `version: 1
+name: Threshold CLI Test
+steps:
+  - id: ping
+    name: ping
+    request:
+      method: GET
+      url: ` + srv.URL() + `/ping
+load:
+  mode: vus
+  stages:
+    - duration: ` + dur + `
+      target: 1
+` + thresholdsYAML
+		if err := os.WriteFile(p, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
+	}
+
+	// 1. Passing thresholds exit 0 and write threshold card to HTML report.
+	passFile := writeScen("pass.yaml", `  thresholds:
+    - metric: p99_ms
+      op: "<="
+      value: 5000
+    - metric: error_rate
+      value: 0.05
+`, "300ms")
+	htmlPath := filepath.Join(dir, "pass.html")
+	var out1, err1 bytes.Buffer
+	code := runMain([]string{"run", passFile, "--quiet", "--html", htmlPath}, &out1, &err1)
+	if code != 0 {
+		t.Fatalf("passing threshold exit = %d\nstdout:\n%s\nstderr:\n%s", code, &out1, &err1)
+	}
+	if !strings.Contains(out1.String(), "阈值校验（全部通过）") {
+		t.Fatalf("expected passing threshold summary, got:\n%s", &out1)
+	}
+	htmlBytes, err := os.ReadFile(htmlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(htmlBytes), "阈值评估") || !strings.Contains(string(htmlBytes), "全部通过") {
+		t.Fatalf("expected threshold card in HTML report")
+	}
+
+	// 2. Failing threshold returns exit code 3.
+	failFile := writeScen("fail.yaml", `  thresholds:
+    - metric: rps
+      op: ">="
+      value: 999999999
+`, "300ms")
+	var out2, err2 bytes.Buffer
+	code = runMain([]string{"run", failFile, "--quiet"}, &out2, &err2)
+	if code != 3 {
+		t.Fatalf("failing threshold exit = %d, want 3\nstdout:\n%s\nstderr:\n%s", code, &out2, &err2)
+	}
+	if !strings.Contains(out2.String(), "阈值校验（未达标）") {
+		t.Fatalf("expected failing threshold summary, got:\n%s", &out2)
+	}
+
+	// 3. AbortOnFail interrupts a longer run early and exits 3.
+	abortPath := filepath.Join(dir, "abort.yaml")
+	abortYAML := `version: 1
+name: Threshold Abort Test
+steps:
+  - id: ping
+    name: ping
+    request:
+      method: GET
+      url: ` + srv.URL() + `/ping
+load:
+  mode: vus
+  stages:
+    - duration: 0s
+      target: 2
+    - duration: 10s
+      target: 2
+  thresholds:
+    - metric: rps
+      op: ">="
+      value: 999999999
+      abort_on_fail: true
+      grace_period: 200ms
+`
+	if err := os.WriteFile(abortPath, []byte(abortYAML), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now()
+	var out3, err3 bytes.Buffer
+	code = runMain([]string{"run", abortPath, "--quiet"}, &out3, &err3)
+	elapsed := time.Since(start)
+	if code != 3 {
+		t.Fatalf("abort threshold exit = %d, want 3\nstdout:\n%s\nstderr:\n%s", code, &out3, &err3)
+	}
+	if elapsed >= 4*time.Second {
+		t.Fatalf("abort_on_fail took %v (expected early stop < 4s)", elapsed)
+	}
+	if !strings.Contains(err3.String(), "触发中止阈值") {
+		t.Fatalf("expected abort message on stderr, got:\n%s", &err3)
+	}
+}

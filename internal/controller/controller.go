@@ -563,17 +563,7 @@ func (c *Controller) DebugScenario(ctx context.Context, projectID string, req De
 	})
 }
 
-// StartRun resolves a scenario or single API, creates the run record, partitions
-// load evenly across connected agents, and dispatches synchronized StartRun commands.
-func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRunRequest) (*store.Run, error) {
-	if req.ScenarioID == "" && req.APIID == "" && req.API == nil {
-		return nil, userErr(ErrInvalidInput, "请指定压测场景或接口", nil)
-	}
-	nodes := c.srv.Nodes()
-	if len(nodes) == 0 {
-		return nil, userErr(ErrNoAgents, "当前没有可用的发压节点，请等待本机或远程节点接入后重试", nil)
-	}
-
+func (c *Controller) resolveRunDefinition(projectID string, req StartRunRequest) (*store.Resolved, store.Run, error) {
 	var (
 		resolved *store.Resolved
 		err      error
@@ -584,6 +574,9 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 			EnvironmentID: req.EnvironmentID,
 		}
 	)
+	if req.ScenarioID == "" && req.APIID == "" && req.API == nil {
+		return nil, runMeta, userErr(ErrInvalidInput, "请指定压测场景或接口", nil)
+	}
 	switch {
 	case req.ScenarioID != "":
 		resolved, err = c.store.ResolveScenario(projectID, req.ScenarioID, store.ResolveOptions{
@@ -617,14 +610,27 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 		resolved, err = c.store.ResolveAPI(projectID, req.APIID, apiOpts)
 	}
 	if err != nil {
-		return nil, err
+		return nil, runMeta, err
 	}
-
 	if req.ScenarioID != "" && req.Load != nil {
 		resolved.Definition.Load = *req.Load
 	}
 	if req.ScenarioID != "" && req.HTTP != nil {
 		resolved.Definition.HTTP = *req.HTTP
+	}
+	return resolved, runMeta, nil
+}
+
+// StartRun resolves a scenario or single API, creates the run record, partitions
+// load evenly across connected agents, and dispatches synchronized StartRun commands.
+func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRunRequest) (*store.Run, error) {
+	resolved, runMeta, err := c.resolveRunDefinition(projectID, req)
+	if err != nil {
+		return nil, err
+	}
+	nodes := c.srv.Nodes()
+	if len(nodes) == 0 {
+		return nil, userErr(ErrNoAgents, "当前没有可用的发压节点，请等待本机或远程节点接入后重试", nil)
 	}
 
 	scenJSON, err := json.Marshal(resolved.Definition)
@@ -663,7 +669,7 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 	}
 
 	egress := inspectTargetEgress(ctx, resolved.Definition)
-	ar := newActiveRun(c, runMeta.ID, egress)
+	ar := newActiveRun(c, runMeta.ID, egress, resolved.Definition.Load.Thresholds)
 
 	c.mu.Lock()
 	if c.active != nil {
@@ -740,6 +746,7 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 	}
 
 	now := time.Now()
+	ar.setStartedAt(commonStart)
 	runMeta.Status = store.RunRunning
 	runMeta.StartedAt = now
 	if err := c.results.UpdateRun(ctx, runMeta.ID, store.RunUpdate{
@@ -942,30 +949,41 @@ type seqBucket struct {
 }
 
 type activeRun struct {
-	ctrl   *Controller
-	id     string
-	alerts *alertEvaluator
+	ctrl       *Controller
+	id         string
+	alerts     *alertEvaluator
+	thresholds []scenario.Threshold
 
 	stopCh   chan struct{}
 	stopOnce sync.Once
 	wg       sync.WaitGroup
 
-	mu           sync.Mutex
-	nodes        map[string]*runNodeState
-	buckets      map[int64]*seqBucket
-	nextFlushSeq int64
-	finalized    bool
+	mu                sync.Mutex
+	startedAt         time.Time
+	thresholdAborted  bool
+	thresholdAbortMsg string
+	nodes             map[string]*runNodeState
+	buckets           map[int64]*seqBucket
+	nextFlushSeq      int64
+	finalized         bool
 }
 
-func newActiveRun(ctrl *Controller, id string, egress targetEgress) *activeRun {
+func newActiveRun(ctrl *Controller, id string, egress targetEgress, thresholds []scenario.Threshold) *activeRun {
 	return &activeRun{
-		ctrl:    ctrl,
-		id:      id,
-		alerts:  newAlertEvaluator(id, ctrl.results, ctrl.hub, egress),
-		stopCh:  make(chan struct{}),
-		nodes:   make(map[string]*runNodeState),
-		buckets: make(map[int64]*seqBucket),
+		ctrl:       ctrl,
+		id:         id,
+		alerts:     newAlertEvaluator(id, ctrl.results, ctrl.hub, egress),
+		thresholds: append([]scenario.Threshold(nil), thresholds...),
+		stopCh:     make(chan struct{}),
+		nodes:      make(map[string]*runNodeState),
+		buckets:    make(map[int64]*seqBucket),
 	}
+}
+
+func (r *activeRun) setStartedAt(t time.Time) {
+	r.mu.Lock()
+	r.startedAt = t
+	r.mu.Unlock()
 }
 
 func (r *activeRun) initNodes(nodes []cluster.NodeInfo) {
@@ -1122,7 +1140,50 @@ func (r *activeRun) persistAndPublish(snaps []*metrics.Snapshot) {
 			RunID:    r.id,
 			Snapshot: view,
 		})
+		r.checkAbortThresholds(s.Time, view)
 	}
+}
+
+func (r *activeRun) checkAbortThresholds(snapTime time.Time, view *metrics.SnapshotView) {
+	if len(r.thresholds) == 0 || view == nil {
+		return
+	}
+	r.mu.Lock()
+	already := r.thresholdAborted
+	startedAt := r.startedAt
+	r.mu.Unlock()
+	if already {
+		return
+	}
+	if startedAt.IsZero() {
+		startedAt = snapTime
+	}
+	elapsed := snapTime.Sub(startedAt)
+	if snapTime.IsZero() {
+		elapsed = time.Since(startedAt)
+	}
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	msg, hit := scenario.CheckAbortThresholds(r.thresholds, view, elapsed)
+	if !hit {
+		return
+	}
+	fullMsg := "触发中止阈值：" + msg
+
+	r.mu.Lock()
+	if r.thresholdAborted {
+		r.mu.Unlock()
+		return
+	}
+	r.thresholdAborted = true
+	r.thresholdAbortMsg = fullMsg
+	r.mu.Unlock()
+
+	r.alerts.observeCondition(r.ctrl.ctx, "", "threshold", store.AlertCritical, fullMsg, 0, 0, true, snapTime)
+	go func() {
+		_, _ = r.ctrl.StopRun(r.ctrl.ctx, r.id, false)
+	}()
 }
 
 func (r *activeRun) onNodeJoined(nodeID string) {
@@ -1255,6 +1316,9 @@ func (r *activeRun) finalize() {
 				_ = merged.Merge(st.summary, metrics.MergeNodes)
 			}
 		}
+	}
+	if r.thresholdAbortMsg != "" {
+		errs = append(errs, r.thresholdAbortMsg)
 	}
 	r.mu.Unlock()
 
