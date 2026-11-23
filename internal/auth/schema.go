@@ -76,6 +76,10 @@ var migrations = [][]string{
 		)`,
 		`CREATE INDEX IF NOT EXISTS auth_project_members_user_idx ON auth_project_members(user_id)`,
 	},
+	// Version 4: per-token MCP tool whitelist.
+	{
+		`ALTER TABLE auth_tokens ADD COLUMN mcp_tools TEXT NOT NULL DEFAULT ''`,
+	},
 }
 
 const schemaVersionKey = "schema_version"

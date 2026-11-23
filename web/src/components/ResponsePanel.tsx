@@ -1,6 +1,21 @@
-import { useState } from 'react'
-import { Check, CheckCircle2, Clock, Copy, History, Send, Terminal, Trash2, XCircle, Zap } from 'lucide-react'
-import type { DebugAPIResponse, DebugRecord } from '../lib/types'
+import { useEffect, useRef, useState } from 'react'
+import {
+  ArrowRight,
+  BookmarkPlus,
+  Check,
+  CheckCircle2,
+  Clock,
+  Copy,
+  Download,
+  RefreshCw,
+  Send,
+  Terminal,
+  Trash2,
+  XCircle,
+  Zap,
+} from 'lucide-react'
+import { copyText, downloadText, fileStamp } from '../lib/download'
+import type { APIResponseExample, DebugAPIResponse, DebugRecord } from '../lib/types'
 import { JSONTreeViewer } from './JSONTreeViewer'
 
 export type RespSubTab = 'body' | 'extract_assert' | 'actual' | 'headers' | 'history'
@@ -12,11 +27,17 @@ interface Props {
   historyList: DebugRecord[]
   loadingDebug: boolean
   autoSyncTempVars: boolean
+  /** Base name for downloaded response files (usually the API name). */
+  fileBaseName?: string
+  /** Highlights the history row currently replayed in the panel. */
+  activeHistoryId?: string
   onToggleAutoSync: (next: boolean) => void
   onPickExtractJSONPath: (expr: string, suggestedName: string) => void
   onPickAssertJSONPath: (expr: string, sampleVal: string) => void
   onPushTempVars: (vars: Record<string, string>) => void
   onSaveEnvVars?: (vars: Record<string, string>) => Promise<void>
+  /** Append the current response to the API's examples. Omit to hide the action (e.g. read-only). */
+  onSaveExample?: (example: APIResponseExample) => void
   onRefreshHistory: () => Promise<void>
   onLoadHistoryRecord: (id: string) => Promise<void>
   onClearHistory: () => Promise<void>
@@ -28,17 +49,54 @@ function formatBytes(n: number): string {
   return `${n} B`
 }
 
+function responseFileType(contentType: string | undefined, body: string): { ext: string; mime: string } {
+  const ct = (contentType || '').toLowerCase()
+  const charset = ';charset=utf-8'
+  if (ct.includes('json')) return { ext: 'json', mime: `application/json${charset}` }
+  if (ct.includes('html')) return { ext: 'html', mime: `text/html${charset}` }
+  if (ct.includes('xml')) return { ext: 'xml', mime: `application/xml${charset}` }
+  if (!ct) {
+    const t = body.trim()
+    if (t.startsWith('{') || t.startsWith('[')) {
+      try {
+        JSON.parse(t)
+        return { ext: 'json', mime: `application/json${charset}` }
+      } catch {
+        // fall through
+      }
+    }
+  }
+  return { ext: 'txt', mime: `text/plain${charset}` }
+}
+
+function safeFileName(s: string): string {
+  return s.replace(/[\\/:*?"<>|\s]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'response'
+}
+
+function statusTone(status: number, error?: string): string {
+  if (error || status <= 0) return 'bg-rose-100 text-rose-800 border-rose-200'
+  if (status >= 200 && status < 300) return 'bg-emerald-100 text-emerald-800 border-emerald-200'
+  if (status >= 400) return 'bg-rose-100 text-rose-800 border-rose-200'
+  return 'bg-amber-100 text-amber-800 border-amber-200'
+}
+
+const headerBtn =
+  'inline-flex items-center gap-1 px-2 py-1 rounded-md border border-line bg-surface hover:bg-surface-hover text-fg-muted hover:text-fg text-[11px] font-medium transition-colors'
+
 export function ResponsePanel({
   activeEnvId,
   debugResp,
   historyList,
   loadingDebug,
   autoSyncTempVars,
+  fileBaseName,
+  activeHistoryId,
   onToggleAutoSync,
   onPickExtractJSONPath,
   onPickAssertJSONPath,
   onPushTempVars,
   onSaveEnvVars,
+  onSaveExample,
   onRefreshHistory,
   onLoadHistoryRecord,
   onClearHistory,
@@ -46,9 +104,17 @@ export function ResponsePanel({
   const [subTab, setSubTab] = useState<RespSubTab>('body')
   const [rawMode, setRawMode] = useState(false)
   const [copiedBody, setCopiedBody] = useState(false)
+  const [savedExample, setSavedExample] = useState(false)
+  const [confirmClear, setConfirmClear] = useState(false)
+  const [loadingRecordId, setLoadingRecordId] = useState('')
+  const confirmTimer = useRef<number | undefined>(undefined)
+
+  useEffect(() => () => window.clearTimeout(confirmTimer.current), [])
+  useEffect(() => setSavedExample(false), [debugResp])
 
   const step = debugResp?.result
   const timing = step?.timing
+  const hasTextBody = Boolean(step && !step.is_binary && step.body)
 
   const phases = timing
     ? [
@@ -64,10 +130,54 @@ export function ResponsePanel({
     phases.reduce((acc, p) => acc + p.ms, 0)
   )
 
+  const extractedVars = step?.extracted_vars || {}
+  const extractNames = new Set((step?.extracts || []).map((e) => e.name))
+  const scriptVars = Object.entries(extractedVars).filter(([k]) => !extractNames.has(k))
+  const extractedCount = Object.keys(extractedVars).length
+
+  const handleDownload = () => {
+    if (!step || !step.body) return
+    const { ext, mime } = responseFileType(step.content_type, step.body)
+    downloadText(`${safeFileName(fileBaseName || 'response')}-${step.status || 'err'}-${fileStamp()}.${ext}`, step.body, mime)
+  }
+
+  const handleSaveExample = () => {
+    if (!step || !onSaveExample) return
+    onSaveExample({
+      name: `响应 ${step.status || 200}`,
+      status: step.status || 200,
+      content_type: step.content_type || 'application/json',
+      body: step.body || '',
+    })
+    setSavedExample(true)
+  }
+
+  const handleClear = () => {
+    if (!confirmClear) {
+      setConfirmClear(true)
+      window.clearTimeout(confirmTimer.current)
+      confirmTimer.current = window.setTimeout(() => setConfirmClear(false), 3000)
+      return
+    }
+    window.clearTimeout(confirmTimer.current)
+    setConfirmClear(false)
+    void onClearHistory()
+  }
+
+  const loadRecord = async (id: string) => {
+    setLoadingRecordId(id)
+    try {
+      await onLoadHistoryRecord(id)
+      setSubTab('body')
+    } finally {
+      setLoadingRecordId('')
+    }
+  }
+
   return (
-    <div className="flex-1 min-h-0 bg-slate-50/70 flex flex-col">
+    <div className="flex-1 min-h-0 bg-canvas flex flex-col">
       {/* Response Header Tabs & Telemetry */}
-      <div className="px-4 border-b border-slate-200 bg-white flex flex-wrap items-center justify-between gap-2 shrink-0">
+      <div className="px-3 border-b border-line bg-surface flex flex-wrap items-center justify-between gap-x-3 gap-y-1 shrink-0">
         <div role="tablist" aria-label="响应检查器页签" className="tg-tablist gap-1 text-xs font-medium min-w-0">
           {(
             [
@@ -78,7 +188,7 @@ export function ResponsePanel({
                 count:
                   (step?.extracts?.length || 0) +
                   (step?.asserts?.length || 0) +
-                  (step?.extracts?.length ? 0 : Object.keys(step?.extracted_vars || {}).length),
+                  (step?.extracts?.length ? 0 : extractedCount),
               },
               { id: 'actual' as const, label: '实际请求', count: 0 },
               { id: 'headers' as const, label: '响应头', count: step?.response_headers?.length || 0 },
@@ -97,12 +207,12 @@ export function ResponsePanel({
                   if (t.id === 'history') void onRefreshHistory()
                 }}
                 className={`tg-tab inline-flex items-center gap-1.5 px-2.5 py-2 transition-colors ${
-                  selected ? 'text-sky-700' : 'text-slate-600 hover:text-slate-900'
+                  selected ? 'text-tidal' : 'text-fg-muted hover:text-fg'
                 }`}
               >
                 <span>{t.label}</span>
                 {t.count > 0 && (
-                  <span className="tg-tabular px-1.5 py-0.2 rounded-full bg-slate-100 text-slate-700 font-mono text-[10px]">
+                  <span className="tg-tabular px-1.5 rounded-full bg-slate-100 text-fg-muted font-mono text-[10px]">
                     {t.count}
                   </span>
                 )}
@@ -113,21 +223,11 @@ export function ResponsePanel({
 
         {step && (
           <div className="tg-tabular flex flex-wrap items-center gap-2 text-xs py-1">
-            <span
-              className={`px-2 py-0.5 rounded-full font-mono font-semibold ${
-                step.error
-                  ? 'bg-rose-100 text-rose-800'
-                  : step.status >= 200 && step.status < 300
-                    ? 'bg-emerald-100 text-emerald-800'
-                    : step.status >= 400
-                      ? 'bg-rose-100 text-rose-800'
-                      : 'bg-amber-100 text-amber-800'
-              }`}
-            >
+            <span className={`px-2 py-0.5 rounded-full border font-mono font-semibold ${statusTone(step.status, step.error)}`}>
               {step.status > 0 ? `HTTP ${step.status}` : '网络错误'}
             </span>
-            <span className="font-mono font-semibold text-slate-800">{step.timing.total_ms.toFixed(2)} ms</span>
-            <span className="text-slate-500 text-[11px]">
+            <span className="font-mono font-semibold text-fg">{step.timing.total_ms.toFixed(2)} ms</span>
+            <span className="text-fg-subtle text-[11px] font-mono" title="接收 / 发送">
               {formatBytes(step.bytes_received)} / {formatBytes(step.bytes_sent)}
             </span>
             <span
@@ -138,14 +238,37 @@ export function ResponsePanel({
               {step.passed ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
               {step.passed ? '通过' : '未通过'}
             </span>
+            {hasTextBody && (
+              <span className="inline-flex items-center gap-1 pl-2 border-l border-line">
+                <button type="button" onClick={handleDownload} className={headerBtn} title="下载响应体">
+                  <Download className="w-3 h-3" /> 下载
+                </button>
+                {onSaveExample && (
+                  <button
+                    type="button"
+                    onClick={handleSaveExample}
+                    disabled={savedExample}
+                    className={`${headerBtn} disabled:opacity-70`}
+                    title="追加到接口文档的响应示例"
+                  >
+                    {savedExample ? (
+                      <Check className="w-3 h-3 text-emerald-600" />
+                    ) : (
+                      <BookmarkPlus className="w-3 h-3" />
+                    )}
+                    {savedExample ? '已存为示例' : '存为示例'}
+                  </button>
+                )}
+              </span>
+            )}
           </div>
         )}
       </div>
 
       {/* Inline 5-Phase Waterfall */}
       {timing && subTab !== 'history' && (
-        <div className="px-4 py-1.5 bg-white border-b border-slate-200 flex flex-wrap items-center gap-3 text-[11px] shrink-0">
-          <div className="flex items-center gap-1 text-slate-500 font-medium">
+        <div className="px-3 py-1.5 bg-surface border-b border-line flex flex-wrap items-center gap-3 text-[11px] shrink-0">
+          <div className="flex items-center gap-1 text-fg-subtle font-medium">
             <Clock className="w-3 h-3" /> 耗时分布
           </div>
           <div className="flex-1 min-w-[140px] h-2 rounded-full overflow-hidden bg-slate-100 flex">
@@ -160,7 +283,7 @@ export function ResponsePanel({
               ) : null
             )}
           </div>
-          <div className="tg-tabular flex flex-wrap items-center gap-2 font-mono text-slate-600">
+          <div className="tg-tabular flex flex-wrap items-center gap-2 font-mono text-fg-muted">
             {phases.map((p) => (
               <span key={p.key} className="inline-flex items-center gap-1">
                 <span className={`w-2 h-2 rounded-full ${p.color}`} />
@@ -168,99 +291,116 @@ export function ResponsePanel({
               </span>
             ))}
             {timing.reused && (
-              <span className="px-1.5 py-0.2 rounded bg-sky-100 text-sky-800 text-[10px]">复用连接</span>
+              <span className="px-1.5 rounded bg-sky-100 text-sky-800 text-[10px]">复用连接</span>
             )}
           </div>
         </div>
       )}
 
       {/* Scrollable Inspector Content */}
-      <div className="flex-1 min-h-0 overflow-y-auto tg-scroller p-4 text-xs">
+      <div className="flex-1 min-h-0 overflow-y-auto tg-scroller p-3 text-xs">
         {loadingDebug ? (
-          <div className="py-12 text-center text-slate-500 space-y-2">
+          <div className="py-12 text-center">
             <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-sky-50 border border-sky-200 text-sky-800 font-medium">
               <span className="w-2 h-2 rounded-full bg-sky-500 animate-pulse" />
-              <span>正在由 Tidegate 引擎发送真实请求...</span>
+              <span>发送中…</span>
             </div>
           </div>
         ) : subTab === 'history' ? (
-          <div className="space-y-2.5">
-            <div className="flex items-center justify-between">
-              <span className="font-medium text-slate-700 flex items-center gap-1.5">
-                <History className="w-3.5 h-3.5 text-sky-600" /> 项目近期调试记录（点击任意行恢复现场）
-              </span>
-              {historyList.length > 0 && (
-                <button
-                  type="button"
-                  onClick={() => void onClearHistory()}
-                  className="inline-flex items-center gap-1 text-rose-600 hover:text-rose-700"
-                >
-                  <Trash2 className="w-3.5 h-3.5" /> 清空历史
+          <div className="space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <span className="font-medium text-fg-muted">最近 {historyList.length} 条</span>
+              <div className="flex items-center gap-1.5">
+                <button type="button" onClick={() => void onRefreshHistory()} className={headerBtn} title="刷新">
+                  <RefreshCw className="w-3 h-3" /> 刷新
                 </button>
-              )}
+                {historyList.length > 0 && (
+                  <button
+                    type="button"
+                    onClick={handleClear}
+                    onBlur={() => setConfirmClear(false)}
+                    className={
+                      confirmClear
+                        ? 'inline-flex items-center gap-1 px-2 py-1 rounded-md bg-rose-600 hover:bg-rose-solid text-white text-[11px] font-semibold'
+                        : `${headerBtn} hover:text-rose-700`
+                    }
+                  >
+                    <Trash2 className="w-3 h-3" /> {confirmClear ? '确认清空？' : '清空'}
+                  </button>
+                )}
+              </div>
             </div>
             {historyList.length === 0 ? (
-              <p className="text-slate-400 py-8 text-center">暂无调试历史记录。</p>
+              <p className="text-fg-subtle py-8 text-center">暂无调试记录</p>
             ) : (
-              <div className="border border-slate-200 rounded-lg bg-white overflow-auto tg-scroller max-h-80">
+              <div className="border border-line rounded-lg bg-surface overflow-auto tg-scroller max-h-[60dvh]">
                 <table className="w-full text-left border-collapse">
-                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 sticky top-0">
+                  <thead className="bg-surface-subtle border-b border-line text-fg-subtle sticky top-0">
                     <tr>
-                      <th className="px-3 py-1.5 w-20">方法</th>
-                      <th className="px-3 py-1.5">实际 URL</th>
-                      <th className="px-3 py-1.5 w-20">状态</th>
-                      <th className="px-3 py-1.5 w-24">耗时</th>
-                      <th className="px-3 py-1.5 w-32">时间</th>
+                      <th className="px-3 py-1.5 w-20 font-medium">方法</th>
+                      <th className="px-3 py-1.5 font-medium">URL</th>
+                      <th className="px-3 py-1.5 w-16 font-medium">状态</th>
+                      <th className="px-3 py-1.5 w-24 font-medium text-right">耗时</th>
+                      <th className="px-3 py-1.5 w-24 font-medium text-right">时间</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100 tg-tabular">
-                    {historyList.map((rec) => (
-                      <tr
-                        key={rec.id}
-                        onClick={() => void onLoadHistoryRecord(rec.id)}
-                        className="hover:bg-sky-50 cursor-pointer"
-                      >
-                        <td className="px-3 py-1.5 font-mono font-semibold text-slate-800">{rec.method}</td>
-                        <td className="px-3 py-1.5 font-mono text-slate-600 truncate max-w-[300px]" title={rec.url}>
-                          {rec.url}
-                        </td>
-                        <td className="px-3 py-1.5 font-mono">
-                          <span
-                            className={
-                              rec.status >= 200 && rec.status < 300
-                                ? 'text-emerald-700 font-semibold'
-                                : 'text-rose-700 font-semibold'
+                  <tbody className="divide-y divide-[var(--tg-border)] tg-tabular">
+                    {historyList.map((rec) => {
+                      const current = rec.id === activeHistoryId
+                      return (
+                        <tr
+                          key={rec.id}
+                          tabIndex={0}
+                          aria-current={current || undefined}
+                          aria-busy={loadingRecordId === rec.id || undefined}
+                          onClick={() => void loadRecord(rec.id)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' || e.key === ' ') {
+                              e.preventDefault()
+                              void loadRecord(rec.id)
                             }
-                          >
-                            {rec.status || 'ERR'}
-                          </span>
-                        </td>
-                        <td className="px-3 py-1.5 font-mono text-slate-600">{rec.duration_ms.toFixed(1)} ms</td>
-                        <td className="px-3 py-1.5 text-slate-400">
-                          {new Date(rec.created_at).toLocaleTimeString()}
-                        </td>
-                      </tr>
-                    ))}
+                          }}
+                          title="回填请求并查看响应"
+                          className={`cursor-pointer focus:outline-none focus-visible:bg-sky-50 hover:bg-sky-50 ${
+                            current ? 'bg-sky-50 shadow-[inset_2px_0_0_var(--tg-tidal-600)]' : ''
+                          } ${loadingRecordId === rec.id ? 'opacity-60' : ''}`}
+                        >
+                          <td className="px-3 py-1.5 font-mono font-semibold text-fg">{rec.method}</td>
+                          <td className="px-3 py-1.5 font-mono text-fg-muted truncate max-w-[300px]" title={rec.url}>
+                            {rec.url}
+                          </td>
+                          <td className="px-3 py-1.5 font-mono">
+                            <span
+                              className={
+                                rec.status >= 200 && rec.status < 300
+                                  ? 'text-emerald-700 font-semibold'
+                                  : rec.status >= 300 && rec.status < 400
+                                    ? 'text-amber-700 font-semibold'
+                                    : 'text-rose-700 font-semibold'
+                              }
+                            >
+                              {rec.status || 'ERR'}
+                            </span>
+                          </td>
+                          <td className="px-3 py-1.5 font-mono text-fg-muted text-right">{rec.duration_ms.toFixed(1)} ms</td>
+                          <td className="px-3 py-1.5 text-fg-subtle text-right" title={new Date(rec.created_at).toLocaleString()}>
+                            {new Date(rec.created_at).toLocaleTimeString()}
+                          </td>
+                        </tr>
+                      )
+                    })}
                   </tbody>
                 </table>
               </div>
             )}
           </div>
         ) : !step ? (
-          <div className="h-full min-h-[200px] flex flex-col items-center justify-center text-center text-slate-400 space-y-2.5">
-            <div className="w-10 h-10 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center text-slate-500">
+          <div className="h-full min-h-[200px] flex flex-col items-center justify-center text-center gap-2.5">
+            <div className="w-10 h-10 rounded-xl bg-surface-subtle border border-line flex items-center justify-center text-fg-subtle">
               <Terminal className="w-5 h-5" />
             </div>
-            <div className="space-y-1">
-              <div className="text-xs font-medium text-slate-600">等待发送调试请求</div>
-              <p className="text-[11px] text-slate-400">
-                点击 <strong className="text-slate-600">发送调试</strong> 或按{' '}
-                <kbd className="px-1.5 py-0.5 border border-slate-300 rounded bg-white font-mono text-[10px]">
-                  Ctrl+Enter
-                </kbd>{' '}
-                实时捕获响应、五段耗时瀑布与提取断言结果
-              </p>
-            </div>
+            <div className="text-xs font-medium text-fg-muted">等待发送</div>
+            <kbd className="tg-kbd font-mono">Ctrl+Enter</kbd>
           </div>
         ) : (
           <>
@@ -271,60 +411,73 @@ export function ResponsePanel({
             )}
 
             {subTab === 'body' && (
-              <div className="space-y-2.5">
+              <div className="space-y-2">
                 <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="flex items-center gap-2 text-slate-500">
-                    <span className="font-mono text-[11px]">{step.content_type || 'unknown'}</span>
+                  <div className="flex items-center gap-2 text-fg-subtle min-w-0">
+                    <span className="font-mono text-[11px] truncate">{step.content_type || 'unknown'}</span>
                     {step.body_truncated && (
-                      <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-800">响应体超出调试限制已截断</span>
+                      <span className="px-1.5 py-0.5 rounded-full border border-amber-200 bg-amber-100 text-amber-800 text-[11px] shrink-0">
+                        已截断
+                      </span>
                     )}
                   </div>
-                  <div className="flex items-center gap-1.5">
-                    {step.body && !step.is_binary && (
-                      <button
-                        type="button"
-                        onClick={async () => {
-                          try {
-                            await navigator.clipboard.writeText(step.body || '')
-                            setCopiedBody(true)
-                            window.setTimeout(() => setCopiedBody(false), 1800)
-                          } catch {
-                            // ignore
-                          }
-                        }}
-                        className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-700"
-                      >
-                        {copiedBody ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
-                        <span>{copiedBody ? '已复制' : '复制'}</span>
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => setRawMode((r) => !r)}
-                      className="px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-100 text-slate-700 font-medium"
-                    >
-                      {rawMode ? 'JSON 结构化视图' : '原始源码'}
-                    </button>
-                  </div>
+                  {!step.is_binary && (
+                    <div className="flex items-center gap-1.5">
+                      {step.body && (
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            if (await copyText(step.body || '')) {
+                              setCopiedBody(true)
+                              window.setTimeout(() => setCopiedBody(false), 1500)
+                            }
+                          }}
+                          className={headerBtn}
+                        >
+                          {copiedBody ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                          <span>{copiedBody ? '已复制' : '复制'}</span>
+                        </button>
+                      )}
+                      <div role="radiogroup" aria-label="响应体视图" className="inline-flex rounded-md border border-line p-0.5 bg-surface-subtle text-[11px]">
+                        {(
+                          [
+                            { raw: false, label: '树形' },
+                            { raw: true, label: '原始' },
+                          ] as const
+                        ).map((o) => (
+                          <button
+                            key={o.label}
+                            type="button"
+                            role="radio"
+                            aria-checked={rawMode === o.raw}
+                            onClick={() => setRawMode(o.raw)}
+                            className={`px-2 py-0.5 rounded font-medium ${
+                              rawMode === o.raw ? 'bg-surface shadow-xs text-tidal' : 'text-fg-muted hover:text-fg'
+                            }`}
+                          >
+                            {o.label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {step.is_binary ? (
-                  <div className="p-4 rounded-lg border border-slate-200 bg-white space-y-2">
-                    <div className="font-medium text-slate-800">
-                      二进制响应体（{formatBytes(step.bytes_received)}）
-                    </div>
+                  <div className="p-4 rounded-lg border border-line bg-surface space-y-2">
+                    <div className="font-medium text-fg tg-tabular">二进制响应体 · {formatBytes(step.bytes_received)}</div>
                     {step.body_base64 && (
                       <a
                         download={`response-${step.step_id || 'body'}`}
                         href={`data:${step.content_type || 'application/octet-stream'};base64,${step.body_base64}`}
-                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-sky-600 text-white font-medium"
+                        className="inline-flex items-center gap-1 px-3 py-1.5 rounded-md bg-sky-600 hover:bg-sky-solid text-white font-medium"
                       >
-                        下载二进制响应内容
+                        <Download className="w-3.5 h-3.5" /> 下载
                       </a>
                     )}
                   </div>
                 ) : rawMode ? (
-                  <pre className="p-3.5 rounded-lg bg-[#07192E] text-slate-100 font-mono text-xs overflow-auto tg-scroller-dark max-h-[420px] whitespace-pre-wrap break-all border border-slate-800">
+                  <pre className="p-3.5 rounded-lg border tg-code-surface tg-scroller-dark font-mono text-xs overflow-auto max-h-[64dvh] whitespace-pre-wrap break-all">
                     {step.body || '(空响应体)'}
                   </pre>
                 ) : (
@@ -339,106 +492,113 @@ export function ResponsePanel({
 
             {subTab === 'extract_assert' && (
               <div className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-2 bg-white border border-slate-200 rounded-lg p-3">
-                  <label className="inline-flex items-center gap-2 text-slate-700 cursor-pointer font-medium">
+                <div className="flex flex-wrap items-center justify-between gap-2 bg-surface border border-line rounded-lg px-3 py-2">
+                  <label className="inline-flex items-center gap-2 text-fg-muted cursor-pointer font-medium">
                     <input
                       type="checkbox"
                       checked={autoSyncTempVars}
                       onChange={(e) => onToggleAutoSync(e.target.checked)}
-                      className="rounded border-slate-300 text-sky-600"
+                      className="rounded border-line-strong"
                     />
                     <Zap className="w-3.5 h-3.5 text-amber-500 shrink-0" />
-                    <span>调试提取成功时自动同步写入顶部临时变量池</span>
+                    <span>自动写入临时变量</span>
                   </label>
-                  {step.extracted_vars && Object.keys(step.extracted_vars).length > 0 && (
-                    <div className="flex flex-wrap items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => onPushTempVars(step.extracted_vars!)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-50 border border-amber-300 text-amber-800 hover:bg-amber-100"
-                      >
-                        <Zap className="w-3.5 h-3.5" /> 立即同步本次提取变量（{Object.keys(step.extracted_vars).length}）
-                      </button>
+                  {extractedCount > 0 && (
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {!autoSyncTempVars && (
+                        <button
+                          type="button"
+                          onClick={() => onPushTempVars(extractedVars)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-amber-50 border border-amber-300 text-amber-800 hover:bg-amber-100"
+                        >
+                          <Zap className="w-3.5 h-3.5" /> 写入临时变量 <span className="tg-tabular">{extractedCount}</span>
+                        </button>
+                      )}
                       {activeEnvId && onSaveEnvVars && (
                         <button
                           type="button"
-                          onClick={() => void onSaveEnvVars(step.extracted_vars!)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-sky-50 border border-sky-300 text-sky-800 hover:bg-sky-100"
+                          onClick={() => void onSaveEnvVars(extractedVars)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-sky-50 border border-sky-300 text-sky-800 hover:bg-sky-100"
                         >
-                          <Zap className="w-3.5 h-3.5" /> 写入当前环境（{Object.keys(step.extracted_vars).length}）
+                          <Zap className="w-3.5 h-3.5" /> 写入当前环境 <span className="tg-tabular">{extractedCount}</span>
                         </button>
                       )}
                     </div>
                   )}
                 </div>
 
-                {step.extracted_vars && Object.keys(step.extracted_vars).length > 0 && (
-                  <div className="bg-white border border-slate-200 rounded-lg p-3 space-y-1.5">
-                    <h4 className="font-semibold text-slate-700">脚本写入与提取变量快照</h4>
-                    <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
-                      {Object.entries(step.extracted_vars).map(([k, val]) => (
-                        <span key={k} className="px-2 py-0.5 rounded bg-slate-50 border border-slate-200 text-slate-800">
-                          <span className="text-sky-700 font-semibold">{k}</span>={val}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                <div>
-                  <h4 className="font-semibold text-slate-700 mb-1.5">变量提取结果（全量非短路执行）</h4>
+                <section>
+                  <h4 className="font-semibold text-fg mb-1.5">变量提取</h4>
                   {(step.extracts?.length || 0) === 0 ? (
-                    <p className="text-slate-400">当前请求未配置提取规则。</p>
+                    <p className="text-fg-subtle">未配置提取规则</p>
                   ) : (
-                    <div className="border border-slate-200 rounded-lg bg-white overflow-hidden">
+                    <div className="border border-line rounded-lg bg-surface overflow-hidden">
                       <table className="w-full text-left border-collapse">
-                        <thead className="bg-slate-50 border-b border-slate-200 text-slate-500">
+                        <thead className="bg-surface-subtle border-b border-line text-fg-subtle">
                           <tr>
-                            <th className="px-3 py-1.5">变量名</th>
-                            <th className="px-3 py-1.5">来源 / 表达式</th>
-                            <th className="px-3 py-1.5">状态</th>
-                            <th className="px-3 py-1.5">提取值</th>
+                            <th className="px-3 py-1.5 font-medium">变量名</th>
+                            <th className="px-3 py-1.5 font-medium">来源 / 表达式</th>
+                            <th className="px-3 py-1.5 font-medium">状态</th>
+                            <th className="px-3 py-1.5 font-medium">提取值</th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-slate-100">
+                        <tbody className="divide-y divide-[var(--tg-border)]">
                           {step.extracts!.map((ex, i) => (
                             <tr key={i}>
                               <td className="px-3 py-1.5 font-mono font-semibold text-sky-800">{ex.name}</td>
-                              <td className="px-3 py-1.5 font-mono text-slate-600">
-                                [{ex.from}] {ex.expr}
+                              <td className="px-3 py-1.5 font-mono text-fg-muted">
+                                <span className="px-1 rounded bg-slate-100 text-[10px] mr-1">{ex.from}</span>
+                                {ex.expr}
                               </td>
                               <td className="px-3 py-1.5">
                                 {ex.matched ? (
-                                  <span className="text-emerald-700 font-semibold">命中</span>
+                                  <span className="inline-flex items-center gap-1 text-emerald-700 font-semibold">
+                                    <CheckCircle2 className="w-3.5 h-3.5" /> 命中
+                                  </span>
                                 ) : (
-                                  <span className="text-rose-700 font-semibold">未命中 {ex.error}</span>
+                                  <span className="inline-flex items-center gap-1 text-rose-700 font-semibold">
+                                    <XCircle className="w-3.5 h-3.5" /> 未命中 {ex.error}
+                                  </span>
                                 )}
                               </td>
-                              <td className="px-3 py-1.5 font-mono text-slate-800 break-all">{ex.value || '-'}</td>
+                              <td className="px-3 py-1.5 font-mono text-fg break-all">{ex.value || '-'}</td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
                   )}
-                </div>
+                </section>
 
-                <div>
-                  <h4 className="font-semibold text-slate-700 mb-1.5">响应断言结果（全量非短路执行）</h4>
+                {scriptVars.length > 0 && (
+                  <section>
+                    <h4 className="font-semibold text-fg mb-1.5">脚本变量</h4>
+                    <div className="flex flex-wrap gap-1.5 font-mono text-[11px]">
+                      {scriptVars.map(([k, val]) => (
+                        <span key={k} className="px-2 py-0.5 rounded border border-line bg-surface-subtle text-fg">
+                          <span className="text-sky-700 font-semibold">{k}</span>={val}
+                        </span>
+                      ))}
+                    </div>
+                  </section>
+                )}
+
+                <section>
+                  <h4 className="font-semibold text-fg mb-1.5">响应断言</h4>
                   {(step.asserts?.length || 0) === 0 ? (
-                    <p className="text-slate-400">当前请求未配置断言（默认以 HTTP 2xx/3xx 且无网络错误为通过）。</p>
+                    <p className="text-fg-subtle">未配置断言 · 默认 2xx/3xx 通过</p>
                   ) : (
-                    <div className="border border-slate-200 rounded-lg bg-white overflow-hidden">
+                    <div className="border border-line rounded-lg bg-surface overflow-hidden">
                       <table className="w-full text-left border-collapse">
-                        <thead className="bg-slate-50 border-b border-slate-200 text-slate-500">
+                        <thead className="bg-surface-subtle border-b border-line text-fg-subtle">
                           <tr>
-                            <th className="px-3 py-1.5 w-20">结果</th>
-                            <th className="px-3 py-1.5 w-28">类型</th>
-                            <th className="px-3 py-1.5">预期描述</th>
-                            <th className="px-3 py-1.5">失败明细</th>
+                            <th className="px-3 py-1.5 w-20 font-medium">结果</th>
+                            <th className="px-3 py-1.5 w-28 font-medium">类型</th>
+                            <th className="px-3 py-1.5 font-medium">预期</th>
+                            <th className="px-3 py-1.5 font-medium">失败明细</th>
                           </tr>
                         </thead>
-                        <tbody className="divide-y divide-slate-100">
+                        <tbody className="divide-y divide-[var(--tg-border)]">
                           {step.asserts!.map((as, i) => (
                             <tr key={i}>
                               <td className="px-3 py-1.5 font-semibold">
@@ -452,8 +612,8 @@ export function ResponsePanel({
                                   </span>
                                 )}
                               </td>
-                              <td className="px-3 py-1.5 font-mono text-slate-600">{as.type}</td>
-                              <td className="px-3 py-1.5 text-slate-800">{as.description || as.desc}</td>
+                              <td className="px-3 py-1.5 font-mono text-fg-muted">{as.type}</td>
+                              <td className="px-3 py-1.5 text-fg">{as.description || as.desc}</td>
                               <td className="px-3 py-1.5 text-rose-700">{as.message || '-'}</td>
                             </tr>
                           ))}
@@ -461,33 +621,33 @@ export function ResponsePanel({
                       </table>
                     </div>
                   )}
-                </div>
+                </section>
               </div>
             )}
 
             {subTab === 'actual' && (
               <div className="space-y-3">
-                <div className="p-3 rounded-lg border border-slate-200 bg-white space-y-2">
-                  <div className="flex items-center gap-2 font-mono font-semibold text-slate-900">
-                    <Send className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                <div className="p-3 rounded-lg border border-line bg-surface space-y-2">
+                  <div className="flex items-center gap-2 font-mono font-semibold text-fg">
+                    <Send className="w-3.5 h-3.5 text-tidal shrink-0" />
                     <span>{step.actual_request.method}</span>
                     <span className="break-all text-sky-800">{step.actual_request.url}</span>
                   </div>
-                  <div className="border-t border-slate-100 pt-2">
-                    <div className="text-slate-500 font-medium mb-1">实际请求头（变量与继承头均已展开）</div>
+                  <div className="border-t border-line pt-2">
+                    <div className="text-fg-subtle font-medium mb-1">请求头</div>
                     <div className="space-y-0.5 font-mono">
                       {(step.actual_request.headers || []).map((h, i) => (
                         <div key={i} className="flex gap-2">
-                          <span className="text-slate-500 shrink-0">{h.name}:</span>
-                          <span className="text-slate-800 break-all">{h.value}</span>
+                          <span className="text-fg-subtle shrink-0">{h.name}:</span>
+                          <span className="text-fg break-all">{h.value}</span>
                         </div>
                       ))}
                     </div>
                   </div>
                   {step.actual_request.body && (
-                    <div className="border-t border-slate-100 pt-2">
-                      <div className="text-slate-500 font-medium mb-1">实际请求体</div>
-                      <pre className="p-2.5 rounded bg-[#07192E] text-slate-100 font-mono overflow-auto tg-scroller-dark max-h-48 whitespace-pre-wrap break-all">
+                    <div className="border-t border-line pt-2">
+                      <div className="text-fg-subtle font-medium mb-1">请求体</div>
+                      <pre className="p-2.5 rounded-md border tg-code-surface tg-scroller-dark font-mono overflow-auto max-h-48 whitespace-pre-wrap break-all">
                         {step.actual_request.body}
                       </pre>
                     </div>
@@ -495,15 +655,20 @@ export function ResponsePanel({
                 </div>
 
                 {(step.redirects?.length || 0) > 0 && (
-                  <div className="p-3 rounded-lg border border-slate-200 bg-white">
-                    <div className="font-semibold text-slate-700 mb-1.5">重定向路径（{step.redirects!.length} 跳）</div>
+                  <div className="p-3 rounded-lg border border-line bg-surface">
+                    <div className="font-semibold text-fg mb-1.5 tg-tabular">重定向 · {step.redirects!.length} 跳</div>
                     <div className="space-y-1 font-mono text-[11px] tg-tabular">
                       {step.redirects!.map((hop, i) => (
-                        <div key={i} className="flex items-center gap-2 text-slate-600">
+                        <div key={i} className="flex items-center gap-2 text-fg-muted min-w-0">
                           <span className="px-1.5 py-0.5 rounded bg-slate-100">{hop.status}</span>
                           <span>{hop.method}</span>
                           <span className="truncate">{hop.url}</span>
-                          {hop.location && <span className="text-sky-700">-&gt; {hop.location}</span>}
+                          {hop.location && (
+                            <span className="inline-flex items-center gap-1 text-sky-700 min-w-0">
+                              <ArrowRight className="w-3 h-3 shrink-0" />
+                              <span className="truncate">{hop.location}</span>
+                            </span>
+                          )}
                           <span className="ml-auto shrink-0">{hop.duration_ms.toFixed(1)}ms</span>
                         </div>
                       ))}
@@ -514,19 +679,19 @@ export function ResponsePanel({
             )}
 
             {subTab === 'headers' && (
-              <div className="border border-slate-200 rounded-lg bg-white overflow-auto tg-scroller max-h-80">
+              <div className="border border-line rounded-lg bg-surface overflow-auto tg-scroller max-h-[64dvh]">
                 <table className="w-full text-left border-collapse font-mono">
-                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-500 sticky top-0">
+                  <thead className="bg-surface-subtle border-b border-line text-fg-subtle sticky top-0">
                     <tr>
-                      <th className="px-3 py-1.5 w-1/3">Header 名称</th>
-                      <th className="px-3 py-1.5">值</th>
+                      <th className="px-3 py-1.5 w-1/3 font-medium">名称</th>
+                      <th className="px-3 py-1.5 font-medium">值</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-[var(--tg-border)]">
                     {(step.response_headers || []).map((h, i) => (
                       <tr key={i}>
-                        <td className="px-3 py-1.5 text-slate-600 font-semibold">{h.name}</td>
-                        <td className="px-3 py-1.5 text-slate-900 break-all">{h.value}</td>
+                        <td className="px-3 py-1.5 text-fg-muted font-semibold">{h.name}</td>
+                        <td className="px-3 py-1.5 text-fg break-all">{h.value}</td>
                       </tr>
                     ))}
                   </tbody>

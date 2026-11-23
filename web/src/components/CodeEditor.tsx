@@ -1,4 +1,5 @@
 import { useMemo, useRef, type KeyboardEvent } from 'react'
+import { Plus } from 'lucide-react'
 
 export interface CodeSnippet {
   label: string
@@ -72,25 +73,26 @@ export function CodeEditor({
     <div className="space-y-1.5">
       {snippets.length > 0 && (
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="text-[11px] text-slate-500">常用片段：</span>
+          <span className="text-[11px] text-fg-subtle">片段</span>
           {snippets.map((s) => (
             <button
               key={s.label}
               type="button"
               disabled={disabled}
               onClick={() => insertSnippet(s.code)}
-              className="px-2 py-0.5 rounded border border-slate-200 bg-slate-50 hover:bg-sky-50 hover:border-sky-300 text-[11px] text-slate-700 font-medium transition-colors disabled:opacity-45"
+              className="inline-flex items-center gap-0.5 px-2 py-0.5 rounded border border-line bg-surface-subtle hover:bg-sky-50 hover:border-sky-300 text-[11px] text-fg font-medium transition-colors disabled:opacity-45"
             >
-              + {s.label}
+              <Plus className="w-3 h-3" aria-hidden="true" />
+              {s.label}
             </button>
           ))}
         </div>
       )}
 
-      <div className="flex rounded-lg border border-slate-300 bg-white overflow-hidden focus-within:border-sky-500 focus-within:ring-1 focus-within:ring-sky-500/30">
+      <div className="flex rounded-lg border border-line-strong bg-surface overflow-hidden focus-within:border-sky-500 focus-within:ring-1 focus-within:ring-sky-500/30">
         <div
           aria-hidden="true"
-          className="select-none bg-slate-50 border-r border-slate-200 px-2 py-2 text-right font-mono text-[11px] leading-[1.5rem] text-slate-400 min-w-[2.25rem]"
+          className="select-none bg-surface-subtle border-r border-line px-2 py-2 text-right font-mono text-[11px] leading-[1.5rem] text-fg-subtle tg-tabular min-w-[2.25rem]"
         >
           {lineNumbers.map((n) => (
             <div key={n}>{n}</div>
@@ -108,7 +110,7 @@ export function CodeEditor({
           onKeyDown={handleKeyDown}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
-          className="flex-1 min-w-0 px-2.5 py-2 font-mono text-xs leading-[1.5rem] bg-white text-slate-900 focus:outline-none resize-y"
+          className="flex-1 min-w-0 px-2.5 py-2 font-mono text-xs leading-[1.5rem] bg-surface text-fg focus:outline-none resize-y"
         />
       </div>
     </div>

@@ -45,8 +45,29 @@ type SecurityPolicy struct {
 	ScriptsDisabled    bool     `json:"scripts_disabled,omitempty"`
 	MCPDisabled        bool     `json:"mcp_disabled,omitempty"`
 	MCPDisableLoadRuns bool     `json:"mcp_disable_load_runs,omitempty"`
+	MCPDisabledTools   []string `json:"mcp_disabled_tools,omitempty"`
 	MCPMaxVUs          int      `json:"mcp_max_vus,omitempty"`
 	MCPMaxDurationSec  int      `json:"mcp_max_duration_sec,omitempty"`
+}
+
+// IsMCPToolDisabled reports whether the named MCP tool is globally blocked.
+func (p SecurityPolicy) IsMCPToolDisabled(name string) bool {
+	if p.MCPDisabled {
+		return true
+	}
+	n := strings.ToLower(strings.TrimSpace(name))
+	if n == "" {
+		return true
+	}
+	if p.MCPDisableLoadRuns && n == "manage_load_run" {
+		return true
+	}
+	for _, d := range p.MCPDisabledTools {
+		if strings.EqualFold(strings.TrimSpace(d), n) {
+			return true
+		}
+	}
+	return false
 }
 
 // EffectiveMCPMaxVUs returns the configured MCP VU cap or DefaultMCPMaxVUs.
@@ -112,6 +133,18 @@ func (c *Controller) SetSecurityPolicy(ctx context.Context, pol SecurityPolicy) 
 		cleaned = append(cleaned, p)
 	}
 	pol.AllowedTargets = cleaned
+
+	cleanedTools := make([]string, 0, len(pol.MCPDisabledTools))
+	seenTools := make(map[string]bool, len(pol.MCPDisabledTools))
+	for _, raw := range pol.MCPDisabledTools {
+		t := strings.ToLower(strings.TrimSpace(raw))
+		if t == "" || seenTools[t] {
+			continue
+		}
+		seenTools[t] = true
+		cleanedTools = append(cleanedTools, t)
+	}
+	pol.MCPDisabledTools = cleanedTools
 
 	b, err := json.Marshal(pol)
 	if err != nil {

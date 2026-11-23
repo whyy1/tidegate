@@ -14,7 +14,7 @@ interface Props {
 const sourceBadge: Record<ResolvedVariable['source'], { label: string; cls: string }> = {
   override: { label: '临时', cls: 'bg-amber-100 text-amber-800 border-amber-200' },
   environment: { label: '环境', cls: 'bg-sky-100 text-sky-800 border-sky-200' },
-  project: { label: '项目', cls: 'bg-slate-100 text-slate-700 border-slate-200' },
+  project: { label: '项目', cls: 'bg-surface-subtle text-fg-muted border-line' },
 }
 
 export function VariableInput({
@@ -110,7 +110,7 @@ export function VariableInput({
   }
 
   return (
-    <div className="relative flex-1 min-w-[240px]">
+    <div className="relative flex-1 min-w-0">
       <input
         ref={inputRef}
         type="text"
@@ -144,11 +144,10 @@ export function VariableInput({
         <div
           role="listbox"
           aria-label="变量模板自动补全"
-          className="absolute left-0 right-0 top-full mt-1 z-40 rounded-lg border border-slate-200 bg-white shadow-xl max-h-60 overflow-y-auto divide-y divide-slate-100"
+          className="absolute left-0 right-0 top-full mt-1 z-40 rounded-lg border border-line bg-surface shadow-xl max-h-60 overflow-y-auto tg-scroller divide-y divide-line"
         >
-          <div className="px-2.5 py-1 bg-slate-50 text-[10px] text-slate-500 flex items-center justify-between">
-            <span>可用变量补全（↑↓ 选择，Enter / Tab 插入，Esc 收起）</span>
-            <span className="font-mono">{candidates.length} 项</span>
+          <div className="px-2.5 py-1 bg-surface-subtle text-[10px] text-fg-subtle flex items-center justify-end">
+            <span className="tg-tabular">{candidates.length} 项</span>
           </div>
           {candidates.map((v, idx) => {
             const badge = sourceBadge[v.source] || sourceBadge.project
@@ -164,16 +163,16 @@ export function VariableInput({
                   applyCandidate(v.name)
                 }}
                 className={`w-full text-left px-2.5 py-1.5 flex items-center justify-between gap-2 text-xs transition-colors ${
-                  active ? 'bg-sky-50 text-sky-950' : 'hover:bg-slate-50 text-slate-700'
+                  active ? 'bg-sky-50 text-sky-900' : 'hover:bg-surface-hover text-fg'
                 }`}
               >
                 <div className="flex items-center gap-2 min-w-0">
                   <code className="font-mono font-semibold text-sky-700 truncate">{`{{${v.name}}}`}</code>
-                  <span className={`px-1.5 py-0.2 rounded border text-[10px] shrink-0 ${badge.cls}`}>
+                  <span className={`px-1.5 py-px rounded border text-[10px] shrink-0 ${badge.cls}`}>
                     {badge.label}
                   </span>
                 </div>
-                <span className="font-mono text-[11px] text-slate-500 truncate max-w-[220px]">
+                <span className="font-mono text-[11px] text-fg-subtle truncate max-w-[220px]">
                   {v.secret ? '******' : v.value || '（空值）'}
                 </span>
               </button>

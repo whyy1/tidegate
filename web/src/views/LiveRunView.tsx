@@ -4,10 +4,15 @@ import {
   Activity,
   AlertTriangle,
   BarChart3,
+  Check,
   CheckCircle2,
+  ChevronDown,
+  Copy,
   CopyCheck,
   Download,
+  FileCode2,
   Gauge,
+  ImageDown,
   Layers,
   OctagonAlert,
   Play,
@@ -15,16 +20,20 @@ import {
   Server,
   Square,
   Wrench,
+  X,
   XCircle,
 } from 'lucide-react'
 import { LoadConfigEditor } from '../components/LoadConfigEditor'
 import { UPlotChart, type AlertWindow } from '../components/UPlotChart'
 import { api, APIError, type StartRunPayload } from '../lib/api'
+import { copyText } from '../lib/download'
+import { exportRunReportPng, iterationsPerSecond } from '../lib/reportPng'
 import type {
   API,
   AgentView,
   Alert,
   Environment,
+  HeaderKV,
   LoadConfig,
   RunDetail,
   RunEstimate,
@@ -37,6 +46,28 @@ import type {
   TreeNode,
 } from '../lib/types'
 import { wsClient } from '../lib/ws'
+
+const MASKED_VALUE = '******'
+
+/** bash-style cURL for a captured sample; masked headers are dropped (they would replay as literal asterisks). */
+function sampleToCurl(sm: SampleView): string {
+  const q = (s: string) => `'${s.replace(/'/g, `'\\''`)}'`
+  const lines = [`curl -X ${sm.method || 'GET'} ${q(sm.url)}`]
+  for (const h of sm.request_headers || []) {
+    if (!h.name || h.value === MASKED_VALUE || /^content-length$/i.test(h.name)) continue
+    lines.push(`-H ${q(`${h.name}: ${h.value}`)}`)
+  }
+  if (sm.request_body) lines.push(`--data-raw ${q(sm.request_body)}`)
+  return lines.join(' \\\n  ')
+}
+
+type ExportFormat = 'csv' | 'json' | 'har' | 'jtl'
+const MORE_FORMATS: Array<{ fmt: ExportFormat; label: string }> = [
+  { fmt: 'csv', label: 'CSV 时序' },
+  { fmt: 'json', label: 'JSON 全量' },
+  { fmt: 'har', label: 'HAR 采样' },
+  { fmt: 'jtl', label: 'JTL' },
+]
 
 interface Props {
   projectId: string
@@ -178,6 +209,35 @@ export function LiveRunView({
   const [detailTab, setDetailTab] = useState<'steps' | 'distribution' | 'phases' | 'nodes' | 'thresholds' | 'samples'>('steps')
   const [targetInput, setTargetInput] = useState('10')
   const [updatingTarget, setUpdatingTarget] = useState(false)
+  const [confirmAbort, setConfirmAbort] = useState(false)
+  const [stopping, setStopping] = useState<'' | 'graceful' | 'abort'>('')
+  const [exportingPng, setExportingPng] = useState(false)
+  const [moreOpen, setMoreOpen] = useState(false)
+  const [copiedSampleId, setCopiedSampleId] = useState<number | null>(null)
+  const chartsRef = useRef<HTMLDivElement>(null)
+  const moreRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (!confirmAbort) return
+    const t = window.setTimeout(() => setConfirmAbort(false), 3000)
+    return () => window.clearTimeout(t)
+  }, [confirmAbort])
+
+  useEffect(() => {
+    if (!moreOpen) return
+    const onDown = (e: PointerEvent) => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) setMoreOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMoreOpen(false)
+    }
+    document.addEventListener('pointerdown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [moreOpen])
 
   const agentsRef = useRef(agents)
   agentsRef.current = agents
@@ -448,12 +508,16 @@ export function LiveRunView({
   }
 
   const handleSetTarget = async (nextTarget: number) => {
-    if (!run || nextTarget <= 0) return
+    if (!run) return
+    if (!Number.isFinite(nextTarget) || nextTarget <= 0) {
+      onToast('error', '目标值必须为正数')
+      return
+    }
     setUpdatingTarget(true)
     try {
       await api.setRunTarget(run.id, nextTarget)
       setTargetInput(String(nextTarget))
-      onToast('success', `已将运行目标调整为 ${nextTarget}`)
+      onToast('success', `运行目标已调整为 ${nextTarget} ${targetUnit}`)
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '动态调整目标失败')
     } finally {
@@ -461,13 +525,76 @@ export function LiveRunView({
     }
   }
 
+  const handleStop = async (mode: 'graceful' | 'abort') => {
+    if (!run) return
+    if (mode === 'abort' && !confirmAbort) {
+      setConfirmAbort(true)
+      return
+    }
+    setConfirmAbort(false)
+    setStopping(mode)
+    try {
+      await api.stopRun(run.id, mode)
+      onToast('info', mode === 'abort' ? '已发送中止指令' : '已发送停止指令，等待在途请求完成')
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : mode === 'abort' ? '中止压测失败' : '停止压测失败')
+    } finally {
+      setStopping('')
+    }
+  }
+
+  const handleExportPng = async () => {
+    if (!run) return
+    setExportingPng(true)
+    try {
+      await exportRunReportPng({
+        run,
+        summary: latest,
+        snapshots,
+        live: Boolean(isActive),
+        thresholds: run.thresholds,
+        alertCount: alerts.length,
+        chartRoot: chartsRef.current,
+      })
+    } catch (err) {
+      onToast('error', err instanceof Error ? err.message : '导出 PNG 失败')
+    } finally {
+      setExportingPng(false)
+    }
+  }
+
+  const handleCopyCurl = async (rec: SampleRecord) => {
+    const ok = await copyText(sampleToCurl(rec.data))
+    if (!ok) {
+      onToast('error', '复制失败，请检查浏览器剪贴板权限')
+      return
+    }
+    setCopiedSampleId(rec.id)
+    window.setTimeout(() => setCopiedSampleId((cur) => (cur === rec.id ? null : cur)), 1500)
+  }
+
   const isActive = run && (run.status === 'preparing' || run.status === 'running' || run.status === 'stopping')
   const latest = run?.summary || (snapshots.length > 0 ? snapshots[snapshots.length - 1] : null)
+  const latestTps = iterationsPerSecond(latest)
+  const loadMode = run?.scenario?.load?.mode
+  const targetUnit = loadMode === 'rate' ? 'QPS/RPS' : 'VU'
+  const liveTarget = (() => {
+    for (let i = snapshots.length - 1; i >= 0; i--) {
+      if (snapshots[i].target > 0) return snapshots[i].target
+    }
+    return Number(targetInput) || 0
+  })()
+  const stepTarget = (factor: number) => {
+    const base = liveTarget > 0 ? liveTarget : Number(targetInput) || 10
+    const next = base * factor
+    return loadMode === 'rate' && next < 10 ? Math.max(0.1, Number(next.toFixed(1))) : Math.max(1, Math.round(next))
+  }
 
   // Compute time-aligned chart arrays and alert interval windows in elapsed seconds.
   const chartModel = useMemo(() => {
     const xSec: number[] = []
     const rps: number[] = []
+    const tps: number[] = []
     const errRatePct: number[] = []
     const p50: number[] = []
     const p95: number[] = []
@@ -493,6 +620,7 @@ export function LiveRunView({
       }
       xSec.push(Number(elapsed.toFixed(1)))
       rps.push(s.rps || 0)
+      tps.push(Number(iterationsPerSecond(s).toFixed(2)))
       errRatePct.push(Number(((s.error_rate || 0) * 100).toFixed(2)))
       p50.push(s.latency?.p50_ms || 0)
       p95.push(s.latency?.p95_ms || 0)
@@ -516,7 +644,7 @@ export function LiveRunView({
         : []
 
     return {
-      rpsData: [xSec, rps, errRatePct] as uPlot.AlignedData,
+      rpsData: [xSec, rps, tps, errRatePct] as uPlot.AlignedData,
       latData: [xSec, p50, p95, p99] as uPlot.AlignedData,
       bwData: [xSec, appUpMbps, appDownMbps, nicTxMbps] as uPlot.AlignedData,
       vuData: [xSec, vus, conns] as uPlot.AlignedData,
@@ -527,9 +655,9 @@ export function LiveRunView({
   const filteredSamples = samples.filter((s) => sampleFilter === 'all' || s.kind === sampleFilter)
 
   return (
-    <div className="flex-1 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-4 space-y-4 text-xs">
+    <div className="flex-1 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-4 space-y-4 text-xs tg-tabular">
       {/* Top Launcher Card */}
-      <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+      <div className="bg-surface rounded-xl border border-slate-200 shadow-xs overflow-hidden">
         <div
           onClick={() => setShowLauncher((v) => !v)}
           className="px-4 py-2.5 tg-telemetry-strip flex items-center justify-between cursor-pointer"
@@ -548,7 +676,7 @@ export function LiveRunView({
                   type="button"
                   onClick={() => setSourceType('scenario')}
                   className={`px-3 py-1 rounded font-medium ${
-                    sourceType === 'scenario' ? 'bg-white shadow-xs text-sky-700' : 'text-slate-600'
+                    sourceType === 'scenario' ? 'bg-surface shadow-xs text-sky-700' : 'text-slate-600'
                   }`}
                 >
                   压测场景
@@ -567,7 +695,7 @@ export function LiveRunView({
                     }
                   }}
                   className={`px-3 py-1 rounded font-medium ${
-                    sourceType === 'mix' ? 'bg-white shadow-xs text-sky-700' : 'text-slate-600'
+                    sourceType === 'mix' ? 'bg-surface shadow-xs text-sky-700' : 'text-slate-600'
                   }`}
                 >
                   多场景混合 (Mix)
@@ -576,7 +704,7 @@ export function LiveRunView({
                   type="button"
                   onClick={() => setSourceType('api')}
                   className={`px-3 py-1 rounded font-medium ${
-                    sourceType === 'api' ? 'bg-white shadow-xs text-sky-700' : 'text-slate-600'
+                    sourceType === 'api' ? 'bg-surface shadow-xs text-sky-700' : 'text-slate-600'
                   }`}
                 >
                   单接口快速压测
@@ -598,7 +726,7 @@ export function LiveRunView({
                 <select
                   value={selectedScenarioId}
                   onChange={(e) => setSelectedScenarioId(e.target.value)}
-                  className="px-2.5 py-1.5 border border-slate-300 rounded-md bg-white min-w-[200px]"
+                  className="px-2.5 py-1.5 border border-slate-300 rounded-md bg-surface min-w-[200px]"
                 >
                   <option value="">选择场景...</option>
                   {scenarios.map((sc) => (
@@ -613,7 +741,7 @@ export function LiveRunView({
                 <select
                   value={selectedApiId}
                   onChange={(e) => setSelectedApiId(e.target.value)}
-                  className="px-2.5 py-1.5 border border-slate-300 rounded-md bg-white min-w-[220px]"
+                  className="px-2.5 py-1.5 border border-slate-300 rounded-md bg-surface min-w-[220px]"
                 >
                   <option value="">选择接口...</option>
                   {apis.map((a) => (
@@ -627,7 +755,7 @@ export function LiveRunView({
               <select
                 value={envOverrideId}
                 onChange={(e) => setEnvOverrideId(e.target.value)}
-                className="px-2.5 py-1.5 border border-slate-300 rounded-md bg-white"
+                className="px-2.5 py-1.5 border border-slate-300 rounded-md bg-surface"
               >
                 <option value="">环境：使用默认 / 无环境</option>
                 {environments.map((env) => (
@@ -682,7 +810,7 @@ export function LiveRunView({
                                   prev.map((row, j) => (j === idx ? { ...row, scenario_id: e.target.value } : row))
                                 )
                               }
-                              className="col-span-6 px-2 py-1 border border-slate-300 rounded bg-white"
+                              className="col-span-6 px-2 py-1 border border-slate-300 rounded bg-surface"
                             >
                               <option value="">选择场景...</option>
                               {scenarios.map((sc) => (
@@ -705,7 +833,7 @@ export function LiveRunView({
                                     )
                                   )
                                 }
-                                className="w-full px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                                className="w-full px-2 py-1 border border-slate-300 rounded font-mono bg-surface"
                               />
                             </div>
                             <span className="col-span-2 font-mono text-slate-600">
@@ -713,10 +841,12 @@ export function LiveRunView({
                             </span>
                             <button
                               type="button"
+                              aria-label="移除该场景"
+                              title="移除"
                               onClick={() => setMixItems((prev) => prev.filter((_, j) => j !== idx))}
-                              className="col-span-1 justify-self-end text-slate-400 hover:text-rose-600"
+                              className="col-span-1 justify-self-end p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50"
                             >
-                              ✕
+                              <X className="w-3.5 h-3.5" />
                             </button>
                           </div>
                         ))}
@@ -730,15 +860,20 @@ export function LiveRunView({
             {/* Distributed Scheduling & Failover */}
             <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
-                <label className="block font-medium text-slate-700 mb-1">
-                  目标节点标签筛选 (node_selector，逗号分隔 key=value)
+                <label htmlFor="run-node-selector" className="block font-medium text-slate-700 mb-1">
+                  节点标签筛选
                 </label>
                 <input
+                  id="run-node-selector"
                   type="text"
+                  name="node_selector"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
                   value={nodeSelectorText}
                   onChange={(e) => setNodeSelectorText(e.target.value)}
-                  placeholder="留空默认使用全部在线节点；例如 zone=cn-east,tier=perf"
-                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                  placeholder="全部在线节点 · zone=cn-east, tier=perf"
+                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-surface font-mono"
                 />
                 {(() => {
                   const pairs = new Set<string>()
@@ -766,7 +901,7 @@ export function LiveRunView({
                               return [...parts, kv].join(', ')
                             })
                           }
-                          className="px-1.5 py-0.5 rounded bg-white border border-slate-300 hover:border-sky-400 font-mono text-[10px] text-slate-700"
+                          className="px-1.5 py-0.5 rounded bg-surface border border-slate-300 hover:border-sky-400 font-mono text-[10px] text-slate-700"
                         >
                           +{kv}
                         </button>
@@ -776,14 +911,16 @@ export function LiveRunView({
                 })()}
               </div>
               <div>
-                <label className="block font-medium text-slate-700 mb-1">节点掉线容错策略 (node_failure_policy)</label>
+                <label htmlFor="run-node-failure" className="block font-medium text-slate-700 mb-1">节点掉线策略</label>
                 <select
+                  id="run-node-failure"
+                  name="node_failure_policy"
                   value={nodeFailurePolicy}
                   onChange={(e) => setNodeFailurePolicy(e.target.value as 'redistribute' | 'abort')}
-                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-surface"
                 >
-                  <option value="redistribute">掉线后自动重平衡剩余节点承担负载 (redistribute)</option>
-                  <option value="abort">任意参与发压节点掉线立即中止运行 (abort)</option>
+                  <option value="redistribute">自动重平衡到剩余节点</option>
+                  <option value="abort">任一节点掉线即中止</option>
                 </select>
               </div>
             </div>
@@ -796,7 +933,7 @@ export function LiveRunView({
               <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-3 space-y-2">
                 <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 font-mono">
                   <div>
-                    <div className="text-[11px] text-slate-500">预估峰值 RPS</div>
+                    <div className="text-[11px] text-slate-500">预估峰值 QPS / RPS</div>
                     <div className="font-bold text-slate-900">{estimate.estimated_peak_rps} req/s</div>
                   </div>
                   <div>
@@ -839,7 +976,7 @@ export function LiveRunView({
                 type="button"
                 disabled={estimating}
                 onClick={() => void handleEstimate()}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-medium disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-surface hover:bg-slate-50 text-slate-700 font-medium disabled:opacity-50"
               >
                 <Gauge className="w-3.5 h-3.5 text-sky-600" />
                 {estimating ? '计算中...' : '开压前带宽预估'}
@@ -848,7 +985,7 @@ export function LiveRunView({
                 type="button"
                 disabled={!canWrite || starting || Boolean(isActive)}
                 onClick={() => void handleStart()}
-                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#0B2A4A] hover:bg-[#123d69] text-white font-semibold disabled:opacity-45"
+                className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary hover:bg-primary-hover text-white font-semibold disabled:opacity-45"
               >
                 <Play className="w-3.5 h-3.5 fill-current" />
                 {starting ? '正在调度节点...' : isActive ? '已有任务运行中' : '立即启动压测'}
@@ -861,110 +998,171 @@ export function LiveRunView({
       {/* Active / Inspected Run Dashboard */}
       {run && (
         <div className="space-y-4">
-          <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
-            <div className="space-y-0.5">
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-slate-900">{run.scenario_name}</h2>
-                <span className={`px-2 py-0.5 rounded-full text-[11px] font-semibold ${statusBadge(run.status).cls}`}>
+          <div className="bg-surface rounded-xl border border-line p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+            <div className="space-y-0.5 min-w-0">
+              <div className="flex items-center gap-2 min-w-0">
+                <h2 className="text-base font-bold text-fg truncate">{run.scenario_name}</h2>
+                <span className={`shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold ${statusBadge(run.status).cls}`}>
                   {statusBadge(run.status).text}
                 </span>
+                {loadMode && (
+                  <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium border border-line text-fg-muted">
+                    {loadMode === 'rate' ? 'QPS 模式' : 'VU 模式'}
+                  </span>
+                )}
               </div>
-              <div className="text-[11px] font-mono text-slate-500">
+              <div className="text-[11px] font-mono tg-tabular text-fg-subtle">
                 Run ID: {run.id} · 创建于 {new Date(run.created_at).toLocaleString()}
                 {run.error && <span className="text-rose-700 ml-2">· {run.error}</span>}
               </div>
             </div>
 
             <div className="flex flex-wrap items-center gap-2">
-              {isActive ? (
+              {isActive && (
                 <>
-                  <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-lg border border-slate-200">
-                    <span className="text-slate-600 px-1.5">在线调压：</span>
+                  <form
+                    onSubmit={(e) => {
+                      e.preventDefault()
+                      void handleSetTarget(Number(targetInput))
+                    }}
+                    className="flex items-center gap-1 bg-surface-subtle p-1 rounded-lg border border-line"
+                  >
+                    <span className="text-fg-muted px-1.5">在线调压</span>
                     <button
                       type="button"
                       disabled={!canWrite || updatingTarget}
-                      onClick={() => void handleSetTarget(Math.max(1, Math.round(Number(targetInput || 10) * 0.8)))}
-                      className="px-2 py-1 rounded bg-white border border-slate-300 hover:bg-slate-50 font-mono disabled:opacity-45"
+                      onClick={() => void handleSetTarget(stepTarget(0.8))}
+                      title={`${liveTarget} → ${stepTarget(0.8)} ${targetUnit}`}
+                      className="px-2 py-1 rounded bg-surface border border-line-strong hover:bg-surface-hover font-mono tg-tabular disabled:opacity-45"
                     >
                       -20%
                     </button>
-                    <input
-                      type="number"
-                      min={1}
-                      disabled={!canWrite}
-                      value={targetInput}
-                      onChange={(e) => setTargetInput(e.target.value)}
-                      className="w-20 px-2 py-1 border border-slate-300 rounded font-mono bg-white disabled:opacity-50"
-                    />
+                    <label className="flex items-center gap-1 px-1 rounded border border-line-strong bg-surface focus-within:border-sky-500">
+                      <input
+                        type="number"
+                        name="run_target"
+                        aria-label={`运行目标 (${targetUnit})`}
+                        min={loadMode === 'rate' ? 0.1 : 1}
+                        step={loadMode === 'rate' ? 'any' : 1}
+                        disabled={!canWrite}
+                        value={targetInput}
+                        onChange={(e) => setTargetInput(e.target.value)}
+                        className="w-20 py-1 pl-1 font-mono tg-tabular bg-transparent outline-none disabled:opacity-50"
+                      />
+                      <span className="text-[11px] text-fg-subtle font-medium pr-0.5">{targetUnit}</span>
+                    </label>
                     <button
-                      type="button"
+                      type="submit"
                       disabled={!canWrite || updatingTarget}
-                      onClick={() => void handleSetTarget(Number(targetInput))}
-                      className="px-2.5 py-1 rounded bg-sky-600 text-white font-medium hover:bg-sky-700 disabled:opacity-45"
+                      className="px-2.5 py-1 rounded bg-sky-600 text-white font-medium hover:bg-sky-solid disabled:opacity-45"
                     >
-                      应用
+                      {updatingTarget ? '应用中' : '应用'}
                     </button>
                     <button
                       type="button"
                       disabled={!canWrite || updatingTarget}
-                      onClick={() => void handleSetTarget(Math.max(1, Math.round(Number(targetInput || 10) * 1.2)))}
-                      className="px-2 py-1 rounded bg-white border border-slate-300 hover:bg-slate-50 font-mono disabled:opacity-45"
+                      onClick={() => void handleSetTarget(stepTarget(1.2))}
+                      title={`${liveTarget} → ${stepTarget(1.2)} ${targetUnit}`}
+                      className="px-2 py-1 rounded bg-surface border border-line-strong hover:bg-surface-hover font-mono tg-tabular disabled:opacity-45"
                     >
                       +20%
                     </button>
-                  </div>
+                    {liveTarget > 0 && (
+                      <span className="px-1.5 text-[11px] font-mono tg-tabular text-fg-subtle" title="当前实时目标">
+                        当前 {liveTarget}
+                      </span>
+                    )}
+                  </form>
 
                   <button
                     type="button"
-                    disabled={!canWrite}
-                    onClick={() => void api.stopRun(run.id, 'graceful').catch(() => undefined)}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold disabled:opacity-45"
+                    disabled={!canWrite || stopping !== '' || run.status === 'stopping'}
+                    onClick={() => void handleStop('graceful')}
+                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold disabled:opacity-45"
                   >
-                    <Square className="w-3.5 h-3.5" /> 优雅停止
+                    <Square className="w-3.5 h-3.5" /> {stopping === 'graceful' ? '停止中' : '优雅停止'}
                   </button>
                   <button
                     type="button"
-                    disabled={!canWrite}
-                    onClick={() => void api.stopRun(run.id, 'abort').catch(() => undefined)}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-700 text-white font-semibold disabled:opacity-45"
+                    disabled={!canWrite || stopping !== ''}
+                    onClick={() => void handleStop('abort')}
+                    onBlur={() => setConfirmAbort(false)}
+                    className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-lg font-semibold text-white disabled:opacity-45 ${
+                      confirmAbort ? 'bg-rose-600 hover:bg-rose-solid ring-2 ring-rose-300' : 'bg-rose-600 hover:bg-rose-solid'
+                    }`}
                   >
-                    <OctagonAlert className="w-3.5 h-3.5" /> 立即中止
+                    <OctagonAlert className="w-3.5 h-3.5" /> {confirmAbort ? '确认中止？' : '立即中止'}
                   </button>
                 </>
-              ) : (
-                <div className="flex flex-wrap items-center gap-1.5">
+              )}
+
+              <div className="flex flex-wrap items-center gap-1.5">
+                {!isActive && (
                   <button
                     type="button"
                     onClick={() => void hydrateRun(run.id)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700"
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted"
                   >
                     <RefreshCw className="w-3.5 h-3.5" /> 刷新
                   </button>
-                  {(
-                    [
-                      { fmt: 'html' as const, label: '导出 HTML 报告' },
-                      { fmt: 'csv' as const, label: 'CSV' },
-                      { fmt: 'json' as const, label: 'JSON' },
-                      { fmt: 'har' as const, label: '错误采样 HAR' },
-                      { fmt: 'jtl' as const, label: 'JTL' },
-                    ] as const
-                  ).map((ex) => (
+                )}
+                <button
+                  type="button"
+                  disabled={exportingPng || !latest}
+                  onClick={() => void handleExportPng()}
+                  title={isActive ? '导出当前时刻的快照报告' : '导出完整报告长图'}
+                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-line-strong bg-surface hover:bg-surface-hover text-fg disabled:opacity-45"
+                >
+                  <ImageDown className="w-3.5 h-3.5 text-sky-600" /> {exportingPng ? '生成中' : '导出 PNG'}
+                </button>
+                {!isActive && (
+                  <>
                     <a
-                      key={ex.fmt}
-                      href={api.exportRunURL(run.id, ex.fmt)}
+                      href={api.exportRunURL(run.id, 'html')}
                       download
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700"
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-line-strong bg-surface hover:bg-surface-hover text-fg"
                     >
-                      <Download className="w-3.5 h-3.5 text-sky-600" /> {ex.label}
+                      <FileCode2 className="w-3.5 h-3.5 text-sky-600" /> 导出 HTML
                     </a>
-                  ))}
-                </div>
-              )}
+                    <div ref={moreRef} className="relative">
+                      <button
+                        type="button"
+                        aria-haspopup="menu"
+                        aria-expanded={moreOpen}
+                        onClick={() => setMoreOpen((v) => !v)}
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted"
+                      >
+                        <Download className="w-3.5 h-3.5" /> 更多格式
+                        <ChevronDown className={`w-3 h-3 transition-transform ${moreOpen ? 'rotate-180' : ''}`} />
+                      </button>
+                      {moreOpen && (
+                        <div
+                          role="menu"
+                          className="absolute right-0 top-full mt-1 z-30 min-w-36 py-1 rounded-lg border border-line bg-surface shadow-lg"
+                        >
+                          {MORE_FORMATS.map((ex) => (
+                            <a
+                              key={ex.fmt}
+                              role="menuitem"
+                              href={api.exportRunURL(run.id, ex.fmt)}
+                              download
+                              onClick={() => setMoreOpen(false)}
+                              className="flex items-center gap-2 px-3 py-1.5 text-fg hover:bg-surface-hover"
+                            >
+                              <Download className="w-3.5 h-3.5 text-fg-subtle" /> {ex.label}
+                            </a>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                )}
+              </div>
             </div>
           </div>
 
           {alerts.length > 0 && (
-            <div className="rounded-xl border border-amber-400 bg-amber-50 px-4 py-3 text-amber-950 space-y-1.5">
+            <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-950 space-y-1.5">
               <div className="font-semibold flex items-center gap-2 text-sm">
                 <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
                 <span>发压机或阈值在本次压测期间触发告警，当前结果可能低估被测服务真实能力</span>
@@ -987,31 +1185,54 @@ export function LiveRunView({
           {/* 6 KPI Cards */}
           {latest && (
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-              <KPICard label="吞吐量 RPS" value={`${(latest.rps || 0).toFixed(1)} /s`} sub={`总请求 ${latest.requests}`} />
+              <KPICard
+                label="QPS / RPS"
+                value={`${(latest.rps || 0).toFixed(1)} /s`}
+                sub={`请求 ${latest.requests.toLocaleString()}`}
+                accent
+              />
+              <KPICard
+                label="TPS"
+                value={`${latestTps.toFixed(2)} /s`}
+                sub={
+                  latest.dropped_iterations > 0
+                    ? `迭代 ${(latest.iterations || 0).toLocaleString()} · 丢弃 ${latest.dropped_iterations.toLocaleString()}`
+                    : `迭代 ${(latest.iterations || 0).toLocaleString()}`
+                }
+                warn={latest.dropped_iterations > 0}
+              />
               <KPICard
                 label="错误率"
                 value={`${((latest.error_rate || 0) * 100).toFixed(2)}%`}
-                sub={`失败 ${latest.errors} 次`}
+                sub={`失败 ${latest.errors.toLocaleString()}`}
                 danger={(latest.error_rate || 0) > 0.01}
               />
-              <KPICard label="P50 / P95" value={`${(latest.latency?.p50_ms || 0).toFixed(1)} / ${(latest.latency?.p95_ms || 0).toFixed(1)} ms`} sub="响应延迟" />
-              <KPICard label="P99 / Max" value={`${(latest.latency?.p99_ms || 0).toFixed(1)} / ${(latest.latency?.max_ms || 0).toFixed(1)} ms`} sub="长尾延迟" />
-              <KPICard label="并发 / 连接" value={`${latest.active_vus} VU`} sub={`活跃连接 ${latest.active_conns}`} />
               <KPICard
-                label="上行 / 下行流量"
-                value={`${((latest.sent_bps || 0) / 1e6).toFixed(2)} Mbps`}
-                sub={`下行 ${((latest.received_bps || 0) / 1e6).toFixed(2)} Mbps`}
+                label="P95 / P99"
+                value={`${(latest.latency?.p95_ms || 0).toFixed(1)} / ${(latest.latency?.p99_ms || 0).toFixed(1)}`}
+                sub={`ms · P50 ${(latest.latency?.p50_ms || 0).toFixed(1)} · Max ${(latest.latency?.max_ms || 0).toFixed(1)}`}
+              />
+              <KPICard
+                label="并发 VU / 连接"
+                value={`${latest.active_vus} / ${latest.active_conns}`}
+                sub={liveTarget > 0 ? `目标 ${liveTarget} ${targetUnit}` : '活跃连接'}
+              />
+              <KPICard
+                label="上行 / 下行"
+                value={`${((latest.sent_bps || 0) / 1e6).toFixed(2)} / ${((latest.received_bps || 0) / 1e6).toFixed(2)}`}
+                sub="Mbps"
               />
             </div>
           )}
 
           {/* 4 uPlot Charts */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div ref={chartsRef} className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <UPlotChart
-              title="吞吐量与错误率走势"
+              title="QPS / RPS · TPS 与错误率走势"
               data={chartModel.rpsData}
               series={[
-                { label: 'RPS', stroke: '#0284c7', fill: 'rgba(2, 132, 199, 0.08)' },
+                { label: 'QPS / RPS', stroke: '#0284c7', fill: 'rgba(2, 132, 199, 0.08)' },
+                { label: 'TPS', stroke: '#8b5cf6' },
                 { label: '错误率 (%)', stroke: '#e11d48' },
               ]}
               alertWindows={chartModel.alertWindows}
@@ -1042,7 +1263,7 @@ export function LiveRunView({
               title="活跃虚拟用户数与连接数"
               data={chartModel.vuData}
               series={[
-                { label: '活跃 VU', stroke: '#0f766e' },
+                { label: '活跃 VU', stroke: '#14b8a6' },
                 { label: '活跃连接', stroke: '#64748b' },
               ]}
               alertWindows={chartModel.alertWindows}
@@ -1050,14 +1271,14 @@ export function LiveRunView({
           </div>
 
           {/* Bottom Diagnostic Panel */}
-          <div className="bg-white rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+          <div className="bg-surface rounded-xl border border-slate-200 shadow-xs overflow-hidden">
             <div className="px-4 py-2 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2">
               <div className="flex flex-wrap items-center gap-1 font-medium">
                 <button
                   type="button"
                   onClick={() => setDetailTab('steps')}
                   className={`px-3 py-1 rounded ${
-                    detailTab === 'steps' ? 'bg-white shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
+                    detailTab === 'steps' ? 'bg-surface shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
                   }`}
                 >
                   <Activity className="w-3.5 h-3.5 inline mr-1" /> 按步骤统计 ({latest?.steps?.length || 0})
@@ -1069,7 +1290,7 @@ export function LiveRunView({
                     if (run) void loadHistogram(run.id)
                   }}
                   className={`px-3 py-1 rounded ${
-                    detailTab === 'distribution' ? 'bg-white shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
+                    detailTab === 'distribution' ? 'bg-surface shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
                   }`}
                 >
                   <BarChart3 className="w-3.5 h-3.5 inline mr-1" /> 延迟分布与热力图
@@ -1078,7 +1299,7 @@ export function LiveRunView({
                   type="button"
                   onClick={() => setDetailTab('phases')}
                   className={`px-3 py-1 rounded ${
-                    detailTab === 'phases' ? 'bg-white shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
+                    detailTab === 'phases' ? 'bg-surface shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
                   }`}
                 >
                   <Layers className="w-3.5 h-3.5 inline mr-1" /> 五段耗时分解
@@ -1087,7 +1308,7 @@ export function LiveRunView({
                   type="button"
                   onClick={() => setDetailTab('nodes')}
                   className={`px-3 py-1 rounded ${
-                    detailTab === 'nodes' ? 'bg-white shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
+                    detailTab === 'nodes' ? 'bg-surface shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
                   }`}
                 >
                   <Server className="w-3.5 h-3.5 inline mr-1" /> 分节点指标 ({latest?.nodes?.length || 0})
@@ -1096,7 +1317,7 @@ export function LiveRunView({
                   type="button"
                   onClick={() => setDetailTab('thresholds')}
                   className={`px-3 py-1 rounded ${
-                    detailTab === 'thresholds' ? 'bg-white shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
+                    detailTab === 'thresholds' ? 'bg-surface shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
                   }`}
                 >
                   <CopyCheck className="w-3.5 h-3.5 inline mr-1" /> 阈值校验 ({run.thresholds?.length || 0})
@@ -1105,7 +1326,7 @@ export function LiveRunView({
                   type="button"
                   onClick={() => setDetailTab('samples')}
                   className={`px-3 py-1 rounded ${
-                    detailTab === 'samples' ? 'bg-white shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
+                    detailTab === 'samples' ? 'bg-surface shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
                   }`}
                 >
                   <Wrench className="w-3.5 h-3.5 inline mr-1" /> 错误与慢请求采样 ({samples.length})
@@ -1120,38 +1341,62 @@ export function LiveRunView({
                     <p className="text-slate-400">暂无步骤统计数据。</p>
                   ) : (
                     <table className="w-full text-left border-collapse">
-                      <thead className="bg-slate-50 border-b border-slate-200 text-slate-500">
+                      <thead className="bg-surface-subtle border-b border-line text-fg-subtle">
                         <tr>
                           <th className="px-3 py-1.5">步骤</th>
-                          <th className="px-3 py-1.5">请求数</th>
-                          <th className="px-3 py-1.5">RPS</th>
-                          <th className="px-3 py-1.5">错误率</th>
-                          <th className="px-3 py-1.5">P50 (ms)</th>
-                          <th className="px-3 py-1.5">P95 (ms)</th>
-                          <th className="px-3 py-1.5">P99 (ms)</th>
+                          <th className="px-3 py-1.5 text-right">请求数</th>
+                          <th className="px-3 py-1.5 text-right">QPS / RPS</th>
+                          <th className="px-3 py-1.5 text-right">错误率</th>
+                          <th className="px-3 py-1.5 text-right">P50 (ms)</th>
+                          <th className="px-3 py-1.5 text-right">P95 (ms)</th>
+                          <th className="px-3 py-1.5 text-right">P99 (ms)</th>
+                          <th className="px-3 py-1.5 text-right">Max (ms)</th>
                           <th className="px-3 py-1.5">状态码</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-100 font-mono">
+                      <tbody className="divide-y divide-slate-100 font-mono tg-tabular">
+                        <tr className="bg-surface-subtle">
+                          <td className="px-3 py-1.5 font-sans font-semibold text-fg">
+                            场景迭代
+                            <span className="ml-1.5 px-1.5 py-px rounded bg-violet-100 text-violet-800 text-[10px] font-medium">TPS</span>
+                            {latest.dropped_iterations > 0 && (
+                              <span
+                                className="ml-1.5 inline-flex items-center gap-0.5 px-1.5 py-px rounded bg-amber-100 text-amber-800 text-[10px] font-medium"
+                                title="开放模型下因无空闲 VU 被丢弃的迭代"
+                              >
+                                <AlertTriangle className="w-3 h-3" /> 丢弃 {latest.dropped_iterations.toLocaleString()}
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-3 py-1.5 text-right">{(latest.iterations || 0).toLocaleString()}</td>
+                          <td className="px-3 py-1.5 text-right font-semibold text-violet-700">{latestTps.toFixed(2)} TPS</td>
+                          <td className="px-3 py-1.5 text-right text-fg-subtle" colSpan={6}>
+                            {latest.duration_ms > 0 ? `统计窗口 ${(latest.duration_ms / 1000).toFixed(1)}s` : ''}
+                          </td>
+                        </tr>
                         {latest.steps.map((st, idx) => (
                           <tr key={idx}>
-                            <td className="px-3 py-1.5 font-sans font-semibold text-slate-800">
+                            <td className="px-3 py-1.5 font-sans font-semibold text-fg">
                               <span>{st.name || st.id}</span>
                               {st.is_group && (
-                                <span className="ml-1.5 px-1.5 py-0.2 rounded bg-sky-100 text-sky-800 text-[10px] font-medium">
+                                <span className="ml-1.5 px-1.5 py-px rounded bg-sky-100 text-sky-800 text-[10px] font-medium">
                                   事务组
                                 </span>
                               )}
                             </td>
-                            <td className="px-3 py-1.5">{st.requests}</td>
-                            <td className="px-3 py-1.5">{st.rps.toFixed(1)}</td>
-                            <td className={`px-3 py-1.5 ${st.error_rate > 0 ? 'text-rose-700 font-semibold' : ''}`}>
+                            <td className="px-3 py-1.5 text-right">{st.requests.toLocaleString()}</td>
+                            <td className={`px-3 py-1.5 text-right ${st.is_group ? 'font-semibold text-sky-700' : ''}`}>
+                              {st.rps.toFixed(1)}
+                              {st.is_group && <span className="ml-1 text-[10px] font-sans font-medium">TPS</span>}
+                            </td>
+                            <td className={`px-3 py-1.5 text-right ${st.error_rate > 0 ? 'text-rose-700 font-semibold' : ''}`}>
                               {(st.error_rate * 100).toFixed(2)}%
                             </td>
-                            <td className="px-3 py-1.5">{st.latency.p50_ms.toFixed(2)}</td>
-                            <td className="px-3 py-1.5">{st.latency.p95_ms.toFixed(2)}</td>
-                            <td className="px-3 py-1.5">{st.latency.p99_ms.toFixed(2)}</td>
-                            <td className="px-3 py-1.5 text-[11px] text-slate-600">
+                            <td className="px-3 py-1.5 text-right">{st.latency.p50_ms.toFixed(2)}</td>
+                            <td className="px-3 py-1.5 text-right">{st.latency.p95_ms.toFixed(2)}</td>
+                            <td className="px-3 py-1.5 text-right">{st.latency.p99_ms.toFixed(2)}</td>
+                            <td className="px-3 py-1.5 text-right">{st.latency.max_ms.toFixed(2)}</td>
+                            <td className="px-3 py-1.5 text-[11px] text-fg-muted">
                               {st.status
                                 ? Object.entries(st.status)
                                     .map(([code, cnt]) => `${code}×${cnt}`)
@@ -1230,29 +1475,45 @@ export function LiveRunView({
                     ))}
                   </div>
                   {filteredSamples.length === 0 ? (
-                    <p className="text-slate-400">当前筛选条件下暂无异常采样。</p>
+                    <p className="text-fg-subtle">当前筛选条件下暂无异常采样。</p>
                   ) : (
-                    <div className="space-y-2 max-h-96 overflow-y-auto">
+                    <div className="space-y-2 max-h-[32rem] overflow-y-auto tg-scroller">
                       {filteredSamples.map((rec) => {
                         const sm = rec.data
+                        const copied = copiedSampleId === rec.id
                         return (
-                          <details key={rec.id} className="border border-slate-200 rounded-lg bg-slate-50/50">
-                            <summary className="px-3 py-2 cursor-pointer flex flex-wrap items-center justify-between gap-2 hover:bg-slate-100">
-                              <div className="font-mono flex items-center gap-2">
+                          <details key={rec.id} className="group border border-line rounded-lg bg-surface-subtle">
+                            <summary className="px-3 py-2 cursor-pointer flex flex-wrap items-center justify-between gap-2 hover:bg-surface-hover rounded-lg">
+                              <div className="font-mono flex items-center gap-2 min-w-0">
                                 <span
-                                  className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                  className={`shrink-0 px-1.5 py-0.5 rounded text-[10px] font-bold ${
                                     sm.kind === 'error' ? 'bg-rose-100 text-rose-800' : 'bg-amber-100 text-amber-800'
                                   }`}
                                 >
                                   {sm.kind}
                                 </span>
-                                <span className="font-semibold">{sm.method}</span>
-                                <span className="text-slate-700 truncate max-w-md">{sm.url}</span>
+                                <span className="font-semibold shrink-0">{sm.method}</span>
+                                <span className="text-fg-muted truncate max-w-md">{sm.url}</span>
                               </div>
-                              <div className="flex items-center gap-2 font-mono">
-                                <span>HTTP {sm.status || 'ERR'}</span>
-                                <span>{sm.duration_ms}ms</span>
+                              <div className="flex items-center gap-2 font-mono tg-tabular">
+                                <span className={sm.status && sm.status < 400 ? 'text-fg-muted' : 'text-rose-700 font-semibold'}>
+                                  HTTP {sm.status || 'ERR'}
+                                </span>
+                                <span>{Number(sm.duration_ms || 0).toFixed(1)}ms</span>
                                 {sm.error && <span className="text-rose-700 max-w-xs truncate">{sm.error}</span>}
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.preventDefault()
+                                    e.stopPropagation()
+                                    void handleCopyCurl(rec)
+                                  }}
+                                  title="复制为 bash cURL（不含脱敏头）"
+                                  className="ml-1 inline-flex items-center gap-1 px-2 py-0.5 rounded border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted font-sans font-medium"
+                                >
+                                  {copied ? <Check className="w-3 h-3 text-emerald-600" /> : <Copy className="w-3 h-3" />}
+                                  {copied ? '已复制' : '复制 cURL'}
+                                </button>
                                 <button
                                   type="button"
                                   onClick={(e) => {
@@ -1260,24 +1521,34 @@ export function LiveRunView({
                                     e.stopPropagation()
                                     onReplaySample(sm)
                                   }}
-                                  className="ml-2 px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-700 text-white font-sans font-medium"
+                                  className="px-2 py-0.5 rounded bg-sky-600 hover:bg-sky-solid text-white font-sans font-medium"
                                 >
                                   在工作台复现
                                 </button>
                               </div>
                             </summary>
-                            <div className="p-3 border-t border-slate-200 bg-white space-y-2">
+                            <div className="p-3 border-t border-line bg-surface rounded-b-lg space-y-3">
+                              <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+                                <HeaderTable title="请求 Headers" headers={sm.request_headers} />
+                                <HeaderTable title="响应 Headers" headers={sm.response_headers} />
+                              </div>
                               {sm.request_body && (
                                 <div>
-                                  <div className="font-semibold text-slate-600 mb-1">采样请求体（已捕获用于复现）</div>
-                                  <pre className="p-2 rounded bg-slate-900 text-sky-100 font-mono overflow-auto max-h-36 whitespace-pre-wrap">
+                                  <div className="font-semibold text-fg-muted mb-1">
+                                    请求体
+                                    {sm.request_body_truncated && <span className="ml-1.5 text-[11px] font-normal text-amber-700">已截断</span>}
+                                  </div>
+                                  <pre className="p-2 rounded tg-code-surface font-mono overflow-auto max-h-36 whitespace-pre-wrap break-all">
                                     {sm.request_body}
                                   </pre>
                                 </div>
                               )}
                               <div>
-                                <div className="font-semibold text-slate-600 mb-1">响应体片段</div>
-                                <pre className="p-2 rounded bg-slate-900 text-slate-100 font-mono overflow-auto max-h-40 whitespace-pre-wrap">
+                                <div className="font-semibold text-fg-muted mb-1">
+                                  响应体
+                                  {sm.body_truncated && <span className="ml-1.5 text-[11px] font-normal text-amber-700">已截断</span>}
+                                </div>
+                                <pre className="p-2 rounded tg-code-surface font-mono overflow-auto max-h-40 whitespace-pre-wrap break-all">
                                   {sm.body || '(空)'}
                                 </pre>
                               </div>
@@ -1297,14 +1568,60 @@ export function LiveRunView({
   )
 }
 
-function KPICard({ label, value, sub, danger }: { label: string; value: string; sub: string; danger?: boolean }) {
+function KPICard({
+  label,
+  value,
+  sub,
+  danger,
+  warn,
+  accent,
+}: {
+  label: string
+  value: string
+  sub: string
+  danger?: boolean
+  warn?: boolean
+  accent?: boolean
+}) {
+  const bar = danger ? 'bg-rose-500' : warn ? 'bg-amber-500' : accent ? 'bg-sky-500' : ''
   return (
-    <div className="bg-white rounded-xl border border-slate-200 p-3 shadow-xs">
-      <div className="text-[11px] text-slate-500">{label}</div>
-      <div className={`text-base font-bold font-mono mt-0.5 ${danger ? 'text-rose-600' : 'text-slate-900'}`}>
+    <div className="relative bg-surface rounded-xl border border-line p-3 shadow-xs overflow-hidden min-w-0">
+      {bar && <span className={`absolute left-0 top-3 bottom-3 w-0.5 rounded-r ${bar}`} />}
+      <div className="text-[11px] font-medium text-fg-subtle">{label}</div>
+      <div className={`text-base font-bold font-mono tg-tabular mt-0.5 truncate ${danger ? 'text-rose-600' : 'text-fg'}`}>
         {value}
       </div>
-      <div className="text-[11px] text-slate-400 font-mono mt-0.5">{sub}</div>
+      <div className={`text-[11px] font-mono tg-tabular mt-0.5 truncate ${warn ? 'text-amber-700 font-semibold' : 'text-fg-subtle'}`}>
+        {sub}
+      </div>
+    </div>
+  )
+}
+
+function HeaderTable({ title, headers }: { title: string; headers?: HeaderKV[] }) {
+  return (
+    <div className="min-w-0">
+      <div className="font-semibold text-fg-muted mb-1">
+        {title} <span className="font-mono tg-tabular text-fg-subtle font-normal">{headers?.length || 0}</span>
+      </div>
+      {!headers?.length ? (
+        <p className="text-fg-subtle text-[11px]">未捕获</p>
+      ) : (
+        <div className="rounded border border-line overflow-auto max-h-48 tg-scroller">
+          <table className="w-full border-collapse font-mono text-[11px]">
+            <tbody className="divide-y divide-slate-100">
+              {headers.map((h, i) => (
+                <tr key={`${h.name}-${i}`} className="align-top">
+                  <td className="px-2 py-1 text-fg-muted whitespace-nowrap">{h.name}</td>
+                  <td className={`px-2 py-1 break-all ${h.value === MASKED_VALUE ? 'text-fg-subtle italic' : 'text-fg'}`}>
+                    {h.value}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
     </div>
   )
 }
@@ -1359,7 +1676,7 @@ function LatencyDistributionPanel({
           <select
             value={histStepId}
             onChange={(e) => onChangeStepId(e.target.value)}
-            className="px-2.5 py-1 border border-slate-300 rounded bg-white text-xs"
+            className="px-2.5 py-1 border border-slate-300 rounded bg-surface text-xs"
           >
             <option value="">全局聚合直方图</option>
             {(histogram?.steps || []).map((st) => (
@@ -1378,7 +1695,7 @@ function LatencyDistributionPanel({
         <button
           type="button"
           onClick={onRefresh}
-          className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700"
+          className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-surface hover:bg-slate-50 text-slate-700"
         >
           <RefreshCw className="w-3 h-3" /> 刷新分布
         </button>
@@ -1453,7 +1770,7 @@ function LatencyDistributionPanel({
                         const intensity = cnt > 0 ? Math.min(1, Math.log1p(cnt) / Math.log1p(maxHeatCell)) : 0
                         const bg =
                           cnt === 0
-                            ? '#f1f5f9'
+                            ? 'var(--tg-surface-hover)'
                             : bandIdx >= 9
                               ? `rgba(225, 29, 72, ${0.22 + intensity * 0.78})`
                               : bandIdx >= 6
@@ -1600,7 +1917,7 @@ function NodesMetricsPanel({
                 <th className="px-3 py-1.5">标签 / 权重</th>
                 <th className="px-3 py-1.5">目标配额</th>
                 <th className="px-3 py-1.5">活跃 VU / 连接</th>
-                <th className="px-3 py-1.5">RPS</th>
+                <th className="px-3 py-1.5">QPS / RPS</th>
                 <th className="px-3 py-1.5">错误率</th>
                 <th className="px-3 py-1.5">P50 / P95 / P99 (ms)</th>
                 <th className="px-3 py-1.5">上行 / 下行</th>

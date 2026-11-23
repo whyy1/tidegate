@@ -29,8 +29,5 @@ Thumbs.db
 
 # only product and usage documents are published; everything else stays local
 /docs/*
-!/docs/product-plan.md
-!/docs/install.md
-!/docs/user-guide.md
+!/docs/guide.md
 /bench/RESULTS.md
-/.agents/

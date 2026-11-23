@@ -1,7 +1,8 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Save, X } from 'lucide-react'
 import { api, APIError } from '../lib/api'
 import type { AuthConfig, Folder, KeyValue } from '../lib/types'
+import { useNativeDialog } from '../lib/useNativeDialog'
 import { AuthEditor } from './AuthEditor'
 import { KeyValueEditor } from './KeyValueEditor'
 
@@ -16,6 +17,8 @@ interface Props {
 }
 
 export function FolderModal({ open, projectId, folder, parentId, onClose, onSaved, onToast }: Props) {
+  const ref = useNativeDialog(open, onClose)
+  const nameRef = useRef<HTMLInputElement>(null)
   const [name, setName] = useState('')
   const [headers, setHeaders] = useState<KeyValue[]>([])
   const [auth, setAuth] = useState<AuthConfig>({ type: 'inherit' })
@@ -34,7 +37,10 @@ export function FolderModal({ open, projectId, folder, parentId, onClose, onSave
     }
   }, [open, folder])
 
-  if (!open) return null
+  // showModal() runs after React's autoFocus; re-focus the name field once the dialog is open.
+  useEffect(() => {
+    if (open) nameRef.current?.focus()
+  }, [open])
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
@@ -69,66 +75,82 @@ export function FolderModal({ open, projectId, folder, parentId, onClose, onSave
   }
 
   return (
-    <div className="fixed inset-0 z-40 bg-slate-900/40 flex items-center justify-center p-4">
-      <div className="w-full max-w-2xl bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col max-h-[84vh]">
-        <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-          <h2 className="text-sm font-semibold text-slate-900">
-            {folder ? `编辑目录「${folder.name}」` : '新建接口目录'}
-          </h2>
-          <button type="button" onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 rounded">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <form onSubmit={handleSubmit} className="p-5 overflow-y-auto space-y-4 text-xs">
-          <div>
-            <label className="block font-medium text-slate-700 mb-1">目录名称</label>
-            <input
-              type="text"
-              required
-              autoFocus
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="例如 订单服务 / 用户认证"
-              className="w-full px-3 py-1.5 border border-slate-300 rounded-md focus:border-sky-500 focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block font-medium text-slate-700 mb-1.5">
-              目录公共请求头（子目录及接口自动继承）
-            </label>
-            <KeyValueEditor
-              items={headers}
-              onChange={setHeaders}
-              keyPlaceholder="Header 名称"
-              valuePlaceholder="Header 值"
-            />
-          </div>
-
-          <div className="rounded-lg border border-slate-200 p-3 bg-slate-50/50">
-            <div className="font-medium text-slate-700 mb-2">目录默认鉴权</div>
-            <AuthEditor value={auth} onChange={setAuth} allowInherit />
-          </div>
-
-          <div className="flex justify-end gap-2 pt-2 border-t border-slate-200">
+    <dialog
+      ref={ref}
+      {...({ closedby: 'any' } as Record<string, string>)}
+      aria-labelledby="tg-folder-title"
+      className="tg-dialog w-[min(42rem,calc(100vw-2rem))] max-h-[86dvh]"
+    >
+      {open && (
+        <form onSubmit={handleSubmit} className="flex flex-col min-h-0 flex-1 text-xs">
+          <header className="px-5 py-3 border-b border-line flex items-center justify-between gap-3 bg-surface-subtle shrink-0">
+            <h2 id="tg-folder-title" className="text-sm font-semibold text-fg truncate min-w-0">
+              {folder ? `编辑目录「${folder.name}」` : '新建目录'}
+            </h2>
             <button
               type="button"
               onClick={onClose}
-              className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+              aria-label="关闭目录设置"
+              className="p-1 text-fg-subtle hover:text-fg rounded hover:bg-surface-hover shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </header>
+
+          <div className="flex-1 min-h-0 overflow-y-auto tg-scroller p-5 space-y-4">
+            <div>
+              <label htmlFor="tg-folder-name" className="block font-medium text-fg-muted mb-1">
+                目录名称
+              </label>
+              <input
+                ref={nameRef}
+                id="tg-folder-name"
+                name="folder-name"
+                type="text"
+                required
+                autoFocus
+                autoComplete="off"
+                value={name}
+                onChange={(e) => setName(e.target.value)}
+                placeholder="例如 订单服务 / 用户认证"
+                className="w-full px-3 py-1.5 border border-line-strong rounded-md bg-surface text-fg focus:border-sky-500 focus:outline-none"
+              />
+            </div>
+
+            <fieldset>
+              <legend className="font-medium text-fg-muted mb-1.5">公共请求头</legend>
+              <KeyValueEditor
+                items={headers}
+                onChange={setHeaders}
+                keyPlaceholder="Header 名称"
+                valuePlaceholder="Header 值"
+              />
+            </fieldset>
+
+            <fieldset className="rounded-lg border border-line p-3 bg-surface-subtle">
+              <legend className="px-1 font-medium text-fg-muted">默认鉴权</legend>
+              <AuthEditor value={auth} onChange={setAuth} allowInherit />
+            </fieldset>
+          </div>
+
+          <footer className="px-5 py-3 border-t border-line flex justify-end gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3 py-1.5 rounded-md border border-line-strong bg-surface text-fg hover:bg-surface-hover"
             >
               取消
             </button>
             <button
               type="submit"
               disabled={busy}
-              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white font-medium disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-primary hover:bg-primary-hover text-white font-medium disabled:opacity-50"
             >
               <Save className="w-3.5 h-3.5" /> 保存目录
             </button>
-          </div>
+          </footer>
         </form>
-      </div>
-    </div>
+      )}
+    </dialog>
   )
 }

@@ -6,6 +6,7 @@ import {
   ChevronRight,
   Columns2,
   Copy,
+  CopyPlus,
   Eye,
   FilePlus,
   Folder as FolderIcon,
@@ -30,7 +31,7 @@ import {
 import { AuthEditor } from '../components/AuthEditor'
 import { CodeEditor } from '../components/CodeEditor'
 import { CollectionRunnerModal } from '../components/CollectionRunnerModal'
-import { CurlModal } from '../components/CurlModal'
+import { CurlModal, type CurlModalTab } from '../components/CurlModal'
 import { FolderModal } from '../components/FolderModal'
 import { ImportModal } from '../components/ImportModal'
 import { KeyValueEditor } from '../components/KeyValueEditor'
@@ -83,6 +84,8 @@ interface OpenTab {
   debugResp: DebugAPIResponse | null
   effective: EffectiveAPIPreview | null
   showEffective: boolean
+  /** Debug-history record currently replayed into this tab, if any. */
+  historyId?: string
 }
 
 let scratchCounter = 1
@@ -105,19 +108,90 @@ function newScratchAPI(folderId = ''): Partial<API> {
   }
 }
 
+/** Semantic tone per HTTP method / protocol: [text, tinted bg, border]. Shared by tree badges, tabs and the URL capsule. */
+const METHOD_TONES: Record<string, { text: string; bg: string; border: string }> = {
+  GET: { text: 'text-emerald-700', bg: 'bg-emerald-50', border: 'border-emerald-300' },
+  POST: { text: 'text-sky-700', bg: 'bg-sky-50', border: 'border-sky-300' },
+  PUT: { text: 'text-amber-700', bg: 'bg-amber-50', border: 'border-amber-300' },
+  PATCH: { text: 'text-violet-700', bg: 'bg-violet-50', border: 'border-violet-300' },
+  DELETE: { text: 'text-rose-700', bg: 'bg-rose-50', border: 'border-rose-300' },
+  GRPC: { text: 'text-indigo-700', bg: 'bg-indigo-50', border: 'border-indigo-300' },
+  WS: { text: 'text-purple-700', bg: 'bg-purple-50', border: 'border-purple-300' },
+  SSE: { text: 'text-teal-700', bg: 'bg-teal-50', border: 'border-teal-300' },
+}
+const NEUTRAL_TONE = { text: 'text-fg-muted', bg: 'bg-slate-100', border: 'border-line-strong' }
+
+function methodTone(method?: string) {
+  return METHOD_TONES[(method || 'GET').toUpperCase()] || NEUTRAL_TONE
+}
+
+/** Display verb for a request: HTTP method, or the protocol name for WS / gRPC. */
+function requestVerb(req?: Partial<API['request']>): string {
+  const proto = (req?.protocol || 'http').toLowerCase()
+  if (proto === 'ws') return 'WS'
+  if (proto === 'grpc') return 'GRPC'
+  return (req?.method || 'GET').toUpperCase()
+}
+
 function methodBadgeColor(method?: string): string {
-  switch ((method || 'GET').toUpperCase()) {
-    case 'GET':
-      return 'text-emerald-700 bg-emerald-50 border-emerald-200'
-    case 'POST':
-      return 'text-sky-700 bg-sky-50 border-sky-200'
-    case 'PUT':
-    case 'PATCH':
-      return 'text-amber-700 bg-amber-50 border-amber-200'
-    case 'DELETE':
-      return 'text-rose-700 bg-rose-50 border-rose-200'
-    default:
-      return 'text-slate-600 bg-slate-100 border-slate-200'
+  const t = methodTone(method)
+  return `${t.text} ${t.bg} ${t.border}`
+}
+
+const HOP_BY_HOP_HEADERS = new Set(['content-length', 'host', 'connection', 'accept-encoding', 'transfer-encoding'])
+
+/** Rebuild an editable request from a debug-history record's actual (expanded) request. */
+function draftRequestFromRecord(rec: DebugRecord, fallbackProtocol: APIProtocol): API['request'] {
+  const actual = rec.data?.result?.actual_request
+  const url = actual?.url || rec.url
+  const method = (actual?.method || rec.method || 'GET').toUpperCase()
+  const headers: KeyValue[] = (actual?.headers || [])
+    .filter((h) => h.name && !HOP_BY_HOP_HEADERS.has(h.name.toLowerCase()) && !/^\*{3,}$/.test(h.value.trim()))
+    .map((h) => ({ name: h.name, value: h.value }))
+  const ctHeader = headers.find((h) => h.name.toLowerCase() === 'content-type')?.value || ''
+  const raw = actual?.body || ''
+  let body: NonNullable<API['request']['body']> = { type: 'none' }
+  if (raw) {
+    const t = raw.trim()
+    let isJSON = /json/i.test(ctHeader)
+    if (!isJSON && (t.startsWith('{') || t.startsWith('['))) {
+      try {
+        JSON.parse(t)
+        isJSON = true
+      } catch {
+        isJSON = false
+      }
+    }
+    if (isJSON) {
+      body = { type: 'json', content: raw }
+    } else if (/application\/x-www-form-urlencoded/i.test(ctHeader)) {
+      const fields: KeyValue[] = []
+      new URLSearchParams(raw).forEach((value, name) => fields.push({ name, value }))
+      body = fields.length > 0 ? { type: 'form', fields } : { type: 'raw', content: raw, content_type: ctHeader }
+    } else {
+      body = { type: 'raw', content: raw, content_type: ctHeader || undefined }
+    }
+  }
+  const protocol: APIProtocol =
+    /^wss?:\/\//i.test(url) || method === 'WS'
+      ? 'ws'
+      : method === 'GRPC'
+        ? 'grpc'
+        : method === 'SSE'
+          ? 'sse'
+          : ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].includes(method)
+            ? fallbackProtocol === 'sse'
+              ? 'sse'
+              : 'http'
+            : fallbackProtocol
+  return {
+    protocol,
+    method: protocol === 'http' || protocol === 'sse' ? (method === 'SSE' ? 'GET' : method) : '',
+    url,
+    path_params: [],
+    query: [],
+    headers,
+    body,
   }
 }
 
@@ -274,6 +348,10 @@ export function WorkbenchView({
 
   const [importOpen, setImportOpen] = useState(false)
   const [curlOpen, setCurlOpen] = useState(false)
+  const [curlTab, setCurlTab] = useState<CurlModalTab>('export')
+  const [savingCopy, setSavingCopy] = useState(false)
+  const [confirmDeleteId, setConfirmDeleteId] = useState('')
+  const confirmTimerRef = useRef<number | undefined>(undefined)
   const [saveModalOpen, setSaveModalOpen] = useState(false)
   const [folderModal, setFolderModal] = useState<{ open: boolean; folder: Folder | null; parentId: string }>({
     open: false,
@@ -491,13 +569,103 @@ export function WorkbenchView({
       name,
       folder_id: folderId,
     }
-    const created = await api.createAPI(projectId, payload)
-    setTabs((prev) =>
-      prev.map((t) => (t.tabKey === activeTab.tabKey ? { ...t, tabKey: created.id, api: created, dirty: false } : t))
-    )
-    setActiveTabKey(created.id)
-    await loadSidebarData()
-    onToast('success', `已保存到目录「${created.name}」`)
+    try {
+      const created = await api.createAPI(projectId, payload)
+      setTabs((prev) =>
+        prev.map((t) => (t.tabKey === activeTab.tabKey ? { ...t, tabKey: created.id, api: created, dirty: false } : t))
+      )
+      setActiveTabKey(created.id)
+      await loadSidebarData()
+      onToast('success', `已保存到目录「${created.name}」`)
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : '保存接口失败')
+      throw err
+    }
+  }
+
+  /** Create a new saved API from the current draft (same folder, "副本" suffix) and open it in a new tab. */
+  const handleSaveAsCopy = async () => {
+    if (!activeTab || savingCopy) return
+    const { id: _id, version: _version, order: _order, ...rest } = activeTab.api
+    const baseName = (activeTab.api.name || '未命名接口').trim()
+    setSavingCopy(true)
+    try {
+      const created = await api.createAPI(projectId, {
+        ...rest,
+        name: `${baseName} 副本`,
+        folder_id: activeTab.api.folder_id || '',
+      })
+      const tab: OpenTab = {
+        tabKey: created.id,
+        api: created,
+        dirty: false,
+        debugResp: activeTab.debugResp,
+        effective: null,
+        showEffective: false,
+      }
+      setTabs((prev) => [...prev, tab])
+      setActiveTabKey(created.id)
+      await loadSidebarData()
+      onToast('success', `已另存为「${created.name}」`)
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : '另存副本失败')
+    } finally {
+      setSavingCopy(false)
+    }
+  }
+
+  /** Two-step inline delete: first click arms for 3s, second click within the window executes. */
+  const armOrRunDelete = (nodeId: string, run: () => Promise<void>) => {
+    window.clearTimeout(confirmTimerRef.current)
+    if (confirmDeleteId !== nodeId) {
+      setConfirmDeleteId(nodeId)
+      confirmTimerRef.current = window.setTimeout(() => setConfirmDeleteId(''), 3000)
+      return
+    }
+    setConfirmDeleteId('')
+    void run()
+  }
+
+  useEffect(() => () => window.clearTimeout(confirmTimerRef.current), [])
+
+  const applyParsedToDraft = (parsed: API) => {
+    updateActiveAPI((cur) => ({
+      ...cur,
+      name: cur.id ? cur.name : parsed.name || cur.name,
+      request: parsed.request,
+      auth: parsed.auth || { type: 'inherit' },
+    }))
+    patchActiveTab((t) => ({ ...t, historyId: undefined }))
+    setReqSubTab(parsed.request?.body && parsed.request.body.type !== 'none' ? 'body' : 'params')
+    onToast('success', '已回填 cURL 到当前草稿')
+  }
+
+  const openParsedInNewTab = (parsed: API) => {
+    const key = `scratch-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`
+    const base = newScratchAPI(activeTab?.api.folder_id || '')
+    const tab: OpenTab = {
+      tabKey: key,
+      api: {
+        ...base,
+        name: parsed.name || base.name,
+        request: parsed.request,
+        auth: parsed.auth || { type: 'inherit' },
+        extract: parsed.extract || [],
+        assert: parsed.assert || [],
+      },
+      dirty: true,
+      debugResp: null,
+      effective: null,
+      showEffective: false,
+    }
+    setTabs((prev) => [...prev, tab])
+    setActiveTabKey(key)
+    onToast('success', '已在新页签打开 cURL 请求')
+  }
+
+  const saveResponseAsExample = (item: APIResponseExample) => {
+    updateActiveAPI((cur) => ({ ...cur, examples: [...(cur.examples || []), item] }))
+    onToast('success', activeTab.api.id ? '已追加响应示例，保存接口后生效' : '已追加响应示例')
   }
 
   const handleDebugSend = async () => {
@@ -515,7 +683,7 @@ export function WorkbenchView({
         variables: tempVars,
         save_history: true,
       })
-      patchActiveTab((t) => ({ ...t, debugResp: res }))
+      patchActiveTab((t) => ({ ...t, debugResp: res, historyId: undefined }))
       if (autoSyncTempVars && res.result.extracted_vars && Object.keys(res.result.extracted_vars).length > 0) {
         onTempVarsChange({ ...tempVars, ...res.result.extracted_vars })
       }
@@ -573,7 +741,7 @@ export function WorkbenchView({
     save: handleSave,
     send: handleDebugSend,
     active: isActive,
-    modalOpen: importOpen || curlOpen || saveModalOpen || folderModal.open,
+    modalOpen: importOpen || curlOpen || saveModalOpen || folderModal.open || runnerModal.open,
   }
 
   useEffect(() => {
@@ -657,74 +825,121 @@ export function WorkbenchView({
     return out
   }
 
+  const nodeActionBtn = 'p-1 rounded text-fg-subtle hover:bg-surface hover:text-fg focus-visible:outline-2 focus-visible:outline-sky-500'
+
+  const renderDeleteButton = (node: TreeNode, label: string, run: () => Promise<void>) => {
+    const armed = confirmDeleteId === node.id
+    return (
+      <button
+        type="button"
+        title={armed ? '再次点击确认删除' : label}
+        aria-label={armed ? `确认删除「${node.name}」` : `${label}「${node.name}」`}
+        onClick={() => armOrRunDelete(node.id, run)}
+        onBlur={() => {
+          if (armed) setConfirmDeleteId('')
+        }}
+        className={
+          armed
+            ? 'inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded bg-rose-600 hover:bg-rose-solid text-white text-[10px] font-semibold whitespace-nowrap'
+            : `${nodeActionBtn} hover:text-rose-600`
+        }
+      >
+        <Trash2 className="w-3 h-3" />
+        {armed && '确认删除？'}
+      </button>
+    )
+  }
+
   const renderTreeNodes = (nodes: TreeNode[], parentId = '', depth = 0) => {
     return nodes.map((node, idx) => {
       if (node.type === 'folder') {
         const isCollapsed = Boolean(collapsed[node.id]) && !search.trim()
+        const armed = confirmDeleteId === node.id
+        const toggleFolder = () => setCollapsed((c) => ({ ...c, [node.id]: !c[node.id] }))
         return (
           <div key={node.id} className="select-none">
             <div
               draggable
+              role="button"
+              tabIndex={0}
+              aria-expanded={!isCollapsed}
               onDragStart={() => setDragNodeId(node.id)}
               onDragOver={(e) => e.preventDefault()}
               onDrop={(e) => {
                 e.preventDefault()
                 void handleDropIntoFolder(node.id)
               }}
-              style={{ paddingLeft: `${8 + depth * 12}px` }}
-              className="group flex items-center gap-1 pr-1.5 py-1.5 rounded-md text-xs hover:bg-slate-200/60 text-slate-800 cursor-pointer"
-              onClick={() => setCollapsed((c) => ({ ...c, [node.id]: !c[node.id] }))}
+              onKeyDown={(e) => {
+                if (e.target !== e.currentTarget) return
+                if (e.key === 'Enter' || e.key === ' ') {
+                  e.preventDefault()
+                  toggleFolder()
+                }
+              }}
+              style={{ paddingLeft: `${4 + depth * 10}px` }}
+              className="group flex items-center gap-1 pr-1 py-1 rounded-md text-xs hover:bg-surface-hover text-fg cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50"
+              onClick={toggleFolder}
             >
               {isCollapsed ? (
-                <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <ChevronRight className="w-3.5 h-3.5 text-fg-subtle shrink-0" />
               ) : (
-                <ChevronDown className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <ChevronDown className="w-3.5 h-3.5 text-fg-subtle shrink-0" />
               )}
               {isCollapsed ? (
                 <FolderIcon className="w-3.5 h-3.5 text-amber-500 shrink-0" />
               ) : (
                 <FolderOpen className="w-3.5 h-3.5 text-amber-500 shrink-0" />
               )}
-              <span className="truncate font-medium flex-1">{node.name}</span>
+              <span className="truncate font-medium flex-1 min-w-0">{node.name}</span>
               <div
-                className="opacity-0 group-hover:opacity-100 inline-flex items-center gap-0.5 shrink-0"
+                className={`${
+                  armed ? 'w-auto opacity-100' : 'w-0 overflow-hidden opacity-0'
+                } group-hover:w-auto group-hover:overflow-visible group-hover:opacity-100 focus-within:w-auto focus-within:overflow-visible focus-within:opacity-100 inline-flex items-center gap-0.5 shrink-0 transition-opacity`}
                 onClick={(e) => e.stopPropagation()}
+                onKeyDown={(e) => e.stopPropagation()}
               >
-                <button
-                  type="button"
-                  title="批量测试此目录"
-                  onClick={() => setRunnerModal({ open: true, folderId: node.id })}
-                  className="p-0.5 text-slate-500 hover:text-emerald-600 rounded"
-                >
-                  <Play className="w-3 h-3" />
-                </button>
-                <button
-                  type="button"
-                  title="在此目录下新建草稿接口"
-                  onClick={() => addScratchTab(node.id)}
-                  className="p-0.5 text-slate-500 hover:text-sky-600 rounded"
-                >
-                  <Plus className="w-3 h-3" />
-                </button>
-                <button
-                  type="button"
-                  title="编辑目录请求头与鉴权"
-                  onClick={async () => {
-                    try {
-                      const f = await api.getFolder(projectId, node.id)
-                      setFolderModal({ open: true, folder: f, parentId })
-                    } catch (err) {
-                      onToast('error', err instanceof APIError ? err.message : '读取目录失败')
-                    }
-                  }}
-                  className="p-0.5 text-slate-500 hover:text-sky-600 rounded"
-                >
-                  <Pencil className="w-3 h-3" />
-                </button>
-                <button
-                  type="button"
-                  title="删除目录"
-                  onClick={async () => {
+                {!armed && (
+                  <>
+                    <button
+                      type="button"
+                      title="批量测试此目录"
+                      aria-label={`批量测试目录「${node.name}」`}
+                      onClick={() => setRunnerModal({ open: true, folderId: node.id })}
+                      className={`${nodeActionBtn} hover:text-emerald-600`}
+                    >
+                      <Play className="w-3 h-3" />
+                    </button>
+                    <button
+                      type="button"
+                      title="在此目录新建请求"
+                      aria-label={`在「${node.name}」新建请求`}
+                      onClick={() => addScratchTab(node.id)}
+                      className={`${nodeActionBtn} hover:text-sky-600`}
+                    >
+                      <Plus className="w-3 h-3" />
+                    </button>
+                    {canWrite && (
+                      <button
+                        type="button"
+                        title="编辑目录"
+                        aria-label={`编辑目录「${node.name}」`}
+                        onClick={async () => {
+                          try {
+                            const f = await api.getFolder(projectId, node.id)
+                            setFolderModal({ open: true, folder: f, parentId })
+                          } catch (err) {
+                            onToast('error', err instanceof APIError ? err.message : '读取目录失败')
+                          }
+                        }}
+                        className={`${nodeActionBtn} hover:text-sky-600`}
+                      >
+                        <Pencil className="w-3 h-3" />
+                      </button>
+                    )}
+                  </>
+                )}
+                {canWrite &&
+                  renderDeleteButton(node, '删除目录', async () => {
                     try {
                       await api.deleteFolder(projectId, node.id, node.version)
                       await loadSidebarData()
@@ -732,11 +947,7 @@ export function WorkbenchView({
                     } catch (err) {
                       onToast('error', err instanceof APIError ? err.message : '删除目录失败')
                     }
-                  }}
-                  className="p-0.5 text-slate-500 hover:text-rose-600 rounded"
-                >
-                  <Trash2 className="w-3 h-3" />
-                </button>
+                  })}
               </div>
             </div>
             {!isCollapsed && node.children && renderTreeNodes(node.children, node.id, depth + 1)}
@@ -745,67 +956,89 @@ export function WorkbenchView({
       }
 
       const active = activeTab?.api.id === node.id
+      const armed = confirmDeleteId === node.id
       return (
         <div
           key={node.id}
           draggable
+          role="button"
+          tabIndex={0}
+          aria-current={active || undefined}
           onDragStart={() => setDragNodeId(node.id)}
-          style={{ paddingLeft: `${12 + depth * 12}px` }}
+          style={{ paddingLeft: `${6 + depth * 10}px` }}
           onClick={() => void openSavedAPI(node.id)}
-          className={`group flex items-center gap-1.5 pr-1.5 py-1.5 rounded-md text-xs cursor-pointer transition-colors ${
-            active ? 'bg-sky-100 text-sky-950 font-semibold' : 'text-slate-700 hover:bg-slate-200/60'
+          onKeyDown={(e) => {
+            if (e.target !== e.currentTarget) return
+            if (e.key === 'Enter' || e.key === ' ') {
+              e.preventDefault()
+              void openSavedAPI(node.id)
+            }
+          }}
+          title={node.url ? `${node.name}\n${node.url}` : node.name}
+          className={`group flex items-center gap-1 pr-1 py-1 rounded-md text-xs cursor-pointer transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50 ${
+            active
+              ? 'bg-sky-100 text-sky-900 font-semibold shadow-[inset_2px_0_0_var(--tg-tidal-600)]'
+              : 'text-fg-muted hover:bg-surface-hover hover:text-fg'
           }`}
         >
           <span
-            className={`px-1 py-0.2 rounded border text-[9px] font-mono font-bold w-11 text-center shrink-0 ${methodBadgeColor(
+            className={`px-1 rounded border text-[10px] leading-4 font-mono font-bold w-9 text-center shrink-0 ${methodBadgeColor(
               node.method
             )}`}
           >
             {(node.method || 'GET').slice(0, 4)}
           </span>
-          <span className="truncate flex-1" title={`${node.name} (${node.url || ''})`}>
-            {node.name}
-          </span>
+          <span className="truncate flex-1 min-w-0">{node.name}</span>
           <div
-            className="opacity-0 group-hover:opacity-100 inline-flex items-center gap-0.5 shrink-0"
+            className={`${
+              armed ? 'w-auto opacity-100' : 'w-0 overflow-hidden opacity-0'
+            } group-hover:w-auto group-hover:overflow-visible group-hover:opacity-100 focus-within:w-auto focus-within:overflow-visible focus-within:opacity-100 inline-flex items-center gap-0.5 shrink-0 transition-opacity`}
             onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => e.stopPropagation()}
           >
-            <button
-              type="button"
-              title="上移"
-              onClick={() => void moveSibling(nodes, parentId, idx, -1)}
-              className="p-0.5 text-slate-400 hover:text-slate-700"
-            >
-              <ArrowUp className="w-3 h-3" />
-            </button>
-            <button
-              type="button"
-              title="下移"
-              onClick={() => void moveSibling(nodes, parentId, idx, 1)}
-              className="p-0.5 text-slate-400 hover:text-slate-700"
-            >
-              <ArrowDown className="w-3 h-3" />
-            </button>
-            <button
-              type="button"
-              title="复制接口"
-              onClick={async () => {
-                try {
-                  const cp = await api.copyAPI(projectId, node.id)
-                  await loadSidebarData()
-                  void openSavedAPI(cp.id)
-                } catch (err) {
-                  onToast('error', err instanceof APIError ? err.message : '复制接口失败')
-                }
-              }}
-              className="p-0.5 text-slate-400 hover:text-sky-600"
-            >
-              <Copy className="w-3 h-3" />
-            </button>
-            <button
-              type="button"
-              title="删除接口"
-              onClick={async () => {
+            {!armed && canWrite && (
+              <>
+                <button
+                  type="button"
+                  title="上移"
+                  aria-label={`上移「${node.name}」`}
+                  disabled={idx === 0}
+                  onClick={() => void moveSibling(nodes, parentId, idx, -1)}
+                  className={`${nodeActionBtn} disabled:opacity-30 disabled:pointer-events-none`}
+                >
+                  <ArrowUp className="w-3 h-3" />
+                </button>
+                <button
+                  type="button"
+                  title="下移"
+                  aria-label={`下移「${node.name}」`}
+                  disabled={idx === nodes.length - 1}
+                  onClick={() => void moveSibling(nodes, parentId, idx, 1)}
+                  className={`${nodeActionBtn} disabled:opacity-30 disabled:pointer-events-none`}
+                >
+                  <ArrowDown className="w-3 h-3" />
+                </button>
+                <button
+                  type="button"
+                  title="复制接口"
+                  aria-label={`复制接口「${node.name}」`}
+                  onClick={async () => {
+                    try {
+                      const cp = await api.copyAPI(projectId, node.id)
+                      await loadSidebarData()
+                      void openSavedAPI(cp.id)
+                    } catch (err) {
+                      onToast('error', err instanceof APIError ? err.message : '复制接口失败')
+                    }
+                  }}
+                  className={`${nodeActionBtn} hover:text-sky-600`}
+                >
+                  <Copy className="w-3 h-3" />
+                </button>
+              </>
+            )}
+            {canWrite &&
+              renderDeleteButton(node, '删除接口', async () => {
                 try {
                   await api.deleteAPI(projectId, node.id, node.version)
                   setTabs((prev) => prev.filter((t) => t.api.id !== node.id))
@@ -814,11 +1047,7 @@ export function WorkbenchView({
                 } catch (err) {
                   onToast('error', err instanceof APIError ? err.message : '删除接口失败')
                 }
-              }}
-              className="p-0.5 text-slate-400 hover:text-rose-600"
-            >
-              <Trash2 className="w-3 h-3" />
-            </button>
+              })}
           </div>
         </div>
       )
@@ -923,78 +1152,124 @@ export function WorkbenchView({
   const loadHistoryIntoPanel = async (id: string) => {
     try {
       const rec = await api.getDebugRecord(projectId, id)
-      if (rec.data?.result) {
+      const result = rec.data?.result
+      const request = draftRequestFromRecord(rec, protocol)
+      const resp: DebugAPIResponse | null = result
+        ? { record_id: rec.id, result, final_vars: rec.data?.final_vars }
+        : null
+      // Never overwrite a different saved API: replay into a fresh scratch tab instead.
+      const intoNewTab = Boolean(activeTab.api.id && rec.api_id !== activeTab.api.id)
+      if (intoNewTab) {
+        const key = `replay-h-${rec.id}-${Date.now()}`
+        let path = request.url
+        try {
+          path = new URL(request.url).pathname || request.url
+        } catch {
+          // relative or templated URL
+        }
+        const tab: OpenTab = {
+          tabKey: key,
+          api: { ...newScratchAPI(activeTab.api.folder_id || ''), name: `回放 ${requestVerb(request)} ${path}`.slice(0, 80), request },
+          dirty: true,
+          debugResp: resp,
+          effective: null,
+          showEffective: false,
+          historyId: rec.id,
+        }
+        setTabs((prev) => [...prev, tab])
+        setActiveTabKey(key)
+      } else {
         patchActiveTab((t) => ({
           ...t,
-          debugResp: { record_id: rec.id, result: rec.data!.result, final_vars: rec.data?.final_vars },
+          api: { ...t.api, request },
+          dirty: true,
+          debugResp: resp,
+          showEffective: false,
+          historyId: rec.id,
         }))
-        onToast('info', `已回放调试记录 ${rec.method} ${rec.url}`)
       }
+      setReqSubTab(request.body && request.body.type !== 'none' ? 'body' : 'headers')
+      onToast('info', `已回填 ${rec.method} ${rec.url}${intoNewTab ? ' · 新页签' : ''}`)
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '读取调试记录失败')
     }
   }
 
+  const verb = requestVerb(req)
+  const verbTone = methodTone(verb)
+  const protoTone = protocol === 'http' ? NEUTRAL_TONE : methodTone(protocol === 'grpc' ? 'GRPC' : protocol.toUpperCase())
+  const quietBtn =
+    'inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg text-xs font-medium disabled:opacity-45 transition-colors'
+  const railIconBtn =
+    'p-1.5 rounded text-fg-subtle hover:text-fg hover:bg-surface-hover disabled:opacity-40 disabled:pointer-events-none shrink-0'
+
   return (
-    <div className="flex flex-1 min-h-0 bg-[var(--tg-canvas)]">
+    <div className="flex flex-1 min-h-0 bg-canvas">
       {/* Left API Tree */}
       {!treeCollapsed && (
-        <aside className="w-64 bg-white border-r border-slate-200 flex flex-col shrink-0">
-          <div className="p-2.5 border-b border-slate-200 space-y-2">
-            <div className="relative">
-              <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-2" />
+        <aside className="w-[272px] bg-surface border-r border-line flex flex-col shrink-0">
+          <div className="p-2 border-b border-line space-y-2">
+            <search className="relative">
+              <Search className="w-3.5 h-3.5 text-fg-subtle absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
-                type="text"
+                type="search"
+                name="api-tree-filter"
+                aria-label="过滤接口"
                 value={search}
                 onChange={(e) => setSearch(e.target.value)}
-                placeholder="过滤接口名称或路径..."
-                className="w-full pl-8 pr-2.5 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-md focus:bg-white focus:border-sky-500 focus:outline-none"
+                placeholder="名称 / 路径 / 方法"
+                autoComplete="off"
+                autoCorrect="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                className="w-full pl-8 pr-2.5 py-1.5 text-xs bg-surface-subtle text-fg border border-line rounded-md focus:bg-surface focus:border-sky-500 focus:outline-none"
               />
-            </div>
-            <div className="grid grid-cols-2 gap-1.5 text-xs">
+            </search>
+            <div className="grid grid-cols-3 gap-1 text-[11px]">
               <button
                 type="button"
                 onClick={() => addScratchTab()}
-                className="inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-md bg-[#0B2A4A] hover:bg-[#123862] text-white font-medium"
+                className="inline-flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-md bg-primary hover:bg-primary-hover text-white font-medium"
               >
-                <FilePlus className="w-3.5 h-3.5" /> 新建请求
+                <FilePlus className="w-3.5 h-3.5 shrink-0" /> 新建
               </button>
               <button
                 type="button"
                 disabled={!canWrite}
                 onClick={() => setImportOpen(true)}
-                className="inline-flex items-center justify-center gap-1 py-1.5 px-2 rounded-md border border-slate-200 bg-slate-50 hover:bg-slate-100 text-slate-700 font-medium disabled:opacity-45"
+                className="inline-flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-md border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium disabled:opacity-45"
               >
-                <Import className="w-3.5 h-3.5 text-sky-600" /> 导入集合
+                <Import className="w-3.5 h-3.5 shrink-0 text-tidal" /> 导入
               </button>
-            </div>
-            <div className="flex items-center justify-between text-[11px] px-0.5">
-              <span className="text-slate-500 font-medium">接口目录树</span>
-              <div className="flex items-center gap-2">
-                <button
-                  type="button"
-                  disabled={!canWrite}
-                  onClick={() => setRunnerModal({ open: true, folderId: '' })}
-                  className="inline-flex items-center gap-1 text-emerald-700 hover:underline font-medium disabled:opacity-45"
-                  title="批量回归测试全部接口"
-                >
-                  <ListChecks className="w-3 h-3" /> 批量测试
-                </button>
-                {canWrite && (
-                  <button
-                    type="button"
-                    onClick={() => setFolderModal({ open: true, folder: null, parentId: '' })}
-                    className="inline-flex items-center gap-1 text-sky-700 hover:underline font-medium"
-                  >
-                    <FolderPlus className="w-3 h-3" /> 新建目录
-                  </button>
-                )}
-              </div>
+              <button
+                type="button"
+                disabled={!canWrite}
+                onClick={() => setRunnerModal({ open: true, folderId: '' })}
+                className="inline-flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-md border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium disabled:opacity-45"
+                title="批量测试全部接口"
+              >
+                <ListChecks className="w-3.5 h-3.5 shrink-0 text-emerald-600" /> 批量测试
+              </button>
             </div>
           </div>
 
+          <div className="flex items-center justify-between px-3 pt-2 pb-1 text-[11px]">
+            <span className="text-fg-subtle font-medium">目录</span>
+            {canWrite && (
+              <button
+                type="button"
+                onClick={() => setFolderModal({ open: true, folder: null, parentId: '' })}
+                title="新建目录"
+                aria-label="新建目录"
+                className="p-1 -mr-1 rounded text-fg-subtle hover:text-tidal hover:bg-surface-hover"
+              >
+                <FolderPlus className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
           <div
-            className="flex-1 overflow-y-auto tg-scroller p-1.5 space-y-0.5"
+            className="flex-1 overflow-y-auto tg-scroller px-1.5 pb-1.5 space-y-px"
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
               if (e.target === e.currentTarget && dragNodeId) {
@@ -1003,10 +1278,7 @@ export function WorkbenchView({
             }}
           >
             {tree.children.length === 0 ? (
-              <div className="text-center py-8 px-3 text-xs text-slate-400 space-y-2">
-                <p>暂无已保存接口。</p>
-                <p>可在地址栏直接粘贴 URL 或 cURL 调试，或点击「导入集合」。</p>
-              </div>
+              <div className="text-center py-8 px-3 text-xs text-fg-subtle">暂无接口</div>
             ) : (
               renderTreeNodes(filterTree(tree.children))
             )}
@@ -1015,45 +1287,93 @@ export function WorkbenchView({
       )}
 
       {/* Main Editor + Split Response Area */}
-      <main className="flex-1 min-w-0 flex flex-col bg-white">
+      <main className="flex-1 min-w-0 flex flex-col bg-surface">
         {/* Multi-Tabs Bar + View Controls */}
-        <div className="flex items-center justify-between gap-2 px-2 pt-1.5 bg-slate-100 border-b border-slate-200 shrink-0">
-          <div className="flex items-center gap-1 overflow-x-auto min-w-0 flex-1">
-            <button
-              type="button"
-              onClick={() => setTreeCollapsed((v) => !v)}
-              title={treeCollapsed ? '展开接口目录树' : '收起接口目录树'}
-              aria-label={treeCollapsed ? '展开接口目录树' : '收起接口目录树'}
-              className="p-1.5 mb-1 text-slate-500 hover:text-slate-900 hover:bg-slate-200/70 rounded shrink-0"
-            >
-              {treeCollapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
-            </button>
+        <div className="flex items-end justify-between gap-2 px-2 pt-1.5 bg-surface-subtle border-b border-line shrink-0">
+          <div className="flex items-end gap-1 overflow-x-auto min-w-0 flex-1 [scrollbar-width:none]">
+            <div className="flex items-center gap-0.5 mb-1 shrink-0">
+              <button
+                type="button"
+                onClick={() => setTreeCollapsed((v) => !v)}
+                title={treeCollapsed ? '展开目录树' : '收起目录树'}
+                aria-label={treeCollapsed ? '展开目录树' : '收起目录树'}
+                aria-expanded={!treeCollapsed}
+                className={railIconBtn}
+              >
+                {treeCollapsed ? <PanelLeftOpen className="w-4 h-4" /> : <PanelLeftClose className="w-4 h-4" />}
+              </button>
+              {treeCollapsed && (
+                <>
+                  <button type="button" onClick={() => addScratchTab()} title="新建请求" aria-label="新建请求" className={railIconBtn}>
+                    <FilePlus className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canWrite}
+                    onClick={() => setImportOpen(true)}
+                    title="导入"
+                    aria-label="导入"
+                    className={railIconBtn}
+                  >
+                    <Import className="w-4 h-4" />
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!canWrite}
+                    onClick={() => setRunnerModal({ open: true, folderId: '' })}
+                    title="批量测试"
+                    aria-label="批量测试"
+                    className={`${railIconBtn} hover:text-emerald-600`}
+                  >
+                    <ListChecks className="w-4 h-4" />
+                  </button>
+                </>
+              )}
+              <span className="w-px h-4 bg-[var(--tg-border-strong)] mx-1" aria-hidden="true" />
+            </div>
 
             {tabs.map((tab) => {
               const isActiveTab = tab.tabKey === activeTab.tabKey
+              const tabVerb = requestVerb(tab.api.request)
               return (
                 <div
                   key={tab.tabKey}
+                  role="tab"
+                  tabIndex={0}
+                  aria-selected={isActiveTab}
                   onClick={() => setActiveTabKey(tab.tabKey)}
-                  className={`group flex items-center gap-1.5 px-3 py-1.5 rounded-t-lg border text-xs cursor-pointer max-w-[200px] shrink-0 ${
+                  onKeyDown={(e) => {
+                    if (e.target === e.currentTarget && (e.key === 'Enter' || e.key === ' ')) {
+                      e.preventDefault()
+                      setActiveTabKey(tab.tabKey)
+                    }
+                  }}
+                  onAuxClick={(e) => {
+                    if (e.button === 1) {
+                      e.preventDefault()
+                      closeTab(tab.tabKey)
+                    }
+                  }}
+                  title={tab.api.name || '未命名'}
+                  className={`group flex items-center gap-1.5 pl-2.5 pr-1 py-1.5 rounded-t-lg border text-xs cursor-pointer max-w-[200px] shrink-0 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/50 ${
                     isActiveTab
-                      ? 'bg-white border-slate-200 border-b-white -mb-px text-slate-900 font-semibold'
-                      : 'bg-slate-200/60 border-transparent text-slate-600 hover:bg-slate-200'
+                      ? 'bg-surface border-line border-b-surface -mb-px text-fg font-semibold'
+                      : 'border-transparent text-fg-muted hover:bg-surface-hover hover:text-fg'
                   }`}
                 >
-                  <span className="font-mono text-[10px] font-bold text-sky-700">
-                    {tab.api.request?.method || (tab.api.request?.protocol || 'GET').toUpperCase()}
+                  <span className={`font-mono text-[10px] font-bold ${methodTone(tabVerb).text}`}>
+                    {tabVerb === 'GRPC' ? 'gRPC' : tabVerb}
                   </span>
-                  <span className="truncate">{tab.api.name || '未命名'}</span>
-                  {tab.dirty && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" title="未保存更改" />}
+                  <span className="truncate min-w-0">{tab.api.name || '未命名'}</span>
+                  {tab.dirty && <span className="w-1.5 h-1.5 rounded-full bg-amber-500 shrink-0" title="未保存" />}
                   <button
                     type="button"
-                    aria-label="关闭标签页"
+                    aria-label={`关闭「${tab.api.name || '未命名'}」`}
                     onClick={(e) => {
                       e.stopPropagation()
                       closeTab(tab.tabKey)
                     }}
-                    className="text-slate-400 hover:text-slate-700 p-0.5 rounded"
+                    className="text-fg-subtle hover:text-fg hover:bg-surface-hover p-0.5 rounded"
                   >
                     <X className="w-3 h-3" />
                   </button>
@@ -1062,22 +1382,29 @@ export function WorkbenchView({
             })}
             <button
               type="button"
-              title="新建临时调试标签页"
+              title="新建页签"
+              aria-label="新建页签"
               onClick={() => addScratchTab()}
-              className="p-1.5 text-slate-500 hover:text-sky-700 rounded mb-1 shrink-0"
+              className={`${railIconBtn} mb-1`}
             >
               <Plus className="w-3.5 h-3.5" />
             </button>
           </div>
 
           {/* Layout Split Mode Toggle */}
-          <div className="inline-flex items-center gap-0.5 bg-white border border-slate-200 rounded-md p-0.5 mb-1 shrink-0 text-[11px]">
+          <div
+            role="radiogroup"
+            aria-label="分屏方向"
+            className="inline-flex items-center gap-0.5 bg-surface border border-line rounded-md p-0.5 mb-1 shrink-0 text-[11px]"
+          >
             <button
               type="button"
+              role="radio"
+              aria-checked={splitMode === 'horizontal'}
               onClick={() => changeSplitMode('horizontal')}
-              title="左右并排分屏"
+              title="左右分屏"
               className={`inline-flex items-center gap-1 px-2 py-0.5 rounded ${
-                splitMode === 'horizontal' ? 'bg-[#0B2A4A] text-white font-semibold' : 'text-slate-600 hover:bg-slate-100'
+                splitMode === 'horizontal' ? 'bg-primary text-white font-semibold' : 'text-fg-muted hover:bg-surface-hover'
               }`}
             >
               <Columns2 className="w-3 h-3" />
@@ -1085,10 +1412,12 @@ export function WorkbenchView({
             </button>
             <button
               type="button"
+              role="radio"
+              aria-checked={splitMode === 'vertical'}
               onClick={() => changeSplitMode('vertical')}
               title="上下分屏"
               className={`inline-flex items-center gap-1 px-2 py-0.5 rounded ${
-                splitMode === 'vertical' ? 'bg-[#0B2A4A] text-white font-semibold' : 'text-slate-600 hover:bg-slate-100'
+                splitMode === 'vertical' ? 'bg-primary text-white font-semibold' : 'text-fg-muted hover:bg-surface-hover'
               }`}
             >
               <Rows2 className="w-3 h-3" />
@@ -1098,137 +1427,159 @@ export function WorkbenchView({
         </div>
 
         {/* URL & Actions Bar */}
-        <div className="p-3 border-b border-slate-200 space-y-2 bg-white shrink-0">
-          {!canWrite && (
-            <div className="px-3 py-1.5 rounded-md bg-amber-50 border border-amber-200 text-amber-900 text-[11px]">
-              当前账号角色为只读访客（viewer），可浏览目录与查看调试历史，但禁止发起实时调试、写入或发起压测。
-            </div>
-          )}
-          <div className="flex items-center gap-2 text-xs">
-            <span className="text-slate-400 shrink-0">接口名称：</span>
+        <div className="px-3 py-2.5 border-b border-line space-y-2 bg-surface shrink-0">
+          <div className="flex items-center gap-2 text-xs min-w-0">
             <input
               type="text"
+              name="api-name"
               aria-label="接口名称"
               value={activeTab.api.name || ''}
               onChange={(e) => updateActiveAPI((cur) => ({ ...cur, name: e.target.value }))}
-              placeholder="输入接口名称"
-              className="flex-1 max-w-sm px-2 py-1 rounded border border-transparent hover:border-slate-200 focus:border-sky-500 focus:outline-none font-medium text-slate-800 bg-slate-50/70 focus:bg-white"
+              placeholder="接口名称"
+              autoComplete="off"
+              className="flex-1 min-w-0 max-w-md px-2 py-1 -ml-2 rounded border border-transparent hover:border-line focus:border-sky-500 focus:outline-none font-medium text-fg bg-transparent focus:bg-surface"
             />
+            {!canWrite && (
+              <span className="px-2 py-0.5 rounded-full border border-amber-200 bg-amber-50 text-amber-800 text-[11px] shrink-0">
+                只读
+              </span>
+            )}
+            {activeTab.historyId && (
+              <span className="px-2 py-0.5 rounded-full border border-sky-200 bg-sky-50 text-sky-800 text-[11px] shrink-0">
+                历史回放
+              </span>
+            )}
             {activeTab.api.id && (
-              <span className="ml-auto font-mono text-[10px] text-slate-400 hidden sm:inline">
-                ID: {activeTab.api.id}
+              <span className="ml-auto font-mono text-[10px] text-fg-subtle hidden sm:inline truncate" title="接口 ID">
+                {activeTab.api.id}
               </span>
             )}
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <select
-              aria-label="协议类型"
-              value={protocol}
-              onChange={(e) => {
-                const nextProto = e.target.value as APIProtocol
-                updateActiveAPI((cur) => ({
-                  ...cur,
-                  request: {
-                    ...req,
-                    protocol: nextProto,
-                    method: nextProto === 'http' || nextProto === 'sse' ? req.method || 'GET' : '',
-                  },
-                }))
-                if (nextProto === 'ws' || nextProto === 'grpc' || nextProto === 'sse') {
-                  setReqSubTab('body')
-                }
-              }}
-              className="px-2 py-2 rounded-lg border border-slate-300 bg-slate-100 font-mono text-xs font-semibold text-slate-800 focus:border-sky-500 focus:outline-none"
-              title="选择请求协议：HTTP / WebSocket / gRPC / SSE"
-            >
-              <option value="http">HTTP</option>
-              <option value="ws">WS</option>
-              <option value="grpc">gRPC</option>
-              <option value="sse">SSE</option>
-            </select>
-
-            {protocol === 'http' || protocol === 'sse' ? (
+            {/* Unified request capsule: protocol | method | URL */}
+            <div className="flex items-center gap-1 p-1 flex-1 min-w-[min(100%,300px)] rounded-lg border border-line-strong bg-surface focus-within:border-sky-500 focus-within:ring-2 focus-within:ring-sky-500/20 transition-shadow">
               <select
-                aria-label="HTTP 方法"
-                value={req.method || 'GET'}
-                onChange={(e) =>
+                aria-label="协议"
+                name="protocol"
+                value={protocol}
+                onChange={(e) => {
+                  const nextProto = e.target.value as APIProtocol
                   updateActiveAPI((cur) => ({
                     ...cur,
-                    request: { ...req, method: e.target.value },
+                    request: {
+                      ...req,
+                      protocol: nextProto,
+                      method: nextProto === 'http' || nextProto === 'sse' ? req.method || 'GET' : '',
+                    },
                   }))
-                }
-                className="px-2.5 py-2 rounded-lg border border-slate-300 bg-slate-50 font-mono text-xs font-bold text-slate-800 focus:border-sky-500 focus:outline-none"
-              >
-                {['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].map((m) => (
-                  <option key={m} value={m}>
-                    {m}
-                  </option>
-                ))}
-              </select>
-            ) : (
-              <span
-                className={`px-2.5 py-2 rounded-lg border font-mono text-xs font-bold ${
-                  protocol === 'ws'
-                    ? 'bg-purple-50 border-purple-200 text-purple-700'
-                    : 'bg-indigo-50 border-indigo-200 text-indigo-700'
+                  if (nextProto === 'ws' || nextProto === 'grpc' || nextProto === 'sse') {
+                    setReqSubTab('body')
+                  }
+                }}
+                className={`px-2 py-1 rounded-md border font-mono text-[11px] font-bold focus:outline-none cursor-pointer shrink-0 ${
+                  protocol === 'http'
+                    ? 'bg-surface-subtle text-fg-muted border-line'
+                    : `${protoTone.bg} ${protoTone.text} ${protoTone.border}`
                 }`}
               >
-                {protocol === 'ws' ? 'WS' : 'gRPC'}
-              </span>
-            )}
+                <option value="http" className="bg-surface text-fg">HTTP</option>
+                <option value="ws" className="bg-surface text-purple-700">WS</option>
+                <option value="grpc" className="bg-surface text-indigo-700">gRPC</option>
+                <option value="sse" className="bg-surface text-teal-700">SSE</option>
+              </select>
 
-            <VariableInput
-              value={req.url || ''}
-              variables={variableHints}
-              onPaste={(e) => {
-                const txt = e.clipboardData.getData('text')
-                void handleURLPaste(txt, e)
-              }}
-              onChange={(nextURL) => {
-                updateActiveAPI((cur) => ({
-                  ...cur,
-                  request: {
-                    ...req,
-                    url: nextURL,
-                    path_params: syncPathParamsFromURL(nextURL, req.path_params),
-                  },
-                }))
-              }}
-              placeholder={
-                protocol === 'ws'
-                  ? '输入 WebSocket 地址 ws:// 或 wss://...（输入 {{ 补全变量）'
-                  : protocol === 'grpc'
-                    ? '输入 gRPC 目标地址，如 127.0.0.1:9090 或 grpc://host:9090'
-                    : protocol === 'sse'
-                      ? '输入 SSE 流式接口 URL，如 /api/events'
-                      : '输入相对路径 /users/:id、完整 URL，输入 {{ 补全变量，或粘贴 cURL...'
-              }
-              className="px-3 py-2 rounded-lg border border-slate-300 font-mono text-xs focus:border-sky-500 focus:outline-none"
-            />
+              {(protocol === 'http' || protocol === 'sse') && (
+                <select
+                  aria-label="HTTP 方法"
+                  name="method"
+                  value={req.method || 'GET'}
+                  onChange={(e) =>
+                    updateActiveAPI((cur) => ({
+                      ...cur,
+                      request: { ...req, method: e.target.value },
+                    }))
+                  }
+                  className={`px-2 py-1 rounded-md border font-mono text-xs font-bold focus:outline-none cursor-pointer shrink-0 ${verbTone.bg} ${verbTone.text} ${verbTone.border}`}
+                >
+                  {['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].map((m) => (
+                    <option key={m} value={m} className={`bg-surface ${methodTone(m).text}`}>
+                      {m}
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              <VariableInput
+                value={req.url || ''}
+                variables={variableHints}
+                onPaste={(e) => {
+                  const txt = e.clipboardData.getData('text')
+                  void handleURLPaste(txt, e)
+                }}
+                onChange={(nextURL) => {
+                  updateActiveAPI((cur) => ({
+                    ...cur,
+                    request: {
+                      ...req,
+                      url: nextURL,
+                      path_params: syncPathParamsFromURL(nextURL, req.path_params),
+                    },
+                  }))
+                }}
+                placeholder={
+                  protocol === 'ws'
+                    ? 'wss://host/path · {{ 补全变量'
+                    : protocol === 'grpc'
+                      ? '127.0.0.1:9090 或 grpc://host:9090'
+                      : protocol === 'sse'
+                        ? '/api/events'
+                        : '/users/:id、完整 URL、{{ 补全变量，或粘贴 cURL'
+                }
+                className="px-2 py-1 bg-transparent border-0 rounded-md font-mono text-xs text-fg focus:outline-none"
+              />
+            </div>
 
             <button
               type="button"
               disabled={!canWrite || sending}
               onClick={() => void handleDebugSend()}
-              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-[#0B2A4A] hover:bg-[#123d69] text-white text-xs font-semibold disabled:opacity-50"
+              title="发送 (Ctrl+Enter)"
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-lg bg-primary hover:bg-primary-hover text-white text-xs font-semibold disabled:opacity-50"
             >
               <Play className="w-3.5 h-3.5 fill-current" />
-              {sending ? '发送中...' : '发送调试'}
+              {sending ? '发送中…' : '发送'}
             </button>
+
+            <div className="inline-flex items-stretch rounded-lg border border-line-strong bg-surface overflow-hidden text-xs font-medium">
+              <button
+                type="button"
+                disabled={!canWrite || saving}
+                onClick={() => void handleSave()}
+                title="保存 (Ctrl+S)"
+                className="inline-flex items-center gap-1.5 px-3 py-2 text-fg hover:bg-surface-hover disabled:opacity-45"
+              >
+                <Save className="w-3.5 h-3.5" /> {activeTab.api.id ? '保存' : '保存到目录'}
+              </button>
+              {activeTab.api.id && (
+                <button
+                  type="button"
+                  disabled={!canWrite || savingCopy}
+                  onClick={() => void handleSaveAsCopy()}
+                  title="用当前草稿新建一个副本接口"
+                  className="inline-flex items-center gap-1.5 px-3 py-2 border-l border-line text-fg hover:bg-surface-hover disabled:opacity-45"
+                >
+                  <CopyPlus className="w-3.5 h-3.5" /> {savingCopy ? '另存中…' : '另存副本'}
+                </button>
+              )}
+            </div>
 
             <button
               type="button"
-              disabled={!canWrite || saving}
-              onClick={() => void handleSave()}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium disabled:opacity-45"
-            >
-              <Save className="w-3.5 h-3.5" /> {activeTab.api.id ? '保存' : '另存到目录'}
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setCurlOpen(true)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-medium"
+              onClick={() => {
+                setCurlTab(req.url?.trim() ? 'export' : 'import')
+                setCurlOpen(true)
+              }}
+              className={quietBtn}
             >
               <Terminal className="w-3.5 h-3.5" /> cURL
             </button>
@@ -1237,8 +1588,8 @@ export function WorkbenchView({
               type="button"
               disabled={!canWrite}
               onClick={() => onQuickLoadTest(activeTab.api)}
-              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 text-xs font-semibold disabled:opacity-45"
-              title="将当前接口或草稿直接带入压测大盘发起压测"
+              className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg bg-amber-500 hover:bg-amber-400 text-[#1f1300] text-xs font-semibold disabled:opacity-45"
+              title="带入压测"
             >
               <Zap className="w-3.5 h-3.5" /> 一键压测
             </button>
@@ -1262,8 +1613,8 @@ export function WorkbenchView({
             className="tg-split-pane flex flex-col min-h-0 min-w-0 shrink-0 overflow-hidden"
           >
             {/* Request Config Sub-tabs */}
-            <div className="px-4 border-b border-slate-200 flex items-center justify-between gap-2 bg-slate-50/70 shrink-0">
-              <div role="tablist" aria-label="请求配置页签" className="tg-tablist gap-1 text-xs font-medium min-w-0">
+            <div className="px-2 border-b border-line flex items-center justify-between gap-2 bg-surface-subtle shrink-0 min-w-0">
+              <div role="tablist" aria-label="请求配置页签" className="tg-tablist flex-1 min-w-0 pr-1 gap-0.5 text-xs font-medium">
                 {(
                   [
                     {
@@ -1288,12 +1639,19 @@ export function WorkbenchView({
                               : `Body${body.type && body.type !== 'none' ? ` · ${body.type}` : ''}`,
                       count: protocol === 'ws' ? req.ws?.messages?.length || 0 : 0,
                     },
-                    { id: 'auth' as const, label: `认证 · ${activeTab.api.auth?.type || 'inherit'}`, count: 0 },
+                    {
+                      id: 'auth' as const,
+                      label:
+                        activeTab.api.auth?.type && activeTab.api.auth.type !== 'inherit'
+                          ? `认证 · ${activeTab.api.auth.type}`
+                          : '认证',
+                      count: 0,
+                    },
                     { id: 'extract' as const, label: '提取', count: extracts.length },
                     { id: 'assert' as const, label: '断言', count: asserts.length },
                     {
                       id: 'scripts' as const,
-                      label: '前后置脚本',
+                      label: '脚本',
                       count: (activeTab.api.pre_script?.trim() ? 1 : 0) + (activeTab.api.post_script?.trim() ? 1 : 0),
                     },
                     { id: 'docs' as const, label: '文档', count: examples.length + responseFields.length },
@@ -1307,13 +1665,13 @@ export function WorkbenchView({
                       role="tab"
                       aria-selected={selected}
                       onClick={() => setReqSubTab(st.id)}
-                      className={`tg-tab inline-flex items-center gap-1.5 px-2.5 py-2 transition-colors ${
-                        selected ? 'text-sky-700' : 'text-slate-600 hover:text-slate-900'
+                      className={`tg-tab inline-flex items-center gap-1 px-2 py-2 transition-colors ${
+                        selected ? 'text-tidal' : 'text-fg-muted hover:text-fg'
                       }`}
                     >
                       <span>{st.label}</span>
                       {st.count > 0 && (
-                        <span className="tg-tabular px-1.5 py-0.2 rounded-full bg-sky-100 text-sky-800 text-[10px] font-mono">
+                        <span className="tg-tabular px-1 py-0 rounded-full bg-sky-100 text-sky-800 text-[10px] font-mono">
                           {st.count}
                         </span>
                       )}
@@ -1329,10 +1687,10 @@ export function WorkbenchView({
                   className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-medium ${
                     activeTab.showEffective
                       ? 'bg-sky-100 border-sky-300 text-sky-800'
-                      : 'bg-white border-slate-300 text-slate-700 hover:bg-slate-50'
+                      : 'bg-surface border-line-strong text-fg-muted hover:bg-surface-hover'
                   }`}
                 >
-                  <Eye className="w-3 h-3" /> {activeTab.showEffective ? '隐藏预览' : '生效预览'}
+                  <Eye className="w-3 h-3" /> 生效预览
                 </button>
               )}
             </div>
@@ -1342,7 +1700,7 @@ export function WorkbenchView({
               <div className="space-y-4">
                 {(req.path_params?.length || 0) > 0 && (
                   <div>
-                    <div className="font-semibold text-slate-700 mb-1.5">路径参数（URL 中的 `:参数名`）</div>
+                    <div className="font-semibold text-fg mb-1.5">路径参数</div>
                     <KeyValueEditor
                       items={req.path_params || []}
                       onChange={(next) =>
@@ -1354,7 +1712,7 @@ export function WorkbenchView({
                   </div>
                 )}
                 <div>
-                  <div className="font-semibold text-slate-700 mb-1.5">Query 查询参数</div>
+                  <div className="font-semibold text-fg mb-1.5">Query</div>
                   <KeyValueEditor
                     items={req.query || []}
                     onChange={(next) => updateActiveAPI((cur) => ({ ...cur, request: { ...req, query: next } }))}
@@ -1370,25 +1728,25 @@ export function WorkbenchView({
                 {activeTab.showEffective && activeTab.effective && (
                   <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-3 space-y-2.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="font-semibold text-sky-900">生效请求预览（目录继承 + 环境变量合并）</span>
+                      <span className="font-semibold text-sky-900">生效预览</span>
                       <span className="font-mono text-sky-800">
                         {activeTab.effective.method} {activeTab.effective.url}
                       </span>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      <div className="bg-white rounded border border-sky-100 p-2.5">
-                        <div className="font-medium text-slate-700 mb-1">
-                          继承请求头（{activeTab.effective.inherited_headers.length}）
+                      <div className="bg-surface rounded border border-sky-100 p-2.5">
+                        <div className="font-medium text-fg-muted mb-1">
+                          继承请求头 <span className="tg-tabular text-fg-subtle">{activeTab.effective.inherited_headers.length}</span>
                         </div>
                         {activeTab.effective.inherited_headers.length === 0 ? (
-                          <div className="text-slate-400">无目录继承请求头</div>
+                          <div className="text-fg-subtle">无</div>
                         ) : (
                           <div className="space-y-1 font-mono">
                             {activeTab.effective.inherited_headers.map((ih, idx) => (
-                              <div key={idx} className={`flex items-center gap-2 ${ih.overridden ? 'line-through text-slate-400' : ''}`}>
+                              <div key={idx} className={`flex items-center gap-2 ${ih.overridden ? 'line-through text-fg-subtle' : ''}`}>
                                 <span className="font-semibold">{ih.name}:</span>
                                 <span className="truncate flex-1">{ih.value}</span>
-                                <span className="text-[10px] px-1 rounded bg-slate-100 text-slate-500">
+                                <span className="text-[10px] px-1 rounded bg-slate-100 text-fg-subtle">
                                   {ih.overridden ? '已被本接口覆盖' : `来自 ${ih.source_folder_name}`}
                                 </span>
                               </div>
@@ -1396,22 +1754,22 @@ export function WorkbenchView({
                           </div>
                         )}
                       </div>
-                      <div className="bg-white rounded border border-sky-100 p-2.5">
-                        <div className="font-medium text-slate-700 mb-1">
-                          生效鉴权来源：<code>{activeTab.effective.effective_auth.source}</code>
+                      <div className="bg-surface rounded border border-sky-100 p-2.5">
+                        <div className="font-medium text-fg-muted mb-1">
+                          鉴权来源：<code>{activeTab.effective.effective_auth.source}</code>
                           {activeTab.effective.effective_auth.source_folder_name
-                            ? `（目录：${activeTab.effective.effective_auth.source_folder_name}）`
+                            ? ` · ${activeTab.effective.effective_auth.source_folder_name}`
                             : ''}
                         </div>
-                        <div className="font-medium text-slate-700 mt-2 mb-1">
-                          可用变量来源（{activeTab.effective.variables.length}）
+                        <div className="font-medium text-fg-muted mt-2 mb-1">
+                          可用变量 <span className="tg-tabular text-fg-subtle">{activeTab.effective.variables.length}</span>
                         </div>
                         <div className="max-h-24 overflow-y-auto space-y-0.5 font-mono text-[11px]">
                           {activeTab.effective.variables.map((rv) => (
                             <div key={rv.name} className="flex items-center justify-between gap-2">
                               <span className="text-sky-800">{`{{${rv.name}}}`}</span>
-                              <span className="truncate text-slate-600">{rv.secret ? '******' : rv.value}</span>
-                              <span className="px-1 rounded bg-slate-100 text-slate-500 text-[10px]">{rv.source}</span>
+                              <span className="truncate text-fg-muted">{rv.secret ? '******' : rv.value}</span>
+                              <span className="px-1 rounded bg-slate-100 text-fg-subtle text-[10px]">{rv.source}</span>
                             </div>
                           ))}
                         </div>
@@ -1433,10 +1791,10 @@ export function WorkbenchView({
               <div className="space-y-4">
                 {protocol === 'ws' && (
                   <div className="rounded-lg border border-purple-200 bg-purple-50/40 p-3 space-y-3">
-                    <div className="font-semibold text-purple-900">WebSocket 握手与消息帧设置</div>
+                    <div className="font-semibold text-purple-900">WebSocket</div>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                       <div>
-                        <label className="block text-slate-600 mb-1">子协议 Subprotocols（逗号分隔）</label>
+                        <label className="block text-fg-muted mb-1">子协议</label>
                         <input
                           type="text"
                           value={(req.ws?.subprotocols || []).join(',')}
@@ -1448,34 +1806,34 @@ export function WorkbenchView({
                                 .filter(Boolean),
                             })
                           }
-                          placeholder="chat,json"
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                          placeholder="chat, json"
+                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface font-mono"
                         />
                       </div>
                       <div>
-                        <label className="block text-slate-600 mb-1">期望接收消息数 (recv_count)</label>
+                        <label className="block text-fg-muted mb-1">接收消息数</label>
                         <input
                           type="number"
                           min={0}
                           value={req.ws?.recv_count ?? 1}
                           onChange={(e) => updateWS({ recv_count: Math.max(0, Number(e.target.value) || 0) })}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface font-mono"
                         />
                       </div>
                       <div>
-                        <label className="block text-slate-600 mb-1">读写空闲超时 (idle_timeout)</label>
+                        <label className="block text-fg-muted mb-1">空闲超时</label>
                         <input
                           type="text"
                           value={req.ws?.idle_timeout || ''}
                           onChange={(e) => updateWS({ idle_timeout: e.target.value || undefined })}
                           placeholder="默认 5s"
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface font-mono"
                         />
                       </div>
                     </div>
                     <div className="space-y-2">
                       <div className="flex items-center justify-between">
-                        <span className="font-medium text-slate-700">握手后发送的消息帧序列</span>
+                        <span className="font-medium text-fg">发送帧</span>
                         <button
                           type="button"
                           onClick={() =>
@@ -1485,7 +1843,7 @@ export function WorkbenchView({
                           }
                           className="inline-flex items-center gap-1 text-sky-700 hover:underline font-medium"
                         >
-                          <Plus className="w-3.5 h-3.5" /> 添加发送帧
+                          <Plus className="w-3.5 h-3.5" /> 添加
                         </button>
                       </div>
                       {(req.ws?.messages || []).map((msg, i) => (
@@ -1499,7 +1857,7 @@ export function WorkbenchView({
                                 ),
                               })
                             }
-                            className="col-span-2 px-2 py-1.5 border border-slate-300 rounded bg-white"
+                            className="col-span-2 px-2 py-1.5 border border-line-strong rounded bg-surface"
                           >
                             <option value="text">Text 文本</option>
                             <option value="binary">Binary (Base64)</option>
@@ -1515,14 +1873,14 @@ export function WorkbenchView({
                               })
                             }
                             placeholder='支持 {{变量}}，如 {"action":"subscribe"}'
-                            className="col-span-9 px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                            className="col-span-9 px-2.5 py-1.5 border border-line-strong rounded bg-surface font-mono"
                           />
                           <button
                             type="button"
                             onClick={() =>
                               updateWS({ messages: (req.ws?.messages || []).filter((_, idx) => idx !== i) })
                             }
-                            className="col-span-1 justify-self-end p-1 text-slate-400 hover:text-rose-600"
+                            className="col-span-1 justify-self-end p-1 text-fg-subtle hover:text-rose-600"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -1535,7 +1893,7 @@ export function WorkbenchView({
                 {protocol === 'grpc' && (
                   <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-3 space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <div className="font-semibold text-indigo-900">gRPC 一元调用 (Unary) 契约与载荷</div>
+                      <div className="font-semibold text-indigo-900">gRPC · Unary</div>
                       <div className="flex flex-wrap items-center gap-2">
                         <select
                           value={req.grpc?.proto_file || ''}
@@ -1548,9 +1906,9 @@ export function WorkbenchView({
                               response_encoding: pf ? 'proto_json' : req.grpc?.response_encoding,
                             })
                           }}
-                          className="px-2 py-1 border border-slate-300 rounded bg-white text-[11px]"
+                          className="px-2 py-1 border border-line-strong rounded bg-surface text-[11px]"
                         >
-                          <option value="">不绑定 .proto/.desc 文件</option>
+                          <option value="">不绑定 .proto</option>
                           {files
                             .filter((f) => /\.(proto|pb|desc)$/i.test(f.name))
                             .map((f) => (
@@ -1559,7 +1917,7 @@ export function WorkbenchView({
                               </option>
                             ))}
                         </select>
-                        <label className="inline-flex items-center gap-1 text-[11px] text-slate-700 cursor-pointer">
+                        <label className="inline-flex items-center gap-1 text-[11px] text-fg-muted cursor-pointer">
                           <input
                             type="checkbox"
                             checked={Boolean(req.grpc?.use_reflection)}
@@ -1577,16 +1935,16 @@ export function WorkbenchView({
                           type="button"
                           disabled={grpcDiscoverBusy}
                           onClick={() => void handleDiscoverGRPC()}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-700 text-white text-[11px] font-medium disabled:opacity-50"
+                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-indigo-600 hover:bg-indigo-solid text-white text-[11px] font-medium disabled:opacity-50"
                         >
-                          <Sparkles className="w-3 h-3" /> {grpcDiscoverBusy ? '探测中...' : '探测服务/方法'}
+                          <Sparkles className="w-3 h-3" /> {grpcDiscoverBusy ? '探测中…' : '探测服务'}
                         </button>
                       </div>
                     </div>
 
                     {grpcCatalog && grpcCatalog.services?.length > 0 && (
-                      <div className="rounded border border-indigo-200 bg-white p-2 flex flex-wrap items-center gap-2 text-[11px]">
-                        <span className="text-slate-500 font-medium">快速选择：</span>
+                      <div className="rounded border border-indigo-200 bg-surface p-2 flex flex-wrap items-center gap-2 text-[11px]">
+                        
                         <select
                           value={req.grpc?.service || ''}
                           onChange={(e) => {
@@ -1599,7 +1957,7 @@ export function WorkbenchView({
                               response_encoding: 'proto_json',
                             })
                           }}
-                          className="px-2 py-1 border border-slate-300 rounded font-mono bg-slate-50"
+                          className="px-2 py-1 border border-line-strong rounded font-mono bg-surface-subtle"
                         >
                           {grpcCatalog.services.map((s) => (
                             <option key={s.name} value={s.name}>
@@ -1616,7 +1974,7 @@ export function WorkbenchView({
                               response_encoding: 'proto_json',
                             })
                           }
-                          className="px-2 py-1 border border-slate-300 rounded font-mono bg-slate-50"
+                          className="px-2 py-1 border border-line-strong rounded font-mono bg-surface-subtle"
                         >
                           {(grpcCatalog.services.find((s) => s.name === req.grpc?.service)?.methods || []).map((m) => (
                             <option key={m.name} value={m.name}>
@@ -1643,41 +2001,41 @@ export function WorkbenchView({
 
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                       <div>
-                        <label className="block text-slate-600 mb-1">服务名 (Service)</label>
+                        <label className="block text-fg-muted mb-1">Service</label>
                         <input
                           type="text"
                           value={req.grpc?.service || ''}
                           onChange={(e) => updateGRPC({ service: e.target.value })}
                           placeholder="example.Greeter"
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface font-mono"
                         />
                       </div>
                       <div>
-                        <label className="block text-slate-600 mb-1">方法名 (Method)</label>
+                        <label className="block text-fg-muted mb-1">Method</label>
                         <input
                           type="text"
                           value={req.grpc?.method || ''}
                           onChange={(e) => updateGRPC({ method: e.target.value })}
                           placeholder="SayHello"
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface font-mono"
                         />
                       </div>
                       <div>
-                        <label className="block text-slate-600 mb-1">调用超时 (timeout)</label>
+                        <label className="block text-fg-muted mb-1">超时</label>
                         <input
                           type="text"
                           value={req.grpc?.timeout || ''}
                           onChange={(e) => updateGRPC({ timeout: e.target.value || undefined })}
                           placeholder="默认 5s"
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface font-mono"
                         />
                       </div>
                       <div>
-                        <label className="block text-slate-600 mb-1">请求载荷编码</label>
+                        <label className="block text-fg-muted mb-1">请求编码</label>
                         <select
                           value={req.grpc?.payload_encoding || 'json'}
                           onChange={(e) => updateGRPC({ payload_encoding: e.target.value })}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface"
                         >
                           <option value="proto_json">Proto JSON 动态编码（反射 / .proto）</option>
                           <option value="json">原始 JSON/UTF-8 直传</option>
@@ -1687,11 +2045,11 @@ export function WorkbenchView({
                         </select>
                       </div>
                       <div>
-                        <label className="block text-slate-600 mb-1">响应载荷编码</label>
+                        <label className="block text-fg-muted mb-1">响应编码</label>
                         <select
                           value={req.grpc?.response_encoding || 'raw'}
                           onChange={(e) => updateGRPC({ response_encoding: e.target.value })}
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface"
                         >
                           <option value="proto_json">Proto JSON 动态解码（反射 / .proto）</option>
                           <option value="raw">原始 UTF-8 响应</option>
@@ -1701,7 +2059,7 @@ export function WorkbenchView({
                       </div>
                       <div className="grid grid-cols-2 gap-2">
                         <div>
-                          <label className="block text-slate-600 mb-1">期望状态码</label>
+                          <label className="block text-fg-muted mb-1">期望状态码</label>
                           <input
                             type="number"
                             min={0}
@@ -1713,10 +2071,10 @@ export function WorkbenchView({
                               })
                             }
                             placeholder="0 (OK)"
-                            className="w-full px-2 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                            className="w-full px-2 py-1.5 border border-line-strong rounded bg-surface font-mono"
                           />
                         </div>
-                        <label className="flex items-center gap-1.5 pt-5 text-slate-700 cursor-pointer">
+                        <label className="flex items-center gap-1.5 pt-5 text-fg-muted cursor-pointer">
                           <input
                             type="checkbox"
                             checked={Boolean(req.grpc?.tls)}
@@ -1727,15 +2085,15 @@ export function WorkbenchView({
                       </div>
                     </div>
                     <div>
-                      <label className="block text-slate-600 font-medium mb-1">
-                        请求消息载荷（JSON 或 Base64，支持 `{'{{变量}}'}`）
+                      <label className="block text-fg-muted font-medium mb-1">
+                        请求载荷
                       </label>
                       <textarea
                         rows={6}
                         value={body.content || ''}
                         onChange={(e) => updateBody({ type: body.type && body.type !== 'none' ? body.type : 'json', content: e.target.value })}
                         placeholder='{\n  "name": "{{user}}"\n}'
-                        className="w-full p-2.5 border border-slate-300 rounded bg-white font-mono text-xs"
+                        className="w-full p-2.5 border border-line-strong rounded bg-surface font-mono text-xs"
                       />
                     </div>
                   </div>
@@ -1743,10 +2101,10 @@ export function WorkbenchView({
 
                 {protocol === 'sse' && (
                   <div className="rounded-lg border border-teal-200 bg-teal-50/40 p-3 space-y-3">
-                    <div className="font-semibold text-teal-900">Server-Sent Events (SSE) 流读取选项</div>
+                    <div className="font-semibold text-teal-900">SSE</div>
                     <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                       <div>
-                        <label className="block text-slate-600 mb-1">最多接收事件数 (max_events)</label>
+                        <label className="block text-fg-muted mb-1">最多事件数</label>
                         <input
                           type="number"
                           min={0}
@@ -1756,28 +2114,28 @@ export function WorkbenchView({
                               max_events: e.target.value === '' ? undefined : Math.max(0, Number(e.target.value) || 0),
                             })
                           }
-                          placeholder="0=不限制直至关流"
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                          placeholder="0 = 不限"
+                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface font-mono"
                         />
                       </div>
                       <div>
-                        <label className="block text-slate-600 mb-1">终止关键字 (stop_contains)</label>
+                        <label className="block text-fg-muted mb-1">终止关键字</label>
                         <input
                           type="text"
                           value={req.sse?.stop_contains || ''}
                           onChange={(e) => updateSSE({ stop_contains: e.target.value || undefined })}
                           placeholder="[DONE]"
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface font-mono"
                         />
                       </div>
                       <div>
-                        <label className="block text-slate-600 mb-1">流超时 (timeout)</label>
+                        <label className="block text-fg-muted mb-1">流超时</label>
                         <input
                           type="text"
                           value={req.sse?.timeout || ''}
                           onChange={(e) => updateSSE({ timeout: e.target.value || undefined })}
                           placeholder="默认 30s"
-                          className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-white font-mono"
+                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface font-mono"
                         />
                       </div>
                     </div>
@@ -1794,8 +2152,8 @@ export function WorkbenchView({
                         { id: 'json' as const, label: 'JSON' },
                         { id: 'form' as const, label: 'x-www-form-urlencoded' },
                         { id: 'multipart' as const, label: 'multipart/form-data' },
-                        { id: 'raw' as const, label: 'Raw 文本' },
-                        { id: 'binary' as const, label: 'Binary 文件' },
+                        { id: 'raw' as const, label: 'Raw' },
+                        { id: 'binary' as const, label: 'Binary' },
                       ] as const
                     ).map((bt) => (
                       <button
@@ -1805,7 +2163,7 @@ export function WorkbenchView({
                         className={`px-2.5 py-1 rounded border font-medium ${
                           (body.type || 'none') === bt.id
                             ? 'bg-sky-50 border-sky-400 text-sky-700'
-                            : 'bg-white border-slate-200 text-slate-600 hover:bg-slate-50'
+                            : 'bg-surface border-line text-fg-muted hover:bg-surface-hover'
                         }`}
                       >
                         {bt.label}
@@ -1820,18 +2178,18 @@ export function WorkbenchView({
                           const formatted = JSON.stringify(JSON.parse(body.content || ''), null, 2)
                           updateBody({ content: formatted })
                         } catch {
-                          onToast('info', '当前内容不是合法纯 JSON（含 {{变量}} 时请直接编辑）')
+                          onToast('info', '不是合法 JSON')
                         }
                       }}
-                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-200 text-slate-600 hover:bg-slate-50"
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded border border-line text-fg-muted hover:bg-surface-hover"
                     >
-                      <Sparkles className="w-3 h-3 text-sky-600" /> 美化 JSON
+                      <Sparkles className="w-3 h-3 text-tidal" /> 格式化
                     </button>
                   )}
                 </div>
 
                 {(!body.type || body.type === 'none') && (
-                  <p className="text-slate-400">当前请求不携带请求体。</p>
+                  <p className="text-fg-subtle">无请求体</p>
                 )}
 
                 {body.type === 'json' && (
@@ -1839,8 +2197,11 @@ export function WorkbenchView({
                     rows={8}
                     value={body.content || ''}
                     onChange={(e) => updateBody({ content: e.target.value })}
+                    autoCorrect="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
                     placeholder='{\n  "user_id": "{{uid}}"\n}'
-                    className="w-full p-3 border border-slate-300 rounded-lg font-mono text-xs focus:border-sky-500 focus:outline-none"
+                    className="w-full p-3 border border-line-strong rounded-lg bg-surface text-fg font-mono text-xs focus:border-sky-500 focus:outline-none"
                   />
                 )}
 
@@ -1850,15 +2211,21 @@ export function WorkbenchView({
                       type="text"
                       value={body.content_type || ''}
                       onChange={(e) => updateBody({ content_type: e.target.value })}
-                      placeholder="Content-Type，默认 text/plain"
-                      className="w-64 px-2.5 py-1.5 border border-slate-300 rounded-md font-mono text-xs focus:border-sky-500 focus:outline-none"
+                      autoCorrect="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      placeholder="Content-Type · text/plain"
+                      className="w-64 px-2.5 py-1.5 border border-line-strong rounded-md bg-surface text-fg font-mono text-xs focus:border-sky-500 focus:outline-none"
                     />
                     <textarea
                       rows={7}
                       value={body.content || ''}
                       onChange={(e) => updateBody({ content: e.target.value })}
-                      placeholder="输入任意文本请求体（支持 {{变量}}）"
-                      className="w-full p-3 border border-slate-300 rounded-lg font-mono text-xs focus:border-sky-500 focus:outline-none"
+                      autoCorrect="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      placeholder="请求体文本，支持 {{变量}}"
+                      className="w-full p-3 border border-line-strong rounded-lg bg-surface text-fg font-mono text-xs focus:border-sky-500 focus:outline-none"
                     />
                   </div>
                 )}
@@ -1875,7 +2242,7 @@ export function WorkbenchView({
                 {body.type === 'multipart' && (
                   <div className="space-y-3">
                     <div>
-                      <div className="font-medium text-slate-700 mb-1">文本表单字段</div>
+                      <div className="font-medium text-fg mb-1">文本字段</div>
                       <KeyValueEditor
                         items={body.fields || []}
                         onChange={(next) => updateBody({ fields: next })}
@@ -1885,7 +2252,7 @@ export function WorkbenchView({
                     </div>
                     <div>
                       <div className="flex items-center justify-between mb-1">
-                        <span className="font-medium text-slate-700">文件字段（引用项目已上传数据文件）</span>
+                        <span className="font-medium text-fg">文件字段</span>
                         <button
                           type="button"
                           onClick={() =>
@@ -1893,9 +2260,9 @@ export function WorkbenchView({
                               files: [...(body.files || []), { field: 'file', path: files[0]?.name || '' }],
                             })
                           }
-                          className="text-sky-600 hover:underline font-medium"
+                          className="inline-flex items-center gap-1 text-tidal hover:underline font-medium"
                         >
-                          + 添加文件部件
+                          <Plus className="w-3.5 h-3.5" /> 添加
                         </button>
                       </div>
                       {(body.files || []).map((bf, i) => (
@@ -1910,7 +2277,7 @@ export function WorkbenchView({
                               )
                               updateBody({ files: next })
                             }}
-                            className="w-36 px-2 py-1 border border-slate-300 rounded font-mono"
+                            className="w-36 px-2 py-1 border border-line-strong rounded bg-surface text-fg font-mono"
                           />
                           <select
                             value={bf.path}
@@ -1920,9 +2287,9 @@ export function WorkbenchView({
                               )
                               updateBody({ files: next })
                             }}
-                            className="flex-1 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                            className="flex-1 px-2 py-1 border border-line-strong rounded font-mono bg-surface text-fg"
                           >
-                            <option value="">选择项目文件（请在「场景与数据」上传）</option>
+                            <option value="">选择项目文件</option>
                             {files.map((df) => (
                               <option key={df.name} value={df.name}>
                                 {df.name}
@@ -1932,7 +2299,7 @@ export function WorkbenchView({
                           <button
                             type="button"
                             onClick={() => updateBody({ files: (body.files || []).filter((_, j) => j !== i) })}
-                            className="p-1 text-slate-400 hover:text-rose-600"
+                            className="p-1 text-fg-subtle hover:text-rose-600"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -1944,13 +2311,13 @@ export function WorkbenchView({
 
                 {body.type === 'binary' && (
                   <div className="space-y-2 max-w-md">
-                    <label className="block font-medium text-slate-700">选择项目文件作为二进制请求体</label>
+                    <label className="block font-medium text-fg">项目文件</label>
                     <select
                       value={body.file || ''}
                       onChange={(e) => updateBody({ file: e.target.value })}
-                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md font-mono bg-white"
+                      className="w-full px-2.5 py-1.5 border border-line-strong rounded-md font-mono bg-surface"
                     >
-                      <option value="">请选择文件...</option>
+                      <option value="">选择文件…</option>
                       {files.map((df) => (
                         <option key={df.name} value={df.name}>
                           {df.name} ({Math.round(df.size / 1024)} KB)
@@ -1961,8 +2328,8 @@ export function WorkbenchView({
                       type="text"
                       value={body.content_type || ''}
                       onChange={(e) => updateBody({ content_type: e.target.value })}
-                      placeholder="Content-Type，默认 application/octet-stream"
-                      className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md font-mono"
+                      placeholder="Content-Type · application/octet-stream"
+                      className="w-full px-2.5 py-1.5 border border-line-strong rounded-md bg-surface text-fg font-mono"
                     />
                   </div>
                 )}
@@ -1981,11 +2348,8 @@ export function WorkbenchView({
 
             {reqSubTab === 'extract' && (
               <div className="space-y-2">
-                <p className="text-slate-500">
-                  全部启用规则会在每次请求完成后依次求值并写入变量（也可直接点击下方 JSON 响应体字段自动生成）。
-                </p>
                 {extracts.map((ex, i) => (
-                  <div key={i} className="grid grid-cols-12 gap-2 items-center p-2 rounded border border-slate-200 bg-slate-50/60">
+                  <div key={i} className="grid grid-cols-12 gap-2 items-center p-2 rounded border border-line bg-surface-subtle">
                     <input
                       type="text"
                       value={ex.name}
@@ -1996,7 +2360,7 @@ export function WorkbenchView({
                         )
                         updateActiveAPI((cur) => ({ ...cur, extract: next }))
                       }}
-                      className="col-span-3 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                      className="col-span-3 px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                     />
                     <select
                       value={ex.from}
@@ -2006,7 +2370,7 @@ export function WorkbenchView({
                         )
                         updateActiveAPI((cur) => ({ ...cur, extract: next }))
                       }}
-                      className="col-span-2 px-2 py-1 border border-slate-300 rounded bg-white"
+                      className="col-span-2 px-2 py-1 border border-line-strong rounded bg-surface"
                     >
                       <option value="jsonpath">JSONPath</option>
                       <option value="xpath">XPath / HTML</option>
@@ -2031,7 +2395,7 @@ export function WorkbenchView({
                         )
                         updateActiveAPI((cur) => ({ ...cur, extract: next }))
                       }}
-                      className="col-span-4 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                      className="col-span-4 px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                     />
                     <input
                       type="text"
@@ -2043,12 +2407,12 @@ export function WorkbenchView({
                         )
                         updateActiveAPI((cur) => ({ ...cur, extract: next }))
                       }}
-                      className="col-span-2 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                      className="col-span-2 px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                     />
                     <button
                       type="button"
                       onClick={() => updateActiveAPI((cur) => ({ ...cur, extract: extracts.filter((_, idx) => idx !== i) }))}
-                      className="col-span-1 justify-self-end p-1 text-slate-400 hover:text-rose-600"
+                      className="col-span-1 justify-self-end p-1 text-fg-subtle hover:text-rose-600"
                     >
                       <Trash2 className="w-3.5 h-3.5" />
                     </button>
@@ -2079,7 +2443,7 @@ export function WorkbenchView({
                   return (
                     <div
                       key={i}
-                      className="grid grid-cols-12 gap-2 items-center p-2 rounded border border-slate-200 bg-slate-50/60"
+                      className="grid grid-cols-12 gap-2 items-center p-2 rounded border border-line bg-surface-subtle"
                     >
                       <select
                         value={as.type}
@@ -2091,7 +2455,7 @@ export function WorkbenchView({
                           else if (t === 'json_schema') updateAs({ type: t, value: '{"type":"object"}', equals: undefined, max: undefined, expr: undefined, contains: undefined, exists: undefined })
                           else updateAs({ type: t, expr: '$.code', equals: '0', max: undefined, value: undefined })
                         }}
-                        className="col-span-3 px-2 py-1 border border-slate-300 rounded bg-white"
+                        className="col-span-3 px-2 py-1 border border-line-strong rounded bg-surface"
                       >
                         <option value="status">HTTP 状态码 (status)</option>
                         <option value="duration">最大耗时 (duration)</option>
@@ -2117,7 +2481,7 @@ export function WorkbenchView({
                               updateAs({ equals: raw, in: undefined })
                             }
                           }}
-                          className="col-span-8 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                          className="col-span-8 px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                         />
                       )}
 
@@ -2127,7 +2491,7 @@ export function WorkbenchView({
                           value={as.max || ''}
                           placeholder="最大允许耗时，例如 500ms 或 1.5s"
                           onChange={(e) => updateAs({ max: e.target.value })}
-                          className="col-span-8 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                          className="col-span-8 px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                         />
                       )}
 
@@ -2137,7 +2501,7 @@ export function WorkbenchView({
                           value={as.value || ''}
                           placeholder="必须包含的子串"
                           onChange={(e) => updateAs({ value: e.target.value })}
-                          className="col-span-8 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                          className="col-span-8 px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                         />
                       )}
 
@@ -2148,14 +2512,14 @@ export function WorkbenchView({
                             value={as.expr || ''}
                             placeholder="JSONPath，例如 $.code"
                             onChange={(e) => updateAs({ expr: e.target.value })}
-                            className="col-span-4 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                            className="col-span-4 px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                           />
                           <input
                             type="text"
                             value={as.equals !== undefined ? as.equals : as.contains || ''}
                             placeholder="期望相等值（equals）"
                             onChange={(e) => updateAs({ equals: e.target.value, contains: undefined, exists: undefined })}
-                            className="col-span-4 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                            className="col-span-4 px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                           />
                         </>
                       )}
@@ -2166,14 +2530,14 @@ export function WorkbenchView({
                           value={as.value || ''}
                           placeholder='{"type":"object","required":["code","data"]}'
                           onChange={(e) => updateAs({ value: e.target.value })}
-                          className="col-span-8 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                          className="col-span-8 px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                         />
                       )}
 
                       <button
                         type="button"
                         onClick={() => updateActiveAPI((cur) => ({ ...cur, assert: asserts.filter((_, idx) => idx !== i) }))}
-                        className="col-span-1 justify-self-end p-1 text-slate-400 hover:text-rose-600"
+                        className="col-span-1 justify-self-end p-1 text-fg-subtle hover:text-rose-600"
                       >
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
@@ -2197,19 +2561,17 @@ export function WorkbenchView({
 
             {reqSubTab === 'scripts' && (
               <div className="space-y-5">
-                <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-3 text-[11px] text-sky-900 leading-relaxed">
-                  内置安全沙箱脚本支持读写场景变量 <code className="font-mono font-semibold">vars.name</code>、时间戳与加密函数（
-                  <code className="font-mono">now_sec()</code> / <code className="font-mono">uuid()</code> /{' '}
-                  <code className="font-mono">hmac_sha256(key, data)</code>）；后置脚本额外支持响应检查{' '}
-                  <code className="font-mono">resp.status</code>、<code className="font-mono">resp.header("X-Req-Id")</code>、{' '}
-                  <code className="font-mono">resp.json("$.data.id")</code>、<code className="font-mono">jsonpath(s, expr)</code> 与{' '}
-                  <code className="font-mono">assert(cond, msg)</code>。
+                <div className="flex flex-wrap items-center gap-1 text-[11px]" aria-label="脚本可用函数">
+                  {['vars.name', 'now_sec()', 'now_ms()', 'uuid()', 'hmac_sha256(k, d)', 'base64_encode(s)', 'resp.status', 'resp.header(n)', 'resp.json(p)', 'jsonpath(s, p)', 'assert(c, msg)'].map((fn) => (
+                    <code key={fn} className="px-1.5 py-0.5 rounded border border-line bg-surface-subtle font-mono text-fg-muted">
+                      {fn}
+                    </code>
+                  ))}
                 </div>
 
                 <div className="space-y-2">
                   <div>
-                    <h4 className="font-semibold text-slate-800">前置脚本 (Pre-request Script)</h4>
-                    <p className="text-[11px] text-slate-500">在发送请求与渲染请求模板前执行，可将签名/时间戳写入变量供请求引用</p>
+                    <h4 className="font-semibold text-fg">前置脚本</h4>
                   </div>
                   <CodeEditor
                     ariaLabel="前置脚本编辑器"
@@ -2232,8 +2594,7 @@ export function WorkbenchView({
 
                 <div className="space-y-2">
                   <div>
-                    <h4 className="font-semibold text-slate-800">后置脚本 (Post-response Script)</h4>
-                    <p className="text-[11px] text-slate-500">在提取与断言之后执行，可直接读取 resp 状态码、响应头和 JSON 字段并进行脚本断言</p>
+                    <h4 className="font-semibold text-fg">后置脚本</h4>
                   </div>
                   <CodeEditor
                     ariaLabel="后置脚本编辑器"
@@ -2256,37 +2617,35 @@ export function WorkbenchView({
             {reqSubTab === 'docs' && (
               <div className="space-y-4">
                 <div>
-                  <label className="block font-semibold text-slate-700 mb-1">接口用途说明（导出 OpenAPI 文档描述）</label>
+                  <label className="block font-semibold text-fg mb-1">接口说明</label>
                   <textarea
                     rows={2}
                     value={activeTab.api.description || ''}
                     onChange={(e) => updateActiveAPI((cur) => ({ ...cur, description: e.target.value }))}
-                    placeholder="简要说明接口用途、调用前提和注意事项..."
-                    className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md focus:border-sky-500 focus:outline-none"
+                    placeholder="用途、前置条件、注意事项"
+                    className="w-full px-2.5 py-1.5 border border-line-strong rounded-md bg-surface text-fg focus:border-sky-500 focus:outline-none"
                   />
                 </div>
 
                 <div className="space-y-2">
                   <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-semibold text-slate-700">响应示例（OpenAPI Examples / Mock 参考）</span>
+                    <span className="font-semibold text-fg">响应示例</span>
                     <div className="flex items-center gap-2">
                       {activeTab.debugResp?.result && (
                         <button
                           type="button"
                           onClick={() => {
                             const res = activeTab.debugResp!.result
-                            const item: APIResponseExample = {
+                            saveResponseAsExample({
                               name: `响应 ${res.status || 200}`,
                               status: res.status || 200,
                               content_type: res.content_type || 'application/json',
                               body: res.body || '',
-                            }
-                            updateActiveAPI((cur) => ({ ...cur, examples: [...examples, item] }))
-                            onToast('success', '已从最近一次调试响应保存示例')
+                            })
                           }}
-                          className="inline-flex items-center gap-1 px-2 py-1 rounded border border-sky-300 bg-sky-50 text-sky-800 hover:bg-sky-100 font-medium"
+                          className="inline-flex items-center gap-1 px-2 py-1 rounded-md border border-sky-300 bg-sky-50 text-sky-800 hover:bg-sky-100 font-medium"
                         >
-                          <Sparkles className="w-3 h-3" /> 将当前调试响应存为示例
+                          <Sparkles className="w-3 h-3" /> 存入当前响应
                         </button>
                       )}
                       <button
@@ -2307,10 +2666,10 @@ export function WorkbenchView({
                     </div>
                   </div>
                   {examples.length === 0 ? (
-                    <p className="text-slate-400">暂无响应示例。可在调试接口后一键保存，或手动添加。</p>
+                    <p className="text-fg-subtle">暂无示例</p>
                   ) : (
                     examples.map((ex, i) => (
-                      <div key={i} className="p-2.5 rounded-lg border border-slate-200 bg-slate-50/70 space-y-2">
+                      <div key={i} className="p-2.5 rounded-lg border border-line bg-surface-subtle space-y-2">
                         <div className="grid grid-cols-12 gap-2 items-center">
                           <input
                             type="text"
@@ -2322,7 +2681,7 @@ export function WorkbenchView({
                                 examples: examples.map((x, idx) => (idx === i ? { ...x, name: e.target.value } : x)),
                               }))
                             }
-                            className="col-span-4 px-2 py-1 border border-slate-300 rounded bg-white"
+                            className="col-span-4 px-2 py-1 border border-line-strong rounded bg-surface"
                           />
                           <input
                             type="number"
@@ -2336,7 +2695,7 @@ export function WorkbenchView({
                                 ),
                               }))
                             }
-                            className="col-span-2 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                            className="col-span-2 px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                           />
                           <input
                             type="text"
@@ -2350,14 +2709,14 @@ export function WorkbenchView({
                                 ),
                               }))
                             }
-                            className="col-span-5 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                            className="col-span-5 px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                           />
                           <button
                             type="button"
                             onClick={() =>
                               updateActiveAPI((cur) => ({ ...cur, examples: examples.filter((_, idx) => idx !== i) }))
                             }
-                            className="col-span-1 justify-self-end p-1 text-slate-400 hover:text-rose-600"
+                            className="col-span-1 justify-self-end p-1 text-fg-subtle hover:text-rose-600"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
                           </button>
@@ -2371,7 +2730,7 @@ export function WorkbenchView({
                               examples: examples.map((x, idx) => (idx === i ? { ...x, body: e.target.value } : x)),
                             }))
                           }
-                          className="w-full px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                          className="w-full px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                         />
                       </div>
                     ))
@@ -2380,7 +2739,7 @@ export function WorkbenchView({
 
                 <div className="space-y-2">
                   <div className="flex items-center justify-between">
-                    <span className="font-semibold text-slate-700">响应字段文档（用于 OpenAPI Schema 导出）</span>
+                    <span className="font-semibold text-fg">响应字段</span>
                     <button
                       type="button"
                       onClick={() =>
@@ -2394,14 +2753,14 @@ export function WorkbenchView({
                       }
                       className="inline-flex items-center gap-1 text-sky-600 hover:underline font-medium"
                     >
-                      <Plus className="w-3.5 h-3.5" /> 添加字段说明
+                      <Plus className="w-3.5 h-3.5" /> 添加字段
                     </button>
                   </div>
                   {responseFields.length === 0 ? (
-                    <p className="text-slate-400">暂无响应字段文档定义。</p>
+                    <p className="text-fg-subtle">暂无字段</p>
                   ) : (
                     responseFields.map((fd, i) => (
-                      <div key={i} className="grid grid-cols-12 gap-2 items-center p-2 rounded border border-slate-200 bg-slate-50/60">
+                      <div key={i} className="grid grid-cols-12 gap-2 items-center p-2 rounded border border-line bg-surface-subtle">
                         <input
                           type="text"
                           value={fd.path}
@@ -2414,7 +2773,7 @@ export function WorkbenchView({
                               ),
                             }))
                           }
-                          className="col-span-3 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
+                          className="col-span-3 px-2 py-1 border border-line-strong rounded font-mono bg-surface"
                         />
                         <select
                           value={fd.type || 'string'}
@@ -2426,7 +2785,7 @@ export function WorkbenchView({
                               ),
                             }))
                           }
-                          className="col-span-2 px-2 py-1 border border-slate-300 rounded bg-white"
+                          className="col-span-2 px-2 py-1 border border-line-strong rounded bg-surface"
                         >
                           <option value="string">string</option>
                           <option value="number">number</option>
@@ -2435,7 +2794,7 @@ export function WorkbenchView({
                           <option value="object">object</option>
                           <option value="array">array</option>
                         </select>
-                        <label className="col-span-2 inline-flex items-center gap-1 text-slate-700 cursor-pointer">
+                        <label className="col-span-2 inline-flex items-center gap-1 text-fg-muted cursor-pointer">
                           <input
                             type="checkbox"
                             checked={Boolean(fd.required)}
@@ -2453,7 +2812,7 @@ export function WorkbenchView({
                         <input
                           type="text"
                           value={fd.description || ''}
-                          placeholder="字段业务含义说明"
+                          placeholder="含义"
                           onChange={(e) =>
                             updateActiveAPI((cur) => ({
                               ...cur,
@@ -2462,7 +2821,7 @@ export function WorkbenchView({
                               ),
                             }))
                           }
-                          className="col-span-4 px-2 py-1 border border-slate-300 rounded bg-white"
+                          className="col-span-4 px-2 py-1 border border-line-strong rounded bg-surface"
                         />
                         <button
                           type="button"
@@ -2472,7 +2831,7 @@ export function WorkbenchView({
                               response_fields: responseFields.filter((_, idx) => idx !== i),
                             }))
                           }
-                          className="col-span-1 justify-self-end p-1 text-slate-400 hover:text-rose-600"
+                          className="col-span-1 justify-self-end p-1 text-fg-subtle hover:text-rose-600"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -2507,7 +2866,7 @@ export function WorkbenchView({
                 updateSplitPct(splitPct + 4)
               }
             }}
-            className={`shrink-0 bg-slate-200 hover:bg-sky-500 focus:bg-sky-600 focus:outline-none transition-colors flex items-center justify-center ${
+            className={`shrink-0 bg-[var(--tg-border)] hover:bg-sky-500 focus:bg-sky-600 focus:outline-none transition-colors flex items-center justify-center ${
               splitMode === 'horizontal' ? 'w-1.5 cursor-col-resize' : 'h-1.5 cursor-row-resize'
             }`}
           />
@@ -2521,6 +2880,9 @@ export function WorkbenchView({
               historyList={history}
               loadingDebug={sending}
               autoSyncTempVars={autoSyncTempVars}
+              fileBaseName={activeTab.api.name}
+              activeHistoryId={activeTab.historyId}
+              onSaveExample={canWrite ? saveResponseAsExample : undefined}
               onToggleAutoSync={setAutoSyncTempVars}
               onPickExtractJSONPath={addExtractFromJSON}
               onPickAssertJSONPath={addAssertFromJSON}
@@ -2579,7 +2941,10 @@ export function WorkbenchView({
         apiDraft={activeTab.api}
         environmentId={activeEnvId}
         tempVars={tempVars}
+        initialTab={curlTab}
         onClose={() => setCurlOpen(false)}
+        onApplyToDraft={applyParsedToDraft}
+        onOpenInNewTab={openParsedInNewTab}
         onToast={onToast}
       />
 

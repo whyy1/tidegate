@@ -40,6 +40,8 @@ function sampleToDraftAPI(sample: SampleView): Partial<API> {
   for (const h of sample.request_headers || []) {
     const low = h.name.toLowerCase()
     if (low === 'host' || low === 'content-length') continue
+    // Redacted secrets would replay as literal "******" and trigger 401s; let auth/env re-apply them.
+    if (/^\*{3,}$/.test(h.value.trim())) continue
     if (low === 'content-type') contentType = h.value
     headers.push({ name: h.name, value: h.value })
   }
@@ -262,8 +264,9 @@ export function App() {
 
   if (booting || !setupStatus) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-slate-100 text-slate-600 text-sm">
-        正在连接 Tidegate 控制台...
+      <div className="min-h-dvh flex items-center justify-center gap-2.5 bg-canvas text-fg-muted text-sm">
+        <span className="h-2 w-2 rounded-full bg-sky-500 animate-pulse" />
+        正在连接 Tidegate…
       </div>
     )
   }
@@ -323,8 +326,15 @@ export function App() {
         />
 
         {!activeProject ? (
-          <div className="flex-1 flex items-center justify-center text-sm text-slate-500">
-            暂无可用项目，请点击顶部「项目管理」新建或导入项目。
+          <div className="flex-1 flex flex-col items-center justify-center gap-3 text-sm text-fg-subtle">
+            <span>暂无项目</span>
+            <button
+              type="button"
+              onClick={() => setProjectModalOpen(true)}
+              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-primary-hover"
+            >
+              新建或导入项目
+            </button>
           </div>
         ) : (
           <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
@@ -354,7 +364,7 @@ export function App() {
 
             <Suspense
               fallback={
-                <div className="flex-1 flex items-center justify-center text-xs text-slate-500">正在按需加载视图模块...</div>
+                <div className="flex-1 flex items-center justify-center text-xs text-fg-subtle">加载中…</div>
               }
             >
               {activeTab === 'scenarios' && (
@@ -369,6 +379,10 @@ export function App() {
                     setInspectRunId('')
                     setPreloadedScenarioId(scenarioId)
                     setActiveTab('run')
+                  }}
+                  onEditAPI={(apiId) => {
+                    setActiveTab('workbench')
+                    setOpenAPIRequest({ seq: replaySeq++, apiId })
                   }}
                   onToast={pushToast}
                 />

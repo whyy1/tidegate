@@ -72,6 +72,26 @@ func normalizeTokenProjectIDs(raw []string) []string {
 	return out
 }
 
+func normalizeTokenMCPTools(raw []string) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	seen := make(map[string]bool, len(raw))
+	out := make([]string, 0, len(raw))
+	for _, s := range raw {
+		v := strings.ToLower(strings.TrimSpace(s))
+		if v != "" && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	sort.Strings(out)
+	return out
+}
+
 func decodeCSVList(raw string) []string {
 	if strings.TrimSpace(raw) == "" {
 		return nil
@@ -99,6 +119,7 @@ type APIToken struct {
 	Role       Role       `json:"role"`
 	Scopes     []string   `json:"scopes,omitempty"`
 	ProjectIDs []string   `json:"project_ids,omitempty"`
+	MCPTools   []string   `json:"mcp_tools,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
 	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
@@ -111,6 +132,7 @@ type CreateTokenRequest struct {
 	Role       Role
 	Scopes     []string
 	ProjectIDs []string
+	MCPTools   []string
 	TTL        time.Duration
 }
 
@@ -139,6 +161,7 @@ func (s *Service) CreateAPIToken(ctx context.Context, req CreateTokenRequest) (*
 		return nil, "", err
 	}
 	projectIDs := normalizeTokenProjectIDs(req.ProjectIDs)
+	mcpTools := normalizeTokenMCPTools(req.MCPTools)
 
 	id, err := newSessionID()
 	if err != nil {
@@ -164,9 +187,9 @@ func (s *Service) CreateAPIToken(ctx context.Context, req CreateTokenRequest) (*
 	}
 
 	if _, err := s.db.ExecContext(ctx,
-		`INSERT INTO auth_tokens (id, user_id, name, token_prefix, token_hash, role, scopes, project_ids, created_at, expires_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		id, owner.ID, name, prefix, sum[:], string(role), strings.Join(scopes, ","), strings.Join(projectIDs, ","), now.UnixMilli(), expMS); err != nil {
+		`INSERT INTO auth_tokens (id, user_id, name, token_prefix, token_hash, role, scopes, project_ids, mcp_tools, created_at, expires_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, owner.ID, name, prefix, sum[:], string(role), strings.Join(scopes, ","), strings.Join(projectIDs, ","), strings.Join(mcpTools, ","), now.UnixMilli(), expMS); err != nil {
 		return nil, "", fmt.Errorf("auth: create api token: %w", err)
 	}
 	return &APIToken{
@@ -177,6 +200,7 @@ func (s *Service) CreateAPIToken(ctx context.Context, req CreateTokenRequest) (*
 		Role:       role,
 		Scopes:     scopes,
 		ProjectIDs: projectIDs,
+		MCPTools:   mcpTools,
 		CreatedAt:  now,
 		ExpiresAt:  expiresAt,
 	}, plaintext, nil
@@ -185,7 +209,7 @@ func (s *Service) CreateAPIToken(ctx context.Context, req CreateTokenRequest) (*
 // ListAPITokens returns API tokens owned by userID ordered newest first.
 func (s *Service) ListAPITokens(ctx context.Context, userID int64) ([]APIToken, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, user_id, name, token_prefix, role, scopes, project_ids, created_at, last_used_at, expires_at
+		`SELECT id, user_id, name, token_prefix, role, scopes, project_ids, mcp_tools, created_at, last_used_at, expires_at
 		   FROM auth_tokens
 		  WHERE user_id = ?
 		  ORDER BY created_at DESC, id DESC`, userID)
@@ -196,17 +220,18 @@ func (s *Service) ListAPITokens(ctx context.Context, userID int64) ([]APIToken, 
 	out := []APIToken{}
 	for rows.Next() {
 		var (
-			tok                 APIToken
-			role, scopesRaw, pids string
-			created             int64
-			lastUsed, exp       sql.NullInt64
+			tok                             APIToken
+			role, scopesRaw, pids, mcpRaw   string
+			created                         int64
+			lastUsed, exp                   sql.NullInt64
 		)
-		if err := rows.Scan(&tok.ID, &tok.UserID, &tok.Name, &tok.Prefix, &role, &scopesRaw, &pids, &created, &lastUsed, &exp); err != nil {
+		if err := rows.Scan(&tok.ID, &tok.UserID, &tok.Name, &tok.Prefix, &role, &scopesRaw, &pids, &mcpRaw, &created, &lastUsed, &exp); err != nil {
 			return nil, fmt.Errorf("auth: scan api token: %w", err)
 		}
 		tok.Role = Role(role)
 		tok.Scopes = decodeCSVList(scopesRaw)
 		tok.ProjectIDs = decodeCSVList(pids)
+		tok.MCPTools = decodeCSVList(mcpRaw)
 		tok.CreatedAt = time.UnixMilli(created)
 		if lastUsed.Valid {
 			t := time.UnixMilli(lastUsed.Int64)
@@ -276,20 +301,20 @@ func (s *Service) AuthenticateBearerFrom(ctx context.Context, rawToken, remoteAd
 	}
 	sum := sha256.Sum256([]byte(rawToken))
 	var (
-		tok                                 APIToken
-		u                                   User
-		tokRole, userRole, scopesRaw, pids  string
-		totpEnabled                         int
-		tokCreated                          int64
-		lastUsed, exp                       sql.NullInt64
-		userCreated, userPwChangedAt        int64
+		tok                                         APIToken
+		u                                           User
+		tokRole, userRole, scopesRaw, pids, mcpRaw  string
+		totpEnabled                                 int
+		tokCreated                                  int64
+		lastUsed, exp                               sql.NullInt64
+		userCreated, userPwChangedAt                int64
 	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT t.id, t.user_id, t.name, t.token_prefix, t.role, t.scopes, t.project_ids, t.created_at, t.last_used_at, t.expires_at,
+		`SELECT t.id, t.user_id, t.name, t.token_prefix, t.role, t.scopes, t.project_ids, t.mcp_tools, t.created_at, t.last_used_at, t.expires_at,
 		        u.username, u.role, u.totp_enabled, u.created_at, u.password_changed_at
 		   FROM auth_tokens t JOIN auth_users u ON u.id = t.user_id
 		  WHERE t.token_hash = ?`, sum[:]).
-		Scan(&tok.ID, &tok.UserID, &tok.Name, &tok.Prefix, &tokRole, &scopesRaw, &pids, &tokCreated, &lastUsed, &exp,
+		Scan(&tok.ID, &tok.UserID, &tok.Name, &tok.Prefix, &tokRole, &scopesRaw, &pids, &mcpRaw, &tokCreated, &lastUsed, &exp,
 			&u.Username, &userRole, &totpEnabled, &userCreated, &userPwChangedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fail(ErrUnauthenticated)
@@ -300,6 +325,7 @@ func (s *Service) AuthenticateBearerFrom(ctx context.Context, rawToken, remoteAd
 	tok.Role = Role(tokRole)
 	tok.Scopes = decodeCSVList(scopesRaw)
 	tok.ProjectIDs = decodeCSVList(pids)
+	tok.MCPTools = decodeCSVList(mcpRaw)
 	tok.CreatedAt = time.UnixMilli(tokCreated)
 	if lastUsed.Valid {
 		t := time.UnixMilli(lastUsed.Int64)

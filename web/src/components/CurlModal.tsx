@@ -1,7 +1,11 @@
 import { useEffect, useState } from 'react'
-import { Check, Copy, Terminal, X } from 'lucide-react'
+import { Check, ClipboardPaste, Copy, FilePlus, Terminal, Wand2, X } from 'lucide-react'
 import { api, APIError } from '../lib/api'
+import { copyText } from '../lib/download'
 import type { API } from '../lib/types'
+import { useNativeDialog } from '../lib/useNativeDialog'
+
+export type CurlModalTab = 'export' | 'import'
 
 interface Props {
   open: boolean
@@ -9,20 +13,73 @@ interface Props {
   apiDraft: Partial<API> | null
   environmentId: string
   tempVars: Record<string, string>
+  initialTab?: CurlModalTab
   onClose: () => void
+  onApplyToDraft: (parsed: API) => void
+  onOpenInNewTab: (parsed: API) => void
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
 }
 
-export function CurlModal({ open, projectId, apiDraft, environmentId, tempVars, onClose, onToast }: Props) {
+function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+  label,
+}: {
+  value: T
+  options: Array<{ id: T; label: string }>
+  onChange: (v: T) => void
+  label: string
+}) {
+  return (
+    <div role="radiogroup" aria-label={label} className="inline-flex rounded-md border border-line p-0.5 bg-surface-subtle">
+      {options.map((o) => (
+        <button
+          key={o.id}
+          type="button"
+          role="radio"
+          aria-checked={value === o.id}
+          onClick={() => onChange(o.id)}
+          className={`px-2.5 py-1 rounded font-medium transition-colors ${
+            value === o.id ? 'bg-surface shadow-xs text-tidal' : 'text-fg-muted hover:text-fg'
+          }`}
+        >
+          {o.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+export function CurlModal({
+  open,
+  projectId,
+  apiDraft,
+  environmentId,
+  tempVars,
+  initialTab = 'export',
+  onClose,
+  onApplyToDraft,
+  onOpenInNewTab,
+  onToast,
+}: Props) {
+  const ref = useNativeDialog(open, onClose)
+  const [tab, setTab] = useState<CurlModalTab>(initialTab)
   const [mode, setMode] = useState<'expanded' | 'template'>('expanded')
   const [shell, setShell] = useState<'bash' | 'powershell'>('bash')
   const [redact, setRedact] = useState(true)
   const [curlText, setCurlText] = useState('')
   const [loading, setLoading] = useState(false)
   const [copied, setCopied] = useState(false)
+  const [pasteText, setPasteText] = useState('')
+  const [parsing, setParsing] = useState<'' | 'draft' | 'tab'>('')
 
   useEffect(() => {
-    if (!open || !apiDraft) return
+    if (open) setTab(initialTab)
+  }, [open, initialTab])
+
+  useEffect(() => {
+    if (!open || tab !== 'export' || !apiDraft) return
     let cancelled = false
     setLoading(true)
     setCopied(false)
@@ -51,115 +108,183 @@ export function CurlModal({ open, projectId, apiDraft, environmentId, tempVars, 
     return () => {
       cancelled = true
     }
-  }, [open, projectId, apiDraft, environmentId, tempVars, mode, shell, redact])
-
-  if (!open || !apiDraft) return null
+  }, [open, tab, projectId, apiDraft, environmentId, tempVars, mode, shell, redact])
 
   const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(curlText)
+    if (await copyText(curlText)) {
       setCopied(true)
-      onToast('success', '已复制 cURL 命令到剪贴板')
       window.setTimeout(() => setCopied(false), 1500)
-    } catch {
-      onToast('error', '无法自动写入剪贴板，请手动全选复制')
+    } else {
+      onToast('error', '无法写入剪贴板，请手动全选复制')
+    }
+  }
+
+  const handleParse = async (target: 'draft' | 'tab') => {
+    const cmd = pasteText.trim()
+    if (!cmd) return
+    setParsing(target)
+    try {
+      const { api: parsed } = await api.parseCurl(cmd)
+      if (target === 'draft') onApplyToDraft(parsed)
+      else onOpenInNewTab(parsed)
+      setPasteText('')
+      onClose()
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : '解析 cURL 失败')
+    } finally {
+      setParsing('')
     }
   }
 
   return (
-    <div className="fixed inset-0 z-40 bg-slate-900/40 flex items-center justify-center p-4">
-      <div className="w-full max-w-2xl bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden">
-        <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-          <div className="flex items-center gap-2 text-sm font-semibold text-slate-900">
-            <Terminal className="w-4 h-4 text-sky-600" />
-            <span>导出 cURL 命令</span>
-          </div>
-          <button type="button" onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 rounded">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="p-5 space-y-3 text-xs">
-          <div className="flex flex-wrap items-center gap-3">
-            <div className="inline-flex rounded border border-slate-200 p-0.5 bg-slate-50">
-              <button
-                type="button"
-                onClick={() => setMode('expanded')}
-                className={`px-2.5 py-1 rounded font-medium ${
-                  mode === 'expanded' ? 'bg-white shadow-xs text-sky-700' : 'text-slate-600'
-                }`}
-              >
-                展开环境变量与目录继承
-              </button>
-              <button
-                type="button"
-                onClick={() => setMode('template')}
-                className={`px-2.5 py-1 rounded font-medium ${
-                  mode === 'template' ? 'bg-white shadow-xs text-sky-700' : 'text-slate-600'
-                }`}
-              >
-                保留 {'{{变量}}'} 模板
-              </button>
+    <dialog
+      ref={ref}
+      {...({ closedby: 'any' } as Record<string, string>)}
+      aria-labelledby="tg-curl-title"
+      className="tg-dialog w-[min(44rem,calc(100vw-2rem))] max-h-[86dvh]"
+    >
+      {open && (
+        <>
+          <div className="px-4 border-b border-line flex items-center justify-between gap-3 bg-surface-subtle shrink-0">
+            <div className="flex items-center gap-3 min-w-0">
+              <h2 id="tg-curl-title" className="flex items-center gap-1.5 text-sm font-semibold text-fg py-2.5 shrink-0">
+                <Terminal className="w-4 h-4 text-tidal" /> cURL
+              </h2>
+              <div role="tablist" aria-label="cURL 操作" className="tg-tablist gap-1 text-xs font-medium">
+                {(
+                  [
+                    { id: 'export' as const, label: '导出为 cURL' },
+                    { id: 'import' as const, label: '粘贴导入' },
+                  ] as const
+                ).map((t) => (
+                  <button
+                    key={t.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === t.id}
+                    onClick={() => setTab(t.id)}
+                    className={`tg-tab px-2.5 py-3 transition-colors ${
+                      tab === t.id ? 'text-tidal' : 'text-fg-muted hover:text-fg'
+                    }`}
+                  >
+                    {t.label}
+                  </button>
+                ))}
+              </div>
             </div>
-
-            <div className="inline-flex rounded border border-slate-200 p-0.5 bg-slate-50">
-              <button
-                type="button"
-                onClick={() => setShell('bash')}
-                className={`px-2.5 py-1 rounded font-medium ${
-                  shell === 'bash' ? 'bg-white shadow-xs text-sky-700' : 'text-slate-600'
-                }`}
-              >
-                Bash
-              </button>
-              <button
-                type="button"
-                onClick={() => setShell('powershell')}
-                className={`px-2.5 py-1 rounded font-medium ${
-                  shell === 'powershell' ? 'bg-white shadow-xs text-sky-700' : 'text-slate-600'
-                }`}
-              >
-                PowerShell
-              </button>
-            </div>
-
-            {mode === 'expanded' && (
-              <label className="inline-flex items-center gap-1.5 text-slate-700 cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={redact}
-                  onChange={(e) => setRedact(e.target.checked)}
-                  className="rounded border-slate-300 text-sky-600"
-                />
-                <span>敏感头与密钥值脱敏（推荐分享时开启）</span>
-              </label>
-            )}
-          </div>
-
-          <pre className="p-3.5 rounded-lg bg-slate-900 text-sky-100 font-mono text-xs overflow-auto max-h-72 whitespace-pre-wrap break-all">
-            {loading ? '正在生成...' : curlText || '(无内容)'}
-          </pre>
-
-          <div className="flex justify-end gap-2">
             <button
               type="button"
               onClick={onClose}
-              className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
+              aria-label="关闭"
+              className="p-1 text-fg-subtle hover:text-fg rounded shrink-0"
             >
-              关闭
-            </button>
-            <button
-              type="button"
-              disabled={!curlText || loading}
-              onClick={() => void handleCopy()}
-              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white font-medium disabled:opacity-50"
-            >
-              {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-              {copied ? '已复制' : '复制命令'}
+              <X className="w-4 h-4" />
             </button>
           </div>
-        </div>
-      </div>
-    </div>
+
+          {tab === 'export' ? (
+            <>
+              <div className="flex-1 min-h-0 overflow-y-auto tg-scroller p-4 space-y-3 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Segmented
+                    label="Shell"
+                    value={shell}
+                    onChange={setShell}
+                    options={[
+                      { id: 'bash', label: 'Bash' },
+                      { id: 'powershell', label: 'PowerShell' },
+                    ]}
+                  />
+                  <Segmented
+                    label="变量处理"
+                    value={mode}
+                    onChange={setMode}
+                    options={[
+                      { id: 'expanded', label: '展开变量' },
+                      { id: 'template', label: "保留 {{变量}}" },
+                    ]}
+                  />
+                  {mode === 'expanded' && (
+                    <label className="inline-flex items-center gap-1.5 text-fg-muted cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={redact}
+                        onChange={(e) => setRedact(e.target.checked)}
+                        className="rounded border-line-strong"
+                      />
+                      <span>密钥脱敏</span>
+                    </label>
+                  )}
+                </div>
+
+                <pre
+                  aria-busy={loading}
+                  className="p-3.5 rounded-lg border tg-code-surface tg-scroller-dark font-mono text-xs overflow-auto max-h-[50dvh] whitespace-pre-wrap break-all"
+                >
+                  {loading ? '生成中…' : curlText || '—'}
+                </pre>
+              </div>
+              <div className="px-4 py-3 border-t border-line flex justify-end gap-2 text-xs shrink-0">
+                <button
+                  type="button"
+                  disabled={!curlText || loading}
+                  onClick={() => void handleCopy()}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-primary hover:bg-primary-hover text-white font-medium disabled:opacity-50"
+                >
+                  {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                  {copied ? '已复制' : '复制命令'}
+                </button>
+              </div>
+            </>
+          ) : (
+            <>
+              <div className="flex-1 min-h-0 overflow-y-auto tg-scroller p-4 text-xs">
+                <label htmlFor="tg-curl-paste" className="sr-only">
+                  cURL 命令
+                </label>
+                <textarea
+                  id="tg-curl-paste"
+                  name="curl-command"
+                  rows={10}
+                  autoFocus
+                  value={pasteText}
+                  onChange={(e) => setPasteText(e.target.value)}
+                  onKeyDown={(e) => {
+                    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+                      e.preventDefault()
+                      void handleParse('draft')
+                    }
+                  }}
+                  spellCheck={false}
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  placeholder={"curl -X POST 'https://api.example.com/v1/orders' -H 'Content-Type: application/json' -d '{\"id\":1}'"}
+                  className="w-full p-3 rounded-lg border tg-code-surface tg-scroller-dark font-mono text-xs leading-relaxed focus:outline-none focus:ring-2 focus:ring-sky-500/40 resize-y"
+                />
+              </div>
+              <div className="px-4 py-3 border-t border-line flex flex-wrap justify-end gap-2 text-xs shrink-0">
+                <button
+                  type="button"
+                  disabled={!pasteText.trim() || parsing !== ''}
+                  onClick={() => void handleParse('tab')}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium disabled:opacity-50"
+                >
+                  <FilePlus className="w-3.5 h-3.5" /> {parsing === 'tab' ? '解析中…' : '新开页签'}
+                </button>
+                <button
+                  type="button"
+                  disabled={!pasteText.trim() || parsing !== ''}
+                  onClick={() => void handleParse('draft')}
+                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-primary hover:bg-primary-hover text-white font-medium disabled:opacity-50"
+                >
+                  {parsing === 'draft' ? <Wand2 className="w-3.5 h-3.5 animate-pulse" /> : <ClipboardPaste className="w-3.5 h-3.5" />}
+                  {parsing === 'draft' ? '解析中…' : '回填当前草稿'}
+                </button>
+              </div>
+            </>
+          )}
+        </>
+      )}
+    </dialog>
   )
 }

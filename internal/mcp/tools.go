@@ -398,6 +398,7 @@ func buildTools() []toolDef {
 						"scripts_disabled":               pol.ScriptsDisabled,
 						"mcp_disabled":                   pol.MCPDisabled,
 						"mcp_allow_load_runs":            !pol.MCPDisableLoadRuns,
+						"mcp_disabled_tools":             pol.MCPDisabledTools,
 						"effective_mcp_max_vus":          pol.EffectiveMCPMaxVUs(),
 						"effective_mcp_max_duration_sec": int(pol.EffectiveMCPMaxDuration().Seconds()),
 					},
@@ -466,7 +467,7 @@ func buildTools() []toolDef {
 		// 11. import_api_spec
 		{
 			readOnly: false,
-			scope:    "write",
+			scope:    "read",
 			spec: Tool{
 				Name:        "import_api_spec",
 				Description: "预览或导入 OpenAPI 3 / Swagger 2 / Postman / Apifox / HAR / JMeter / cURL 规范到项目中。默认 mode=preview（仅差异预览），需确认后再传 mode=apply 写入。",
@@ -514,6 +515,9 @@ func buildTools() []toolDef {
 					return importer.Preview(s.store, pid, imp)
 				}
 				if mode == "apply" {
+					if err := auth.CheckScope(ctx, "write"); err != nil {
+						return nil, err
+					}
 					if _, err := s.authorizeProject(ctx, u, pid, true); err != nil {
 						return nil, err
 					}
@@ -733,11 +737,11 @@ func buildTools() []toolDef {
 				if err != nil {
 					return nil, err
 				}
+				if pol.MCPDisableLoadRuns {
+					return nil, errors.New("管理员已在安全策略中禁用通过 MCP 控制或启动压测任务")
+				}
 				switch strings.ToLower(strings.TrimSpace(in.Action)) {
 				case "start":
-					if pol.MCPDisableLoadRuns {
-						return nil, errors.New("管理员已在安全策略中禁用通过 MCP 启动压测任务")
-					}
 					pid := strings.TrimSpace(in.ProjectID)
 					if pid == "" {
 						return nil, errors.New("action=start 时必须提供 project_id")

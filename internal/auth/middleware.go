@@ -252,6 +252,24 @@ func CheckScope(ctx context.Context, scope string) error {
 	return ErrScopeForbidden
 }
 
+// CheckMCPTool verifies that an API token restricted via MCPTools permits toolName.
+// Cookie sessions and tokens with empty MCPTools are allowed based on scopes/RBAC.
+func CheckMCPTool(ctx context.Context, toolName string) error {
+	tok, ok := TokenFromContext(ctx)
+	if !ok || len(tok.MCPTools) == 0 {
+		return nil
+	}
+	want := strings.ToLower(strings.TrimSpace(toolName))
+	if want == "" || slices.Contains(tok.MCPTools, want) {
+		return nil
+	}
+	return &Error{
+		Code:    CodeScopeForbidden,
+		Status:  http.StatusForbidden,
+		Message: fmt.Sprintf("当前令牌未授权调用 MCP 工具 %q", toolName),
+	}
+}
+
 // BearerToken extracts the token from an "Authorization: Bearer <token>" header.
 func BearerToken(r *http.Request) string {
 	authz := strings.TrimSpace(r.Header.Get("Authorization"))

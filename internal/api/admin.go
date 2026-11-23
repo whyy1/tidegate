@@ -141,6 +141,34 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleAdminResetUserPassword(w http.ResponseWriter, r *http.Request) {
+	uid, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || uid <= 0 {
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "用户 ID 无效"))
+		return
+	}
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	target, err := s.auth.User(r.Context(), uid)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.auth.ResetPassword(r.Context(), target.Username, body.Password); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "user.password_reset", "user", strconv.FormatInt(uid, 10), map[string]any{
+		"username": target.Username,
+	})
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // ---------------------------------------------------------------------------
 // API Tokens
 
@@ -169,6 +197,7 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		Role       auth.Role `json:"role"`
 		Scopes     []string  `json:"scopes"`
 		ProjectIDs []string  `json:"project_ids"`
+		MCPTools   []string  `json:"mcp_tools"`
 		ExpiresIn  string    `json:"expires_in"`
 		TTLDays    int       `json:"ttl_days"`
 	}
@@ -194,6 +223,7 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		Role:       body.Role,
 		Scopes:     body.Scopes,
 		ProjectIDs: body.ProjectIDs,
+		MCPTools:   body.MCPTools,
 		TTL:        ttl,
 	})
 	if err != nil {
@@ -205,6 +235,7 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		"role":        tok.Role,
 		"scopes":      tok.Scopes,
 		"project_ids": tok.ProjectIDs,
+		"mcp_tools":   tok.MCPTools,
 		"prefix":      tok.Prefix,
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -238,6 +269,19 @@ func (s *Server) handleGetSecurityPolicy(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	writeJSON(w, http.StatusOK, pol)
+}
+
+func (s *Server) handleMCPCatalog(w http.ResponseWriter, r *http.Request) {
+	pol, err := s.ctrl.GetSecurityPolicy(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"tools":                      s.mcp.Catalog(pol),
+		"effective_max_vus":          pol.EffectiveMCPMaxVUs(),
+		"effective_max_duration_sec": int(pol.EffectiveMCPMaxDuration().Seconds()),
+	})
 }
 
 func (s *Server) handlePutSecurityPolicy(w http.ResponseWriter, r *http.Request) {

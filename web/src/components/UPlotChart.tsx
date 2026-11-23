@@ -1,5 +1,6 @@
-import { useEffect, useRef } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import uPlot from 'uplot'
+import { chartPalette, resolvedScheme, useSchemeObserver, type ResolvedScheme } from '../lib/theme'
 
 export interface ChartSeriesSpec {
   label: string
@@ -23,6 +24,8 @@ interface Props {
   alertWindows?: AlertWindow[]
 }
 
+const AXIS_FONT = '11px system-ui, -apple-system, "Segoe UI", sans-serif'
+
 export function UPlotChart({ title, series, data, height = 220, yUnit = '', alertWindows = [] }: Props) {
   const hostRef = useRef<HTMLDivElement | null>(null)
   const plotRef = useRef<uPlot | null>(null)
@@ -30,15 +33,20 @@ export function UPlotChart({ title, series, data, height = 220, yUnit = '', aler
   const dataRef = useRef<uPlot.AlignedData>(data)
   const prevDataRef = useRef<uPlot.AlignedData | null>(null)
   const prevAlertsRef = useRef<AlertWindow[] | null>(null)
+  const [scheme, setScheme] = useState<ResolvedScheme>(() => resolvedScheme())
 
   alertsRef.current = alertWindows
   dataRef.current = data
+
+  const onScheme = useCallback((s: ResolvedScheme) => setScheme(s), [])
+  useSchemeObserver(onScheme)
 
   const seriesKey = series.map((s) => `${s.label}:${s.stroke}`).join('|')
 
   useEffect(() => {
     const el = hostRef.current
     if (!el) return
+    const pal = chartPalette(scheme)
 
     const width = Math.max(320, el.clientWidth || 520)
     const opts: uPlot.Options = {
@@ -56,21 +64,23 @@ export function UPlotChart({ title, series, data, height = 220, yUnit = '', aler
       },
       axes: [
         {
-          stroke: '#64748b',
-          grid: { stroke: '#e2e8f0', width: 1 },
+          stroke: pal.axis,
+          grid: { stroke: pal.grid, width: 1 },
+          ticks: { stroke: pal.grid, width: 1 },
           values: (_u, vals) => vals.map((v) => `${Math.round(v)}s`),
-          font: '11px system-ui,sans-serif',
+          font: AXIS_FONT,
         },
         {
-          stroke: '#64748b',
-          grid: { stroke: '#e2e8f0', width: 1 },
+          stroke: pal.axis,
+          grid: { stroke: pal.grid, width: 1 },
+          ticks: { stroke: pal.grid, width: 1 },
           size: 54,
           values: (_u, vals) =>
             vals.map((v) => {
               const s = v >= 1000 ? `${(v / 1000).toFixed(1)}k` : v >= 10 ? v.toFixed(0) : v.toFixed(2)
               return yUnit ? `${s}${yUnit}` : s
             }),
-          font: '11px system-ui,sans-serif',
+          font: AXIS_FONT,
         },
       ],
       series: [
@@ -78,18 +88,22 @@ export function UPlotChart({ title, series, data, height = 220, yUnit = '', aler
           label: '耗时',
           value: (_u, v) => (v == null ? '-' : `${v.toFixed(1)}s`),
         },
-        ...series.map((s): uPlot.Series => ({
-          label: s.label,
-          stroke: s.stroke,
-          fill: s.fill,
-          width: 2,
-          dash: s.dash,
-          spanGaps: true,
-          value: (_u, v) => (v == null ? '-' : `${v.toFixed(2)}${yUnit ? ' ' + yUnit : ''}`),
-        })),
+        ...series.map(
+          (s): uPlot.Series => ({
+            label: s.label,
+            stroke: s.stroke,
+            fill: s.fill,
+            width: 2,
+            dash: s.dash,
+            spanGaps: true,
+            points: { size: 5, fill: pal.surface },
+            value: (_u, v) => (v == null ? '-' : `${v.toFixed(2)}${yUnit ? ' ' + yUnit : ''}`),
+          })
+        ),
       ],
       cursor: {
         drag: { x: false, y: false },
+        points: { size: 7, fill: pal.surface, width: 2 },
       },
       hooks: {
         drawClear: [
@@ -105,7 +119,13 @@ export function UPlotChart({ title, series, data, height = 220, yUnit = '', aler
               const x1 = Math.min(left + bw, u.valToPos(w.endSec, 'x', true))
               if (x1 > x0) {
                 ctx.fillStyle =
-                  w.level === 'critical' ? 'rgba(225, 29, 72, 0.14)' : 'rgba(245, 158, 11, 0.16)'
+                  w.level === 'critical'
+                    ? scheme === 'dark'
+                      ? 'rgba(244, 63, 94, 0.18)'
+                      : 'rgba(225, 29, 72, 0.14)'
+                    : scheme === 'dark'
+                      ? 'rgba(245, 158, 11, 0.18)'
+                      : 'rgba(245, 158, 11, 0.16)'
                 ctx.fillRect(x0, top, Math.max(2, x1 - x0), bh)
               }
             }
@@ -137,7 +157,8 @@ export function UPlotChart({ title, series, data, height = 220, yUnit = '', aler
       prevDataRef.current = null
       prevAlertsRef.current = null
     }
-  }, [seriesKey, height, yUnit])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seriesKey, height, yUnit, scheme])
 
   useEffect(() => {
     if (!plotRef.current) return
@@ -155,12 +176,12 @@ export function UPlotChart({ title, series, data, height = 220, yUnit = '', aler
   const pointCount = data[0]?.length || 0
 
   return (
-    <div className="bg-white rounded-xl border border-slate-200 p-3.5 shadow-xs">
-      <div className="flex items-center justify-between mb-2">
-        <h3 className="text-xs font-semibold text-slate-800">{title}</h3>
-        <span className="text-[11px] font-mono text-slate-400">{pointCount} 点</span>
-      </div>
-      <div ref={hostRef} className="w-full min-h-[180px]" />
-    </div>
+    <figure className="bg-surface rounded-xl border border-line p-3.5 shadow-xs m-0">
+      <figcaption className="flex items-center justify-between gap-2 mb-2 min-w-0">
+        <h3 className="text-xs font-semibold text-fg truncate">{title}</h3>
+        <span className="text-[11px] font-mono text-fg-subtle tg-tabular shrink-0">{pointCount} 点</span>
+      </figcaption>
+      <div ref={hostRef} data-tg-chart={title} className="w-full min-h-[180px]" />
+    </figure>
   )
 }

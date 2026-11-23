@@ -1,4 +1,4 @@
-import { Eye, EyeOff, Plus, Trash2 } from 'lucide-react'
+import { Eye, EyeOff, Lock, Plus, Trash2 } from 'lucide-react'
 import { useState } from 'react'
 import type { KeyValue } from '../lib/types'
 
@@ -41,10 +41,10 @@ export function KeyValueEditor({
   return (
     <div className="space-y-1.5">
       {items.length > 0 && (
-        <div className="border border-slate-200 rounded-md overflow-hidden bg-white">
+        <div className="border border-line rounded-md overflow-hidden bg-surface">
           <table className="w-full text-xs border-collapse">
             <thead>
-              <tr className="bg-slate-50 text-slate-500 border-b border-slate-200 text-left">
+              <tr className="bg-surface-subtle text-fg-muted border-b border-line text-left">
                 {allowDisable && <th className="w-8 px-2 py-1.5 text-center">启用</th>}
                 <th className="px-2 py-1.5 w-[28%]">名称</th>
                 <th className="px-2 py-1.5">值</th>
@@ -52,19 +52,19 @@ export function KeyValueEditor({
                 <th className="w-16 px-2 py-1.5 text-right">操作</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100">
+            <tbody className="divide-y divide-line">
               {items.map((row, idx) => {
                 const isSecret = Boolean(row.secret)
                 const isShown = Boolean(revealed[idx])
                 return (
-                  <tr key={idx} className={row.disabled ? 'bg-slate-50/70 opacity-65' : ''}>
+                  <tr key={idx} className={row.disabled ? 'bg-surface-subtle opacity-65' : ''}>
                     {allowDisable && (
                       <td className="px-2 py-1 text-center">
                         <input
                           type="checkbox"
                           checked={!row.disabled}
                           onChange={(e) => updateRow(idx, { disabled: !e.target.checked })}
-                          className="rounded border-slate-300 text-sky-600 focus:ring-sky-500"
+                          className="rounded border-line-strong text-sky-600 focus:ring-sky-500"
                         />
                       </td>
                     )}
@@ -73,8 +73,12 @@ export function KeyValueEditor({
                         type="text"
                         value={row.name}
                         placeholder={keyPlaceholder}
+                        autoComplete="off"
+                        autoCorrect="off"
+                        autoCapitalize="none"
+                        spellCheck={false}
                         onChange={(e) => updateRow(idx, { name: e.target.value })}
-                        className="w-full px-2 py-1 text-xs font-mono border border-transparent hover:border-slate-200 focus:border-sky-400 focus:outline-none rounded bg-transparent"
+                        className="w-full px-2 py-1 text-xs font-mono border border-transparent hover:border-line focus:border-sky-400 focus:outline-none rounded bg-transparent text-fg"
                       />
                     </td>
                     <td className="px-1.5 py-1">
@@ -83,15 +87,20 @@ export function KeyValueEditor({
                           type={isSecret && !isShown ? 'password' : 'text'}
                           value={row.value}
                           placeholder={valuePlaceholder}
+                          autoComplete={isSecret ? 'new-password' : 'off'}
+                          autoCorrect="off"
+                          autoCapitalize="none"
+                          spellCheck={false}
                           onChange={(e) => updateRow(idx, { value: e.target.value })}
-                          className="w-full px-2 py-1 text-xs font-mono border border-transparent hover:border-slate-200 focus:border-sky-400 focus:outline-none rounded bg-transparent"
+                          className="w-full px-2 py-1 text-xs font-mono border border-transparent hover:border-line focus:border-sky-400 focus:outline-none rounded bg-transparent text-fg"
                         />
                         {isSecret && (
                           <button
                             type="button"
                             title={isShown ? '隐藏值' : '显示值'}
+                            aria-label={isShown ? '隐藏值' : '显示值'}
                             onClick={() => setRevealed((r) => ({ ...r, [idx]: !r[idx] }))}
-                            className="p-1 text-slate-400 hover:text-slate-600"
+                            className="p-1 text-fg-subtle hover:text-fg"
                           >
                             {isShown ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                           </button>
@@ -105,7 +114,7 @@ export function KeyValueEditor({
                           value={row.description || ''}
                           placeholder="说明（可选）"
                           onChange={(e) => updateRow(idx, { description: e.target.value })}
-                          className="w-full px-2 py-1 text-xs border border-transparent hover:border-slate-200 focus:border-sky-400 focus:outline-none rounded bg-transparent"
+                          className="w-full px-2 py-1 text-xs border border-transparent hover:border-line focus:border-sky-400 focus:outline-none rounded bg-transparent text-fg"
                         />
                       </td>
                     )}
@@ -115,21 +124,24 @@ export function KeyValueEditor({
                           <button
                             type="button"
                             title={isSecret ? '取消敏感标记' : '标记为敏感值（导出时自动清空）'}
+                            aria-label="敏感值"
+                            aria-pressed={isSecret}
                             onClick={() => updateRow(idx, { secret: !isSecret })}
-                            className={`px-1.5 py-0.5 text-[10px] rounded border ${
+                            className={`p-1 rounded border ${
                               isSecret
                                 ? 'bg-amber-50 text-amber-700 border-amber-300'
-                                : 'bg-white text-slate-400 border-slate-200 hover:text-slate-600'
+                                : 'bg-surface text-fg-subtle border-line hover:text-fg'
                             }`}
                           >
-                            密
+                            <Lock className="w-3 h-3" />
                           </button>
                         )}
                         <button
                           type="button"
                           title="删除"
+                          aria-label="删除"
                           onClick={() => removeRow(idx)}
-                          className="p-1 text-slate-400 hover:text-rose-600 rounded"
+                          className="p-1 text-fg-subtle hover:text-rose-600 rounded"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>

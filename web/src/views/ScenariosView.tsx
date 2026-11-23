@@ -1,25 +1,53 @@
-import { useEffect, useRef, useState } from 'react'
 import {
-  AlertTriangle,
+  createContext,
+  useContext,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+  type RefObject,
+} from 'react'
+import {
   ArrowDown,
   ArrowUp,
+  Boxes,
+  Check,
+  CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
+  CodeXml,
+  Columns3,
+  Copy,
   Database,
   Download,
+  ExternalLink,
   Eye,
   FlaskConical,
+  GitBranch,
+  Globe,
   Plus,
+  Repeat,
   Rocket,
   Save,
+  Search,
   SlidersHorizontal,
+  Split,
   Trash2,
   Upload,
   X,
+  XCircle,
+  type LucideIcon,
 } from 'lucide-react'
+import { CodeEditor, type CodeSnippet } from '../components/CodeEditor'
 import { KeyValueEditor } from '../components/KeyValueEditor'
 import { LoadConfigEditor } from '../components/LoadConfigEditor'
 import { api, APIError } from '../lib/api'
+import { copyText } from '../lib/download'
+import { useNativeDialog } from '../lib/useNativeDialog'
 import type {
   DataFile,
   DataSource,
@@ -41,6 +69,8 @@ interface Props {
   canWrite?: boolean
   onLaunchScenario: (scenarioId: string) => void
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
+  /** Jump to the API workbench with the given API selected. The button is hidden when omitted. */
+  onEditAPI?: (apiId: string) => void
 }
 
 interface FlatAPI {
@@ -50,6 +80,16 @@ interface FlatAPI {
   url: string
   pathLabel: string
 }
+
+const UPLOAD_ACCEPT = '.csv,.json,.jsonl,.txt,.bin,.proto,.pb,.desc'
+const DATA_EXT = ['.csv', '.json', '.jsonl']
+const isDataFile = (name: string) => DATA_EXT.some((ext) => name.toLowerCase().endsWith(ext))
+
+const SCRIPT_SNIPPETS: CodeSnippet[] = [
+  { label: 'UUID', code: 'vars.trace_id = uuid()' },
+  { label: '时间戳', code: 'vars.ts = now_ms()' },
+  { label: 'HMAC 签名', code: 'vars.sign = hmac_sha256(vars.secret, vars.payload)' },
+]
 
 function flattenAPIs(nodes: TreeNode[], prefix = ''): FlatAPI[] {
   const out: FlatAPI[] = []
@@ -70,63 +110,144 @@ function flattenAPIs(nodes: TreeNode[], prefix = ''): FlatAPI[] {
   return out
 }
 
+function walkSteps(steps: ScenarioStep[], visit: (s: ScenarioStep) => void) {
+  for (const s of steps) {
+    visit(s)
+    if (s.children) walkSteps(s.children, visit)
+    if (s.else) walkSteps(s.else, visit)
+    if (s.branches) for (const b of s.branches) if (b.steps) walkSteps(b.steps, visit)
+  }
+}
+
 function collectStepOptions(steps: ScenarioStep[]): Array<{ id: string; name?: string }> {
   const out: Array<{ id: string; name?: string }> = []
-  const walk = (list: ScenarioStep[]) => {
-    for (const s of list) {
-      if (s.id) out.push({ id: s.id, name: s.name })
-      if (s.children) walk(s.children)
-      if (s.else) walk(s.else)
-      if (s.branches) {
-        for (const b of s.branches) {
-          if (b.steps) walk(b.steps)
-        }
-      }
-    }
-  }
-  walk(steps)
+  walkSteps(steps, (s) => {
+    if (s.id) out.push({ id: s.id, name: s.name })
+  })
   return out
 }
 
-function makeControlStep(kind: ScenarioStepType, seq: number): ScenarioStep {
-  const id = `${kind}_${seq}`
-  if (kind === 'group') return { id, type: 'group', name: '事务分组', children: [] }
-  if (kind === 'loop') return { id, type: 'loop', name: '循环执行', loop_count: 3, children: [] }
-  if (kind === 'if') return { id, type: 'if', name: '条件分支', expr: '{{status}} == "ok"', children: [], else: [] }
-  if (kind === 'weighted') {
-    return {
-      id,
-      type: 'weighted',
-      name: '权重分流',
-      branches: [
-        { name: '分支 A', weight: 70, steps: [] },
-        { name: '分支 B', weight: 30, steps: [] },
-      ],
-    }
-  }
-  return {
-    id,
-    type: 'script',
-    name: '前置/处理脚本',
-    script: '// 示例: vars.order_id = "ORD-" + Date.now();\n',
+const CONTROL_KINDS = new Set<ScenarioStepType>(['group', 'loop', 'if', 'weighted'])
+const isAPIKind = (k: ScenarioStepType) => k === 'http' || k === 'ws' || k === 'grpc' || k === 'sse'
+
+function kindPrefix(kind: ScenarioStepType): string {
+  return isAPIKind(kind) ? 'step' : kind
+}
+
+/** Prefix used when allocating a fresh id for a cloned step: the original id minus its trailing number. */
+function clonePrefix(s: ScenarioStep): string {
+  const base = (s.id || '').replace(/[_-]?\d+$/, '')
+  return base || kindPrefix((s.type || 'http') as ScenarioStepType)
+}
+
+type IdAllocator = (prefix: string) => string
+
+function makeStep(kind: ScenarioStepType, id: string, ref?: FlatAPI): ScenarioStep {
+  switch (kind) {
+    case 'group':
+      return { id, type: 'group', name: '事务分组', children: [] }
+    case 'loop':
+      return { id, type: 'loop', name: '循环', loop_count: 3, children: [] }
+    case 'if':
+      return { id, type: 'if', name: '条件分支', expr: '{{status}} == "ok"', children: [], else: [] }
+    case 'weighted':
+      return {
+        id,
+        type: 'weighted',
+        name: '权重分流',
+        branches: [
+          { name: '分支 A', weight: 70, steps: [] },
+          { name: '分支 B', weight: 30, steps: [] },
+        ],
+      }
+    case 'script':
+      return { id, type: 'script', name: '脚本', script: 'vars.trace_id = uuid()\n' }
+    default:
+      return { id, type: 'http', name: ref?.name || '接口步骤', api_id: ref?.id }
   }
 }
 
-function stepTypeBadge(t?: ScenarioStepType | ''): string {
-  switch (t) {
-    case 'group':
-      return 'GROUP 分组'
-    case 'loop':
-      return 'LOOP 循环'
-    case 'if':
-      return 'IF 条件'
-    case 'weighted':
-      return 'WEIGHTED 权重'
-    case 'script':
-      return 'SCRIPT 脚本'
-    default:
-      return ''
+/** Deep copy a step and give it (and every nested step) a fresh, unique id. */
+function cloneStep(src: ScenarioStep, alloc: IdAllocator): ScenarioStep {
+  const copy: ScenarioStep = JSON.parse(JSON.stringify(src))
+  const prefixes = new Map<ScenarioStep, string>()
+  walkSteps([copy], (s) => prefixes.set(s, clonePrefix(s)))
+  walkSteps([copy], (s) => {
+    s.id = alloc(prefixes.get(s) || 'step')
+  })
+  if (copy.name) copy.name = `${copy.name} 副本`
+  return copy
+}
+
+function childCount(s: ScenarioStep): number {
+  return (
+    (s.children?.length || 0) +
+    (s.else?.length || 0) +
+    (s.branches || []).reduce((sum, b) => sum + (b.steps?.length || 0), 0)
+  )
+}
+
+const KIND_META: Record<string, { label: string; badge: string; accent: string }> = {
+  group: { label: '分组', badge: 'bg-sky-50 border-sky-200 text-sky-700', accent: 'border-l-sky-500' },
+  loop: { label: '循环', badge: 'bg-indigo-50 border-indigo-200 text-indigo-700', accent: 'border-l-indigo-500' },
+  if: { label: '条件', badge: 'bg-emerald-50 border-emerald-200 text-emerald-700', accent: 'border-l-emerald-500' },
+  weighted: { label: '权重', badge: 'bg-amber-50 border-amber-200 text-amber-700', accent: 'border-l-amber-500' },
+  script: { label: '脚本', badge: 'bg-violet-50 border-violet-200 text-violet-700', accent: 'border-l-violet-500' },
+}
+
+const METHOD_TONE: Record<string, string> = {
+  GET: 'text-emerald-700',
+  POST: 'text-sky-700',
+  PUT: 'text-amber-700',
+  PATCH: 'text-violet-700',
+  DELETE: 'text-rose-700',
+}
+
+function MethodTag({ method }: { method: string }) {
+  const m = (method || 'GET').toUpperCase()
+  return <span className={`font-mono font-semibold text-[10px] w-11 shrink-0 ${METHOD_TONE[m] || 'text-fg-subtle'}`}>{m}</span>
+}
+
+/**
+ * Extract the top-level keys of the first JSON object in `text`. Tolerates truncated previews
+ * (JSON arrays cut mid-way, JSONL) because it scans rather than parses.
+ */
+function extractJSONKeys(text: string): string[] {
+  const start = text.indexOf('{')
+  if (start < 0) return []
+  const keys: string[] = []
+  let depth = 0
+  let i = start
+  while (i < text.length) {
+    const c = text[i]
+    if (c === '"') {
+      let j = i + 1
+      let s = ''
+      while (j < text.length && text[j] !== '"') {
+        if (text[j] === '\\') {
+          s += text[j + 1] ?? ''
+          j += 2
+          continue
+        }
+        s += text[j]
+        j++
+      }
+      if (depth === 1) {
+        let k = j + 1
+        while (k < text.length && /\s/.test(text[k])) k++
+        if (text[k] === ':' && !keys.includes(s)) keys.push(s)
+      }
+      i = j + 1
+      continue
+    }
+    if (c === '{' || c === '[') depth++
+    else if (c === '}' || c === ']') {
+      depth--
+      if (depth === 0) break
+    }
+    i++
   }
+  return keys
 }
 
 function blankScenario(envId = ''): Partial<Scenario> {
@@ -148,6 +269,439 @@ function blankScenario(envId = ''): Partial<Scenario> {
   }
 }
 
+/* ------------------------------------------------------------------------------------------ */
+/* Shared bits                                                                                 */
+
+interface StepCtx {
+  apis: FlatAPI[]
+  apiMap: Map<string, FlatAPI>
+  onEditAPI?: (apiId: string) => void
+  newAllocator: () => IdAllocator
+  keyOf: (s: ScenarioStep) => string
+  preserveKey: (from: ScenarioStep, to: ScenarioStep) => void
+}
+
+const StepEditorContext = createContext<StepCtx | null>(null)
+
+function useStepCtx(): StepCtx {
+  const ctx = useContext(StepEditorContext)
+  if (!ctx) throw new Error('StepEditorContext missing')
+  return ctx
+}
+
+/** Close a floating panel on outside pointer-down and on Escape. */
+function useDismiss(open: boolean, wrapRef: RefObject<HTMLElement | null>, onDismiss: (refocus: boolean) => void) {
+  const cb = useRef(onDismiss)
+  cb.current = onDismiss
+  useEffect(() => {
+    if (!open) return
+    const onDown = (e: PointerEvent) => {
+      if (!wrapRef.current?.contains(e.target as Node)) cb.current(false)
+    }
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.stopPropagation()
+        cb.current(true)
+      }
+    }
+    document.addEventListener('pointerdown', onDown)
+    document.addEventListener('keydown', onKey)
+    return () => {
+      document.removeEventListener('pointerdown', onDown)
+      document.removeEventListener('keydown', onKey)
+    }
+  }, [open, wrapRef])
+}
+
+/** Inline two-step delete: first click arms ("确认删除？"), second click within 3s executes; blur/timeout resets. */
+function ConfirmDeleteButton({
+  label,
+  onConfirm,
+  disabled,
+  idleClassName = '',
+}: {
+  label: string
+  onConfirm: () => void | Promise<void>
+  disabled?: boolean
+  idleClassName?: string
+}) {
+  const [armed, setArmed] = useState(false)
+  const timer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
+  const disarm = () => {
+    window.clearTimeout(timer.current)
+    setArmed(false)
+  }
+  return (
+    <button
+      type="button"
+      disabled={disabled}
+      title={armed ? '再次点击确认删除' : label}
+      aria-label={armed ? `确认${label}` : label}
+      onClick={(e) => {
+        e.stopPropagation()
+        if (!armed) {
+          setArmed(true)
+          window.clearTimeout(timer.current)
+          timer.current = window.setTimeout(() => setArmed(false), 3000)
+          return
+        }
+        disarm()
+        void onConfirm()
+      }}
+      onBlur={disarm}
+      className={`inline-flex items-center gap-1 rounded shrink-0 disabled:opacity-45 ${
+        armed
+          ? 'px-1.5 py-0.5 bg-rose-600 hover:bg-rose-solid text-white text-[11px] font-medium'
+          : `p-1 text-fg-subtle hover:text-rose-600 ${idleClassName}`
+      }`}
+    >
+      <Trash2 className="w-3.5 h-3.5" />
+      {armed && '确认删除？'}
+    </button>
+  )
+}
+
+const STEP_KINDS: Array<{ kind: ScenarioStepType; label: string; Icon: LucideIcon }> = [
+  { kind: 'http', label: '接口', Icon: Globe },
+  { kind: 'group', label: '分组', Icon: Boxes },
+  { kind: 'loop', label: '循环', Icon: Repeat },
+  { kind: 'if', label: '条件', Icon: GitBranch },
+  { kind: 'weighted', label: '权重', Icon: Split },
+  { kind: 'script', label: '脚本', Icon: CodeXml },
+]
+
+/** "+ 子步骤" dropdown menu: step kinds, with an inline searchable API picker for 接口. Keyboard operable. */
+function AddStepMenu({
+  label,
+  allowControl,
+  onAdd,
+  variant = 'ghost',
+  align = 'left',
+  disabled,
+}: {
+  label: string
+  allowControl: boolean
+  onAdd: (kind: ScenarioStepType, ref?: FlatAPI) => void
+  variant?: 'primary' | 'ghost'
+  align?: 'left' | 'right'
+  disabled?: boolean
+}) {
+  const { apis } = useStepCtx()
+  const [open, setOpen] = useState(false)
+  const [view, setView] = useState<'root' | 'api'>('root')
+  const [query, setQuery] = useState('')
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const menuId = useId()
+
+  const close = (refocus = false) => {
+    setOpen(false)
+    setView('root')
+    setQuery('')
+    if (refocus) triggerRef.current?.focus()
+  }
+  useDismiss(open, wrapRef, close)
+
+  useEffect(() => {
+    if (!open) return
+    const raf = requestAnimationFrame(() => {
+      const m = menuRef.current
+      if (!m) return
+      if (view === 'api') m.querySelector<HTMLInputElement>('input')?.focus()
+      else m.querySelector<HTMLElement>('[role="menuitem"]:not([disabled])')?.focus()
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [open, view])
+
+  const q = query.trim().toLowerCase()
+  const filtered = q
+    ? apis.filter((a) => `${a.method} ${a.pathLabel} ${a.url}`.toLowerCase().includes(q))
+    : apis
+
+  const pick = (kind: ScenarioStepType, ref?: FlatAPI) => {
+    onAdd(kind, ref)
+    close(true)
+  }
+
+  const onMenuKey = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (e.key === 'Tab') {
+      close()
+      return
+    }
+    const isInput = (e.target as HTMLElement).tagName === 'INPUT'
+    if (view === 'root' && e.key === 'ArrowRight' && document.activeElement?.getAttribute('data-kind') === 'http') {
+      e.preventDefault()
+      setView('api')
+      return
+    }
+    if (view === 'api' && e.key === 'ArrowLeft' && !isInput) {
+      e.preventDefault()
+      setView('root')
+      return
+    }
+    if (isInput && (e.key === 'Home' || e.key === 'End')) return
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
+    const list = Array.from(menuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]:not([disabled])') || [])
+    if (list.length === 0) return
+    e.preventDefault()
+    const cur = list.indexOf(document.activeElement as HTMLElement)
+    let next = 0
+    if (e.key === 'ArrowDown') next = cur < 0 ? 0 : (cur + 1) % list.length
+    else if (e.key === 'ArrowUp') next = cur <= 0 ? list.length - 1 : cur - 1
+    else if (e.key === 'End') next = list.length - 1
+    list[next].focus()
+  }
+
+  const itemCls =
+    'w-full flex items-center gap-2 px-2 py-1.5 rounded text-left text-fg hover:bg-surface-hover focus:bg-surface-hover focus:outline-none disabled:opacity-45 disabled:hover:bg-transparent'
+
+  return (
+    <div ref={wrapRef} className="relative inline-block">
+      <button
+        ref={triggerRef}
+        type="button"
+        disabled={disabled}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={() => (open ? close() : setOpen(true))}
+        onKeyDown={(e) => {
+          if ((e.key === 'ArrowDown' || e.key === 'ArrowUp') && !open) {
+            e.preventDefault()
+            setOpen(true)
+          }
+        }}
+        className={
+          variant === 'primary'
+            ? 'inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-sky-600 hover:bg-sky-solid text-white font-medium disabled:opacity-45'
+            : 'inline-flex items-center gap-1 px-2 py-1 rounded-md border border-dashed border-line-strong text-fg-muted hover:text-tidal hover:border-sky-400 hover:bg-surface-hover text-[11px] font-medium disabled:opacity-45'
+        }
+      >
+        <Plus className="w-3.5 h-3.5" />
+        {label}
+        <ChevronDown className={`w-3 h-3 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+      {open && (
+        <div
+          ref={menuRef}
+          id={menuId}
+          role="menu"
+          aria-label={label}
+          onKeyDown={onMenuKey}
+          className={`absolute z-30 top-full mt-1 ${align === 'right' ? 'right-0' : 'left-0'} ${
+            view === 'api' ? 'w-80' : 'w-40'
+          } rounded-lg border border-line-strong bg-surface shadow-lg p-1 text-xs`}
+        >
+          {view === 'root' ? (
+            STEP_KINDS.map(({ kind, label: itemLabel, Icon }) => {
+              const isControl = CONTROL_KINDS.has(kind)
+              const noAPI = kind === 'http' && apis.length === 0
+              const off = (isControl && !allowControl) || noAPI
+              return (
+                <button
+                  key={kind}
+                  type="button"
+                  role="menuitem"
+                  data-kind={kind}
+                  disabled={off}
+                  title={noAPI ? '暂无接口' : isControl && !allowControl ? '嵌套层级已达上限' : undefined}
+                  onClick={() => (kind === 'http' ? setView('api') : pick(kind))}
+                  className={itemCls}
+                >
+                  <Icon className="w-3.5 h-3.5 text-fg-subtle" />
+                  <span className="flex-1">{itemLabel}</span>
+                  {kind === 'http' && <ChevronRight className="w-3 h-3 text-fg-subtle" />}
+                </button>
+              )
+            })
+          ) : (
+            <>
+              <div className="flex items-center gap-1 pb-1 mb-1 border-b border-line">
+                <button
+                  type="button"
+                  aria-label="返回"
+                  onClick={() => setView('root')}
+                  className="p-1 rounded text-fg-subtle hover:text-fg hover:bg-surface-hover"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" />
+                </button>
+                <search className="relative flex-1 min-w-0">
+                  <Search className="w-3.5 h-3.5 absolute left-2 top-1/2 -translate-y-1/2 text-fg-subtle pointer-events-none" />
+                  <input
+                    type="search"
+                    name="api-search"
+                    aria-label="搜索接口"
+                    placeholder="搜索接口"
+                    value={query}
+                    autoCorrect="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    onChange={(e) => setQuery(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.nativeEvent.isComposing || e.keyCode === 229) return
+                      if (e.key === 'Enter' && filtered[0]) {
+                        e.preventDefault()
+                        pick('http', filtered[0])
+                      }
+                    }}
+                    className="w-full pl-7 pr-2 py-1 rounded border border-line-strong bg-surface text-fg focus:border-sky-500 focus:outline-none"
+                  />
+                </search>
+              </div>
+              <div className="max-h-64 overflow-y-auto tg-scroller">
+                {filtered.length === 0 ? (
+                  <div className="px-2 py-3 text-center text-fg-subtle">无匹配接口</div>
+                ) : (
+                  filtered.map((a) => (
+                    <button
+                      key={a.id}
+                      type="button"
+                      role="menuitem"
+                      title={a.url}
+                      onClick={() => pick('http', a)}
+                      className={`${itemCls} min-w-0`}
+                    >
+                      <MethodTag method={a.method} />
+                      <span className="truncate min-w-0">{a.pathLabel}</span>
+                    </button>
+                  ))
+                )}
+              </div>
+            </>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/** Inline "预览列名" button for a data-source row; click a field to copy its {{alias.column}} reference. */
+function ColumnPeek({
+  projectId,
+  file,
+  alias,
+  onToast,
+}: {
+  projectId: string
+  file: string
+  alias: string
+  onToast: Props['onToast']
+}) {
+  const [open, setOpen] = useState(false)
+  const [state, setState] = useState<{ file: string; cols: string[]; loading: boolean; error: string }>({
+    file: '',
+    cols: [],
+    loading: false,
+    error: '',
+  })
+  const [copied, setCopied] = useState('')
+  const wrapRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const panelId = useId()
+  useDismiss(open, wrapRef, (refocus) => {
+    setOpen(false)
+    if (refocus) triggerRef.current?.focus()
+  })
+
+  useEffect(() => {
+    setOpen(false)
+    setState({ file: '', cols: [], loading: false, error: '' })
+  }, [file])
+
+  const load = async () => {
+    if (!file) return
+    setState((prev) => ({ file, cols: prev.file === file ? prev.cols : [], loading: prev.file !== file || prev.cols.length === 0, error: '' }))
+    try {
+      const pv = await api.previewFile(projectId, file, 5)
+      const cols = pv.columns?.length ? pv.columns : extractJSONKeys(pv.text || '')
+      setState({ file, cols, loading: false, error: cols.length ? '' : '未识别到字段' })
+    } catch (err) {
+      setState({ file, cols: [], loading: false, error: err instanceof APIError ? err.message : '读取失败' })
+    }
+  }
+
+  const copy = async (col: string) => {
+    const ref = `{{${alias || 'ds'}.${col}}}`
+    if (await copyText(ref)) {
+      setCopied(col)
+      window.setTimeout(() => setCopied((c) => (c === col ? '' : c)), 1500)
+    } else {
+      onToast('error', '复制失败')
+    }
+  }
+
+  return (
+    <div ref={wrapRef} className="relative shrink-0">
+      <button
+        ref={triggerRef}
+        type="button"
+        disabled={!file}
+        aria-expanded={open}
+        aria-controls={open ? panelId : undefined}
+        onClick={() => {
+          if (open) {
+            setOpen(false)
+            return
+          }
+          setOpen(true)
+          void load()
+        }}
+        className={`inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-medium disabled:opacity-40 ${
+          open ? 'border-sky-300 bg-sky-50 text-sky-700' : 'border-line bg-surface text-fg-muted hover:text-tidal hover:bg-surface-hover'
+        }`}
+      >
+        <Columns3 className="w-3.5 h-3.5" />
+        预览列名
+      </button>
+      {open && (
+        <div
+          id={panelId}
+          role="dialog"
+          aria-label={`${file} 字段`}
+          className="absolute z-30 right-0 top-full mt-1 w-72 rounded-lg border border-line-strong bg-surface shadow-lg p-2 space-y-2"
+        >
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="font-mono text-fg truncate min-w-0 flex-1">{file}</span>
+            {state.cols.length > 0 && (
+              <span className="px-1.5 py-0.5 rounded-full bg-sky-50 border border-sky-200 text-sky-700 text-[10px] font-mono tg-tabular">
+                {state.cols.length}
+              </span>
+            )}
+          </div>
+          {state.loading ? (
+            <div className="text-fg-subtle py-2">读取中…</div>
+          ) : state.error ? (
+            <div className="text-rose-700 py-1">{state.error}</div>
+          ) : (
+            <div className="flex flex-wrap gap-1 max-h-48 overflow-y-auto tg-scroller">
+              {state.cols.map((col) => (
+                <button
+                  key={col}
+                  type="button"
+                  title={`复制 {{${alias || 'ds'}.${col}}}`}
+                  onClick={() => void copy(col)}
+                  className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded border border-line bg-surface-subtle hover:border-sky-300 hover:bg-sky-50 font-mono text-[11px] text-fg"
+                >
+                  {copied === col ? (
+                    <Check className="w-3 h-3 text-emerald-600" />
+                  ) : (
+                    <Copy className="w-3 h-3 text-fg-subtle" />
+                  )}
+                  {col}
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/* ------------------------------------------------------------------------------------------ */
+
 export function ScenariosView({
   projectId,
   environments,
@@ -156,6 +710,7 @@ export function ScenariosView({
   canWrite = true,
   onLaunchScenario,
   onToast,
+  onEditAPI,
 }: Props) {
   const [scenarios, setScenarios] = useState<Scenario[]>([])
   const [apis, setApis] = useState<FlatAPI[]>([])
@@ -166,10 +721,9 @@ export function ScenariosView({
   const [saving, setSaving] = useState(false)
   const [dryRunning, setDryRunning] = useState(false)
   const [dryResult, setDryResult] = useState<DebugRunResult | null>(null)
-  const [addApiId, setAddApiId] = useState('')
+  const [stopOnError, setStopOnError] = useState(false)
   const [previewModal, setPreviewModal] = useState<FilePreview | null>(null)
-  const [confirmDelScen, setConfirmDelScen] = useState<string>('')
-  const [confirmDelFile, setConfirmDelFile] = useState<string>('')
+  const previewRef = useNativeDialog(previewModal !== null, () => setPreviewModal(null))
 
   const loadAll = async (selectId?: string) => {
     try {
@@ -179,9 +733,7 @@ export function ScenariosView({
         api.listFiles(projectId),
       ])
       setScenarios(scList)
-      const flat = flattenAPIs(tree.children || [])
-      setApis(flat)
-      setAddApiId((cur) => (cur && flat.some((a) => a.id === cur) ? cur : flat[0]?.id || ''))
+      setApis(flattenAPIs(tree.children || []))
       setFiles(flList)
 
       const targetId = selectId || selectedId || scList[0]?.id || ''
@@ -207,7 +759,6 @@ export function ScenariosView({
   }, [projectId])
 
   const selectScenario = async (id: string) => {
-    setConfirmDelScen('')
     setDryResult(null)
     if (id === 'new') {
       setSelectedId('new')
@@ -236,7 +787,7 @@ export function ScenariosView({
       return null
     }
     if (!draft.steps || draft.steps.length === 0) {
-      onToast('error', '场景至少需要包含 1 个接口步骤')
+      onToast('error', '场景至少需要包含 1 个步骤')
       return null
     }
     setSaving(true)
@@ -269,7 +820,7 @@ export function ScenariosView({
   const saveRef = useRef(handleSave)
   saveRef.current = handleSave
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
+    const onKey = (e: globalThis.KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault()
         void saveRef.current()
@@ -292,11 +843,12 @@ export function ScenariosView({
         environment_id: activeEnvId || draft.environment_id || '',
         variables: tempVars,
         skip_think: true,
+        stop_on_error: stopOnError,
       })
       setDryResult(res)
       onToast(
         res.passed ? 'success' : 'error',
-        res.passed ? `场景功能试跑全部通过 (${res.duration_ms.toFixed(1)} ms)` : '场景试跑存在未通过步骤，请展开排查'
+        res.passed ? `试跑通过 · ${res.duration_ms.toFixed(1)} ms` : '试跑存在未通过步骤'
       )
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '场景试跑失败')
@@ -310,9 +862,9 @@ export function ScenariosView({
     try {
       await api.uploadFile(projectId, file, existing?.version || '')
       setFiles(await api.listFiles(projectId))
-      onToast('success', `已上传数据文件「${file.name}」`)
+      onToast('success', `已上传「${file.name}」`)
     } catch (err) {
-      onToast('error', err instanceof APIError ? err.message : '上传数据文件失败')
+      onToast('error', err instanceof APIError ? err.message : '上传文件失败')
     }
   }
 
@@ -327,544 +879,577 @@ export function ScenariosView({
 
   const steps = draft.steps || []
   const dataSources = draft.data || []
+  const dataFiles = files.filter((f) => isDataFile(f.name))
+  const totalSteps = useMemo(() => collectStepOptions(steps).length, [steps])
 
-  const addStep = () => {
-    if (!addApiId) {
-      onToast('info', '请先在「接口工作台」创建或导入接口')
-      return
+  // Leaving for the workbench unmounts this view: persist pending edits first.
+  const dirtyRef = useRef(dirty)
+  dirtyRef.current = dirty
+  const editAPIRef = useRef(onEditAPI)
+  editAPIRef.current = onEditAPI
+  const hasEditAPI = Boolean(onEditAPI)
+  const goEditAPI = useMemo(
+    () =>
+      hasEditAPI
+        ? async (apiId: string) => {
+            if (dirtyRef.current && canWrite) {
+              const saved = await saveRef.current()
+              if (!saved) return
+            }
+            editAPIRef.current?.(apiId)
+          }
+        : undefined,
+    [hasEditAPI, canWrite]
+  )
+
+  const stepsRef = useRef(steps)
+  stepsRef.current = steps
+  const stepKeyMapRef = useRef(new WeakMap<ScenarioStep, string>())
+  const stepKeySeqRef = useRef(0)
+  const stepCtx = useMemo<StepCtx>(() => {
+    const keyOf = (s: ScenarioStep) => {
+      const m = stepKeyMapRef.current
+      let k = m.get(s)
+      if (!k) {
+        k = `sk_${++stepKeySeqRef.current}`
+        m.set(s, k)
+      }
+      return k
     }
-    const found = apis.find((a) => a.id === addApiId)
-    const nextIdx = steps.length + 1
-    const nextStep: ScenarioStep = {
-      id: `step${nextIdx}`,
-      type: 'http',
-      name: found?.name || `步骤 ${nextIdx}`,
-      api_id: addApiId,
+    const preserveKey = (from: ScenarioStep, to: ScenarioStep) => {
+      stepKeyMapRef.current.set(to, keyOf(from))
     }
-    updateDraft({ steps: [...steps, nextStep] })
+    return {
+      apis,
+      apiMap: new Map(apis.map((a) => [a.id, a])),
+      onEditAPI: goEditAPI ? (id: string) => void goEditAPI(id) : undefined,
+      newAllocator: () => {
+        const taken = new Set(collectStepOptions(stepsRef.current).map((s) => s.id))
+        return (prefix: string) => {
+          let n = 1
+          while (taken.has(`${prefix}${n}`)) n++
+          const id = `${prefix}${n}`
+          taken.add(id)
+          return id
+        }
+      },
+      keyOf,
+      preserveKey,
+    }
+  }, [apis, goEditAPI])
+
+  const addRootStep = (kind: ScenarioStepType, ref?: FlatAPI) => {
+    const alloc = stepCtx.newAllocator()
+    updateDraft({ steps: [...steps, makeStep(kind, alloc(kindPrefix(kind)), ref)] })
   }
 
-  const addControlStep = (kind: ScenarioStepType) => {
-    const nextStep = makeControlStep(kind, Date.now() % 10000)
-    updateDraft({ steps: [...steps, nextStep] })
-  }
+  const stripBtn =
+    'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/20 bg-white/10 hover:bg-white/20 text-slate-100 font-medium disabled:opacity-45'
 
   return (
-    <div className="flex flex-1 min-h-0 bg-slate-100">
-      {/* Left Sidebar: Scenarios + Data Files */}
-      <aside className="w-72 bg-slate-50 border-r border-slate-200 flex flex-col shrink-0">
-        <div className="p-3 border-b border-slate-200 flex items-center justify-between">
-          <span className="text-xs font-semibold text-slate-800">压测场景列表 ({scenarios.length})</span>
-          <button
-            type="button"
-            disabled={!canWrite}
-            onClick={() => void selectScenario('new')}
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-700 text-white text-xs font-medium disabled:opacity-45"
-          >
-            <Plus className="w-3.5 h-3.5" /> 新建场景
-          </button>
-        </div>
-
-        <div className="flex-1 overflow-y-auto p-2 space-y-1">
-          {scenarios.map((sc) => (
-            <div
-              key={sc.id}
-              onClick={() => void selectScenario(sc.id)}
-              className={`group flex items-center justify-between gap-2 px-2.5 py-2 rounded-lg text-xs cursor-pointer ${
-                selectedId === sc.id
-                  ? 'bg-sky-100 text-sky-950 font-semibold'
-                  : 'text-slate-700 hover:bg-slate-200/60'
-              }`}
+    <StepEditorContext.Provider value={stepCtx}>
+      <div className="flex flex-1 min-h-0 bg-canvas">
+        {/* Left Sidebar: Scenarios + Data Files */}
+        <aside className="w-72 bg-surface-subtle border-r border-line flex flex-col shrink-0">
+          <div className="p-3 border-b border-line flex items-center justify-between">
+            <span className="text-xs font-semibold text-fg inline-flex items-center gap-1.5">
+              场景
+              <span className="px-1.5 py-0.5 rounded-full bg-surface border border-line text-fg-muted text-[10px] font-mono tg-tabular">
+                {scenarios.length}
+              </span>
+            </span>
+            <button
+              type="button"
+              disabled={!canWrite}
+              onClick={() => void selectScenario('new')}
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-solid text-white text-xs font-medium disabled:opacity-45"
             >
-              <div className="min-w-0">
-                <div className="truncate">{sc.name}</div>
-                <div className="text-[10px] text-slate-500">
-                  {sc.steps?.length || 0} 步骤 · {sc.load?.mode === 'rate' ? '速率' : '并发'}
-                </div>
-              </div>
-              {canWrite && (
+              <Plus className="w-3.5 h-3.5" /> 新建场景
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto tg-scroller p-2 space-y-1">
+            {scenarios.map((sc) => (
+              <div
+                key={sc.id}
+                className={`group flex items-center justify-between gap-1 px-2 py-1.5 rounded-lg text-xs ${
+                  selectedId === sc.id ? 'bg-sky-100 text-sky-950 font-semibold' : 'text-fg-muted hover:bg-surface-hover'
+                }`}
+              >
                 <button
                   type="button"
-                  title={confirmDelScen === sc.id ? '再次点击确认删除' : '删除场景'}
-                  onClick={async (e) => {
-                    e.stopPropagation()
-                    if (confirmDelScen !== sc.id) {
-                      setConfirmDelScen(sc.id)
-                      return
-                    }
-                    try {
-                      await api.deleteScenario(projectId, sc.id, sc.version)
-                      onToast('success', `已删除场景「${sc.name}」`)
-                      setConfirmDelScen('')
-                      if (selectedId === sc.id) setSelectedId('')
-                      await loadAll()
-                    } catch (err) {
-                      onToast('error', err instanceof APIError ? err.message : '删除场景失败')
-                    }
-                  }}
-                  className={`p-1 rounded shrink-0 ${
-                    confirmDelScen === sc.id
-                      ? 'bg-rose-600 text-white opacity-100'
-                      : 'opacity-0 group-hover:opacity-100 text-slate-400 hover:text-rose-600'
-                  }`}
+                  onClick={() => void selectScenario(sc.id)}
+                  className="flex-1 min-w-0 text-left px-0.5 py-0.5 cursor-pointer"
                 >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-
-        {/* Data Files Panel */}
-        <div className="border-t border-slate-200 p-3 bg-white space-y-2 max-h-64 flex flex-col">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-800 flex items-center gap-1.5">
-              <Database className="w-3.5 h-3.5 text-sky-600" /> 数据文件 ({files.length})
-            </span>
-            <label
-              className={`inline-flex items-center gap-1 px-2 py-1 rounded border border-slate-300 bg-slate-50 text-[11px] font-medium text-slate-700 ${
-                canWrite ? 'hover:bg-slate-100 cursor-pointer' : 'opacity-45 cursor-not-allowed'
-              }`}
-            >
-              <Upload className="w-3 h-3 text-sky-600" /> 上传数据/附件
-              <input
-                type="file"
-                disabled={!canWrite}
-                accept=".csv,.json,.jsonl,.txt,.bin"
-                onChange={(e) => {
-                  const f = e.target.files?.[0]
-                  if (f) void handleUploadFile(f)
-                  e.target.value = ''
-                }}
-                className="hidden"
-              />
-            </label>
-          </div>
-          <div className="overflow-y-auto space-y-1 text-xs">
-            {files.length === 0 ? (
-              <p className="text-[11px] text-slate-400 py-2">暂无数据文件（支持 CSV、JSON、JSONL 参数化与二进制上传）。</p>
-            ) : (
-              files.map((df) => (
-                <div
-                  key={df.name}
-                  className="flex items-center justify-between gap-1.5 px-2 py-1 rounded border border-slate-100 bg-slate-50"
-                >
-                  <div className="min-w-0">
-                    <div className="font-mono truncate text-slate-800">{df.name}</div>
-                    <div className="text-[10px] text-slate-400">{Math.max(1, Math.round(df.size / 1024))} KB</div>
+                  <div className="truncate">{sc.name}</div>
+                  <div className="text-[10px] text-fg-subtle font-normal">
+                    <span className="tg-tabular">{sc.steps?.length || 0}</span> 步骤 ·{' '}
+                    {sc.load?.mode === 'rate' ? 'QPS' : 'VU'}
                   </div>
-                  <div className="inline-flex items-center gap-1 shrink-0">
-                    <button
-                      type="button"
-                      title="预览文件内容"
-                      onClick={() => void handlePreviewFile(df.name)}
-                      className="p-1 text-slate-500 hover:text-sky-600"
-                    >
-                      <Eye className="w-3.5 h-3.5" />
-                    </button>
-                    {canWrite && (
+                </button>
+                {canWrite && (
+                  <ConfirmDeleteButton
+                    label="删除场景"
+                    idleClassName="opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+                    onConfirm={async () => {
+                      try {
+                        await api.deleteScenario(projectId, sc.id, sc.version)
+                        onToast('success', `已删除场景「${sc.name}」`)
+                        if (selectedId === sc.id) setSelectedId('')
+                        await loadAll()
+                      } catch (err) {
+                        onToast('error', err instanceof APIError ? err.message : '删除场景失败')
+                      }
+                    }}
+                  />
+                )}
+              </div>
+            ))}
+          </div>
+
+          {/* Data Files Panel */}
+          <div className="border-t border-line p-3 bg-surface space-y-2 max-h-64 flex flex-col">
+            <div className="flex items-center justify-between">
+              <span className="text-xs font-semibold text-fg flex items-center gap-1.5">
+                <Database className="w-3.5 h-3.5 text-tidal" /> 数据文件
+                <span className="px-1.5 py-0.5 rounded-full bg-surface-subtle border border-line text-fg-muted text-[10px] font-mono tg-tabular">
+                  {files.length}
+                </span>
+              </span>
+              <label
+                title={UPLOAD_ACCEPT.split(',').join(' ')}
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded border border-line-strong bg-surface-subtle text-[11px] font-medium text-fg-muted focus-within:ring-2 focus-within:ring-sky-500/40 ${
+                  canWrite ? 'hover:bg-surface-hover hover:text-fg cursor-pointer' : 'opacity-45 cursor-not-allowed'
+                }`}
+              >
+                <Upload className="w-3 h-3 text-tidal" /> 上传
+                <input
+                  type="file"
+                  disabled={!canWrite}
+                  accept={UPLOAD_ACCEPT}
+                  onChange={(e) => {
+                    const f = e.target.files?.[0]
+                    if (f) void handleUploadFile(f)
+                    e.target.value = ''
+                  }}
+                  className="sr-only"
+                />
+              </label>
+            </div>
+            <div className="overflow-y-auto tg-scroller space-y-1 text-xs">
+              {files.length === 0 ? (
+                <p className="text-[11px] text-fg-subtle py-2">暂无文件</p>
+              ) : (
+                files.map((df) => (
+                  <div
+                    key={df.name}
+                    className="flex items-center justify-between gap-1.5 px-2 py-1 rounded border border-line bg-surface-subtle"
+                  >
+                    <div className="min-w-0">
+                      <div className="font-mono truncate text-fg">{df.name}</div>
+                      <div className="text-[10px] text-fg-subtle tg-tabular">
+                        {Math.max(1, Math.round(df.size / 1024))} KB
+                      </div>
+                    </div>
+                    <div className="inline-flex items-center gap-1 shrink-0">
                       <button
                         type="button"
-                        title={confirmDelFile === df.name ? '再次点击确认删除' : '删除文件'}
-                        onClick={async () => {
-                          if (confirmDelFile !== df.name) {
-                            setConfirmDelFile(df.name)
-                            return
-                          }
-                          try {
-                            await api.deleteFile(projectId, df.name, df.version)
-                            setConfirmDelFile('')
-                            setFiles(await api.listFiles(projectId))
-                            onToast('success', `已删除数据文件「${df.name}」`)
-                          } catch (err) {
-                            onToast('error', err instanceof APIError ? err.message : '删除文件失败')
-                          }
-                        }}
-                        className={`p-1 rounded ${
-                          confirmDelFile === df.name ? 'bg-rose-600 text-white' : 'text-slate-400 hover:text-rose-600'
-                        }`}
+                        title="预览"
+                        aria-label={`预览 ${df.name}`}
+                        onClick={() => void handlePreviewFile(df.name)}
+                        className="p-1 text-fg-subtle hover:text-tidal"
                       >
-                        <Trash2 className="w-3.5 h-3.5" />
+                        <Eye className="w-3.5 h-3.5" />
                       </button>
-                    )}
+                      {canWrite && (
+                        <ConfirmDeleteButton
+                          label="删除文件"
+                          onConfirm={async () => {
+                            try {
+                              await api.deleteFile(projectId, df.name, df.version)
+                              setFiles(await api.listFiles(projectId))
+                              onToast('success', `已删除「${df.name}」`)
+                            } catch (err) {
+                              onToast('error', err instanceof APIError ? err.message : '删除文件失败')
+                            }
+                          }}
+                        />
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))
-            )}
+                ))
+              )}
+            </div>
           </div>
-        </div>
-      </aside>
+        </aside>
 
-      {/* Main Scenario Builder */}
-      <main className="flex-1 min-w-0 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-5 space-y-5 text-xs">
-        <div className="tg-telemetry-strip rounded-xl border border-slate-800 p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
-          <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[260px]">
-            <input
-              type="text"
-              aria-label="场景名称"
-              value={draft.name || ''}
-              onChange={(e) => updateDraft({ name: e.target.value })}
-              placeholder="输入场景名称"
-              className="px-3 py-1.5 border border-white/20 rounded-lg font-semibold text-sm text-white placeholder:text-slate-300 bg-white/10 focus:border-sky-400 focus:outline-none min-w-[220px]"
-            />
-            <select
-              aria-label="场景默认环境"
-              value={draft.environment_id || ''}
-              onChange={(e) => updateDraft({ environment_id: e.target.value })}
-              className="px-2.5 py-1.5 border border-white/20 rounded-lg bg-white/10 text-white text-xs [&>option]:text-slate-900"
-            >
-              <option value="">跟随顶部激活环境</option>
-              {environments.map((env) => (
-                <option key={env.id} value={env.id}>
-                  默认环境：{env.name}
-                </option>
-              ))}
-            </select>
-            {dirty && <span className="text-[11px] text-amber-600 font-medium">● 有未保存修改</span>}
-          </div>
-
-          <div className="flex flex-wrap items-center gap-2">
-            {draft.id && selectedId !== 'new' && (
-              <a
-                href={api.exportScenarioURL(projectId, draft.id, 'k6', draft.environment_id || activeEnvId || '')}
-                download
-                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-medium"
-                title="将当前压测场景导出为兼容 k6 的独立 JavaScript 脚本"
+        {/* Main Scenario Builder */}
+        <main className="flex-1 min-w-0 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-5 space-y-5 text-xs">
+          <div className="tg-telemetry-strip rounded-xl border border-slate-800 p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+            <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[260px]">
+              <input
+                type="text"
+                name="scenario-name"
+                aria-label="场景名称"
+                value={draft.name || ''}
+                onChange={(e) => updateDraft({ name: e.target.value })}
+                placeholder="场景名称"
+                className="px-3 py-1.5 border border-white/20 rounded-lg font-semibold text-sm text-white placeholder:text-slate-300 bg-white/10 focus:border-sky-400 focus:outline-none min-w-[220px]"
+              />
+              <select
+                aria-label="场景默认环境"
+                value={draft.environment_id || ''}
+                onChange={(e) => updateDraft({ environment_id: e.target.value })}
+                className="px-2.5 py-1.5 border border-white/20 rounded-lg bg-white/10 text-white text-xs [&>option]:bg-slate-900 [&>option]:text-slate-100"
               >
-                <Download className="w-3.5 h-3.5 text-sky-600" /> 导出 k6 (.js)
-              </a>
-            )}
-            <button
-              type="button"
-              disabled={!canWrite || dryRunning}
-              onClick={() => void handleDryRun()}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-sky-300 bg-sky-50 hover:bg-sky-100 text-sky-800 font-medium disabled:opacity-45"
-            >
-              <FlaskConical className="w-3.5 h-3.5" />
-              {dryRunning ? '试跑中...' : '功能试跑 (单轮)'}
-            </button>
-            <button
-              type="button"
-              disabled={!canWrite || saving}
-              onClick={() => void handleSave()}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-[#0B2A4A] hover:bg-[#123d69] text-white font-medium disabled:opacity-45"
-            >
-              <Save className="w-3.5 h-3.5" /> 保存场景
-            </button>
-            <button
-              type="button"
-              disabled={!canWrite || saving || dryRunning}
-              onClick={async () => {
-                if (dirty || !draft.id) {
-                  const saved = await handleSave()
-                  if (!saved) return
-                  onLaunchScenario(saved.id)
-                  return
-                }
-                onLaunchScenario(draft.id)
-              }}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold disabled:opacity-45"
-            >
-              <Rocket className="w-3.5 h-3.5" /> 启动压测
-            </button>
-          </div>
-        </div>
+                <option value="">跟随顶部环境</option>
+                {environments.map((env) => (
+                  <option key={env.id} value={env.id}>
+                    {env.name}
+                  </option>
+                ))}
+              </select>
+              {dirty && (
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-400/15 border border-amber-400/30 text-amber-300 text-[11px] font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                  未保存
+                </span>
+              )}
+            </div>
 
-        {/* Scenario Variables & CSV Binding */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-          <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-2.5">
-            <h3 className="font-semibold text-slate-800">场景级变量（可被环境变量与临时变量覆盖）</h3>
-            <KeyValueEditor
-              items={draft.variables || []}
-              onChange={(next) => updateDraft({ variables: next })}
-              compact
-            />
-          </div>
-
-          <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <h3 className="font-semibold text-slate-800">参数化数据源 CSV / JSON / JSONL（引用 `{'{{别名.列名}}'}`）</h3>
+            <div className="flex flex-wrap items-center gap-2">
+              {draft.id && selectedId !== 'new' && (
+                <a
+                  href={api.exportScenarioURL(projectId, draft.id, 'k6', draft.environment_id || activeEnvId || '')}
+                  download
+                  className={stripBtn}
+                  title="导出 k6 脚本"
+                >
+                  <Download className="w-3.5 h-3.5 text-sky-300" /> k6
+                </a>
+              )}
+              <div className="inline-flex items-stretch rounded-lg border border-white/20 bg-white/10 overflow-hidden">
+                <button
+                  type="button"
+                  disabled={!canWrite || dryRunning}
+                  onClick={() => void handleDryRun()}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 hover:bg-white/15 text-slate-100 font-medium disabled:opacity-45"
+                >
+                  <FlaskConical className="w-3.5 h-3.5 text-sky-300" />
+                  {dryRunning ? '试跑中…' : '试跑'}
+                </button>
+                <label
+                  title="遇到失败步骤立即停止"
+                  className={`inline-flex items-center gap-1.5 px-2.5 border-l border-white/15 text-slate-200 select-none ${
+                    !canWrite || dryRunning ? 'opacity-45 cursor-not-allowed' : 'cursor-pointer hover:bg-white/10'
+                  }`}
+                >
+                  <input
+                    type="checkbox"
+                    disabled={!canWrite || dryRunning}
+                    checked={stopOnError}
+                    onChange={(e) => setStopOnError(e.target.checked)}
+                  />
+                  遇错即停
+                </label>
+              </div>
               <button
                 type="button"
-                onClick={() => {
-                  const isData = (n: string) => {
-                    const lower = n.toLowerCase()
-                    return lower.endsWith('.csv') || lower.endsWith('.json') || lower.endsWith('.jsonl')
-                  }
-                  const dataFile = files.find((f) => isData(f.name))?.name || files[0]?.name || ''
-                  updateDraft({
-                    data: [
-                      ...dataSources,
-                      { name: `ds${dataSources.length + 1}`, file: dataFile, mode: 'sequential' },
-                    ],
-                  })
-                }}
-                className="inline-flex items-center gap-1 text-sky-600 hover:underline font-medium"
+                disabled={!canWrite || saving}
+                onClick={() => void handleSave()}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-solid border border-sky-400/30 text-white font-medium disabled:opacity-45"
               >
-                <Plus className="w-3.5 h-3.5" /> 绑定数据文件
+                <Save className="w-3.5 h-3.5" /> 保存
+              </button>
+              <button
+                type="button"
+                disabled={!canWrite || saving || dryRunning}
+                onClick={async () => {
+                  if (dirty || !draft.id) {
+                    const saved = await handleSave()
+                    if (!saved) return
+                    onLaunchScenario(saved.id)
+                    return
+                  }
+                  onLaunchScenario(draft.id)
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold disabled:opacity-45"
+              >
+                <Rocket className="w-3.5 h-3.5" /> 启动压测
               </button>
             </div>
-            {dataSources.length === 0 ? (
-              <p className="text-slate-400">未绑定数据文件，支持 CSV、JSON 数组与 JSONL 行文件。</p>
-            ) : (
-              <div className="space-y-2">
-                {dataSources.map((ds, i) => {
-                  const updateDS = (patch: Partial<DataSource>) =>
-                    updateDraft({ data: dataSources.map((x, idx) => (idx === i ? { ...x, ...patch } : x)) })
-                  return (
-                    <div key={i} className="grid grid-cols-12 gap-1.5 items-center">
-                      <input
-                        type="text"
-                        value={ds.name}
-                        placeholder="引用别名"
-                        onChange={(e) => updateDS({ name: e.target.value })}
-                        className="col-span-3 px-2 py-1 border border-slate-300 rounded font-mono"
-                      />
-                      <select
-                        value={ds.file}
-                        onChange={(e) => updateDS({ file: e.target.value })}
-                        className="col-span-5 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
-                      >
-                        <option value="">选择 CSV / JSON / JSONL 文件...</option>
-                        {files
-                          .filter((f) => {
-                            const lower = f.name.toLowerCase()
-                            return lower.endsWith('.csv') || lower.endsWith('.json') || lower.endsWith('.jsonl')
-                          })
-                          .map((f) => (
+          </div>
+
+          {/* Scenario Variables & Data Binding */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <section className="bg-surface rounded-xl border border-line p-4 space-y-2.5">
+              <h3 className="font-semibold text-fg">场景变量</h3>
+              <KeyValueEditor items={draft.variables || []} onChange={(next) => updateDraft({ variables: next })} compact />
+            </section>
+
+            <section className="bg-surface rounded-xl border border-line p-4 space-y-2.5">
+              <div className="flex items-center justify-between">
+                <h3 className="font-semibold text-fg">数据源</h3>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const dataFile = dataFiles[0]?.name || files[0]?.name || ''
+                    updateDraft({
+                      data: [...dataSources, { name: `ds${dataSources.length + 1}`, file: dataFile, mode: 'sequential' }],
+                    })
+                  }}
+                  className="inline-flex items-center gap-1 text-tidal hover:underline font-medium"
+                >
+                  <Plus className="w-3.5 h-3.5" /> 绑定文件
+                </button>
+              </div>
+              {dataSources.length === 0 ? (
+                <p className="text-fg-subtle">未绑定</p>
+              ) : (
+                <div className="space-y-2">
+                  {dataSources.map((ds, i) => {
+                    const updateDS = (patch: Partial<DataSource>) =>
+                      updateDraft({ data: dataSources.map((x, idx) => (idx === i ? { ...x, ...patch } : x)) })
+                    return (
+                      <div key={i} className="flex items-center gap-1.5">
+                        <input
+                          type="text"
+                          name={`ds-alias-${i}`}
+                          aria-label="引用别名"
+                          value={ds.name}
+                          placeholder="别名"
+                          autoCorrect="off"
+                          autoCapitalize="none"
+                          spellCheck={false}
+                          onChange={(e) => updateDS({ name: e.target.value })}
+                          className="w-20 px-2 py-1 border border-line-strong rounded font-mono bg-surface text-fg"
+                        />
+                        <select
+                          aria-label="数据文件"
+                          value={ds.file}
+                          onChange={(e) => updateDS({ file: e.target.value })}
+                          className="flex-1 min-w-0 px-2 py-1 border border-line-strong rounded font-mono bg-surface text-fg"
+                        >
+                          <option value="">选择文件</option>
+                          {ds.file && !dataFiles.some((f) => f.name === ds.file) && (
+                            <option value={ds.file}>{ds.file}</option>
+                          )}
+                          {dataFiles.map((f) => (
                             <option key={f.name} value={f.name}>
                               {f.name}
                             </option>
                           ))}
-                      </select>
-                      <select
-                        value={ds.mode || 'sequential'}
-                        onChange={(e) => updateDS({ mode: e.target.value as DataSource['mode'] })}
-                        className="col-span-3 px-1.5 py-1 border border-slate-300 rounded bg-white"
-                      >
-                        <option value="sequential">顺序循环</option>
-                        <option value="random">随机读取</option>
-                        <option value="unique">唯一分配</option>
-                      </select>
-                      <button
-                        type="button"
-                        onClick={() => updateDraft({ data: dataSources.filter((_, idx) => idx !== i) })}
-                        className="col-span-1 justify-self-end p-1 text-slate-400 hover:text-rose-600"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </div>
-                  )
-                })}
-              </div>
-            )}
-          </div>
-        </div>
-
-        {/* Steps Sequence */}
-        <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2">
-            <h3 className="font-semibold text-slate-800">
-              请求步骤与控制流编排（支持事务分组、循环、条件分支、权重分流及沙箱脚本）
-            </h3>
-            <div className="flex flex-wrap items-center gap-1.5">
-              <select
-                value={addApiId}
-                onChange={(e) => setAddApiId(e.target.value)}
-                className="px-2.5 py-1.5 border border-slate-300 rounded-md bg-white max-w-xs"
-              >
-                <option value="">选择已有接口...</option>
-                {apis.map((a) => (
-                  <option key={a.id} value={a.id}>
-                    [{a.method}] {a.pathLabel}
-                  </option>
-                ))}
-              </select>
-              <button
-                type="button"
-                onClick={addStep}
-                className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white font-medium"
-              >
-                <Plus className="w-3.5 h-3.5" /> 接口步骤
-              </button>
-              <button
-                type="button"
-                onClick={() => addControlStep('group')}
-                className="px-2 py-1.5 rounded-md border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 font-medium"
-              >
-                + 事务分组
-              </button>
-              <button
-                type="button"
-                onClick={() => addControlStep('loop')}
-                className="px-2 py-1.5 rounded-md border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 font-medium"
-              >
-                + 循环
-              </button>
-              <button
-                type="button"
-                onClick={() => addControlStep('if')}
-                className="px-2 py-1.5 rounded-md border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 font-medium"
-              >
-                + 条件
-              </button>
-              <button
-                type="button"
-                onClick={() => addControlStep('weighted')}
-                className="px-2 py-1.5 rounded-md border border-slate-300 bg-slate-50 hover:bg-slate-100 text-slate-700 font-medium"
-              >
-                + 权重
-              </button>
-              <button
-                type="button"
-                onClick={() => addControlStep('script')}
-                className="px-2 py-1.5 rounded-md border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-900 font-medium"
-              >
-                + 脚本
-              </button>
-            </div>
-          </div>
-
-          <ScenarioStepListEditor
-            steps={steps}
-            apis={apis}
-            onChange={(nextSteps) => updateDraft({ steps: nextSteps })}
-            depth={0}
-            defaultAddApiId={addApiId}
-          />
-        </div>
-
-        {/* Load Profile + SLA Thresholds */}
-        <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-2">
-          <h3 className="font-semibold text-slate-800">负载阶段编排、阈值 SLA 与连接选项</h3>
-          <LoadConfigEditor
-            load={draft.load || { mode: 'vus', stages: [{ duration: '0s', target: 10 }, { duration: '30s', target: 10 }] }}
-            onChange={(nextLoad) => updateDraft({ load: nextLoad })}
-            http={draft.http}
-            onHTTPChange={(nextHTTP) => updateDraft({ http: nextHTTP })}
-            stepOptions={collectStepOptions(steps)}
-          />
-        </div>
-
-        {/* Functional Dry-Run Result */}
-        {dryResult && (
-          <div className="bg-white rounded-xl border border-slate-200 p-4 space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div className="flex items-center gap-2 font-semibold text-sm">
-                <span className={dryResult.passed ? 'text-emerald-700' : 'text-rose-700'}>
-                  功能试跑{dryResult.passed ? '全部通过' : '存在失败'}
-                </span>
-                <span className="text-xs font-mono text-slate-500">总耗时 {dryResult.duration_ms.toFixed(1)} ms</span>
-              </div>
-              {dryResult.final_vars && Object.keys(dryResult.final_vars).length > 0 && (
-                <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-                  <span className="text-slate-500">传递变量终值：</span>
-                  {Object.entries(dryResult.final_vars).map(([k, v]) => (
-                    <span key={k} className="px-2 py-0.5 rounded bg-sky-50 border border-sky-200 font-mono text-sky-900">
-                      {k}={v}
-                    </span>
-                  ))}
+                        </select>
+                        <select
+                          aria-label="读取方式"
+                          value={ds.mode || 'sequential'}
+                          onChange={(e) => updateDS({ mode: e.target.value as DataSource['mode'] })}
+                          className="w-24 px-1.5 py-1 border border-line-strong rounded bg-surface text-fg"
+                        >
+                          <option value="sequential">顺序循环</option>
+                          <option value="random">随机读取</option>
+                          <option value="unique">唯一分配</option>
+                        </select>
+                        <ColumnPeek projectId={projectId} file={ds.file} alias={ds.name} onToast={onToast} />
+                        <button
+                          type="button"
+                          title="解除绑定"
+                          aria-label="解除绑定"
+                          onClick={() => updateDraft({ data: dataSources.filter((_, idx) => idx !== i) })}
+                          className="p-1 text-fg-subtle hover:text-rose-600 shrink-0"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    )
+                  })}
                 </div>
               )}
-            </div>
-
-            <div className="space-y-2">
-              {dryResult.steps.map((step, i) => (
-                <DryRunStepCard key={i} index={i} step={step} />
-              ))}
-            </div>
+            </section>
           </div>
-        )}
-      </main>
 
-      {/* File Preview Modal */}
-      {previewModal && (
-        <div className="fixed inset-0 z-40 bg-slate-900/40 flex items-center justify-center p-4">
-          <div className="w-full max-w-3xl bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col max-h-[82vh]">
-            <div className="px-5 py-3 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-              <div className="text-sm font-semibold text-slate-900 font-mono">
-                文件预览：{previewModal.name}
-                {previewModal.is_csv && `（共 ${previewModal.total_rows || 0} 行数据）`}
-              </div>
-              <button type="button" onClick={() => setPreviewModal(null)} className="p-1 text-slate-400 hover:text-slate-600">
-                <X className="w-4 h-4" />
-              </button>
+          {/* Steps Sequence */}
+          <section className="bg-surface rounded-xl border border-line p-4 space-y-3">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h3 className="font-semibold text-fg inline-flex items-center gap-1.5">
+                步骤编排
+                <span className="px-1.5 py-0.5 rounded-full bg-surface-subtle border border-line text-fg-muted text-[10px] font-mono tg-tabular">
+                  {totalSteps}
+                </span>
+              </h3>
+              <AddStepMenu label="添加步骤" variant="primary" align="right" allowControl onAdd={addRootStep} />
             </div>
-            <div className="p-4 overflow-auto text-xs">
-              {previewModal.is_csv ? (
-                <table className="w-full text-left border-collapse border border-slate-200 font-mono">
-                  <thead className="bg-slate-50 border-b border-slate-200">
-                    <tr>
-                      {(previewModal.columns || []).map((col, idx) => (
-                        <th key={idx} className="px-2.5 py-1.5 border-r border-slate-200 text-sky-800">
-                          {col}
-                        </th>
-                      ))}
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100">
-                    {(previewModal.rows || []).map((row, rIdx) => (
-                      <tr key={rIdx}>
-                        {row.map((cell, cIdx) => (
-                          <td key={cIdx} className="px-2.5 py-1 border-r border-slate-100">
-                            {cell}
-                          </td>
+
+            <ScenarioStepListEditor steps={steps} onChange={(nextSteps) => updateDraft({ steps: nextSteps })} depth={0} />
+          </section>
+
+          {/* Load Profile + SLA Thresholds */}
+          <section className="bg-surface rounded-xl border border-line p-4 space-y-2">
+            <h3 className="font-semibold text-fg">负载与阈值</h3>
+            <LoadConfigEditor
+              load={draft.load || { mode: 'vus', stages: [{ duration: '0s', target: 10 }, { duration: '30s', target: 10 }] }}
+              onChange={(nextLoad) => updateDraft({ load: nextLoad })}
+              http={draft.http}
+              onHTTPChange={(nextHTTP) => updateDraft({ http: nextHTTP })}
+              stepOptions={collectStepOptions(steps)}
+            />
+          </section>
+
+          {/* Functional Dry-Run Result */}
+          {dryResult && (
+            <section className="bg-surface rounded-xl border border-line p-4 space-y-3">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 font-semibold text-sm">
+                  {dryResult.passed ? (
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600" />
+                  ) : (
+                    <XCircle className="w-4 h-4 text-rose-600" />
+                  )}
+                  <span className={dryResult.passed ? 'text-emerald-700' : 'text-rose-700'}>
+                    {dryResult.passed ? '试跑通过' : '试跑失败'}
+                  </span>
+                  <span className="text-xs font-mono font-normal text-fg-subtle tg-tabular">
+                    {dryResult.steps.filter((s) => s.passed).length}/{dryResult.steps.length} ·{' '}
+                    {dryResult.duration_ms.toFixed(1)} ms
+                  </span>
+                </div>
+                {dryResult.final_vars && Object.keys(dryResult.final_vars).length > 0 && (
+                  <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
+                    <span className="text-fg-subtle">变量终值</span>
+                    {Object.entries(dryResult.final_vars).map(([k, v]) => (
+                      <span key={k} className="px-2 py-0.5 rounded bg-sky-50 border border-sky-200 font-mono text-sky-800">
+                        {k}={v}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-2">
+                {dryResult.steps.map((step, i) => (
+                  <DryRunStepCard key={i} index={i} step={step} />
+                ))}
+              </div>
+            </section>
+          )}
+        </main>
+
+        {/* File Preview Dialog */}
+        <dialog ref={previewRef} closedby="any" className="tg-dialog w-[min(48rem,calc(100vw-2rem))] max-h-[86dvh]">
+          {previewModal && (
+            <>
+              <div className="px-5 py-3 border-b border-line flex items-center justify-between gap-3 bg-surface-subtle">
+                <div className="flex items-center gap-2 min-w-0 text-sm font-semibold text-fg">
+                  <span className="font-mono truncate min-w-0">{previewModal.name}</span>
+                  {previewModal.is_csv && (
+                    <span className="shrink-0 px-1.5 py-0.5 rounded-full bg-sky-50 border border-sky-200 text-sky-700 text-[10px] font-mono font-normal tg-tabular">
+                      {previewModal.total_rows || 0} 行
+                    </span>
+                  )}
+                  {previewModal.truncated && (
+                    <span className="shrink-0 px-1.5 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 text-[10px] font-normal">
+                      已截断
+                    </span>
+                  )}
+                </div>
+                <button
+                  type="button"
+                  aria-label="关闭"
+                  onClick={() => setPreviewModal(null)}
+                  className="p-1 rounded text-fg-subtle hover:text-fg hover:bg-surface-hover"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+              <div className="flex-1 min-h-0 overflow-auto tg-scroller p-4 text-xs">
+                {previewModal.is_csv ? (
+                  <table className="w-full text-left border-collapse border border-line font-mono tg-tabular">
+                    <thead className="bg-surface-subtle border-b border-line sticky top-0">
+                      <tr>
+                        {(previewModal.columns || []).map((col, idx) => (
+                          <th key={idx} className="px-2.5 py-1.5 border-r border-line text-tidal font-semibold">
+                            {col}
+                          </th>
                         ))}
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <pre className="p-3 rounded bg-slate-900 text-slate-100 font-mono overflow-auto whitespace-pre-wrap">
-                  {previewModal.text || '(非 UTF-8 文本文件或空文件)'}
-                </pre>
-              )}
-            </div>
-          </div>
-        </div>
-      )}
-    </div>
+                    </thead>
+                    <tbody className="divide-y divide-line">
+                      {(previewModal.rows || []).map((row, rIdx) => (
+                        <tr key={rIdx} className="hover:bg-surface-hover">
+                          {row.map((cell, cIdx) => (
+                            <td key={cIdx} className="px-2.5 py-1 border-r border-line text-fg">
+                              {cell}
+                            </td>
+                          ))}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <pre className="p-3 rounded-lg border tg-code-surface font-mono overflow-auto whitespace-pre-wrap">
+                    {previewModal.text || '(非文本或空文件)'}
+                  </pre>
+                )}
+              </div>
+            </>
+          )}
+        </dialog>
+      </div>
+    </StepEditorContext.Provider>
   )
 }
 
 function DryRunStepCard({ index, step }: { index: number; step: DebugRunResult['steps'][number] }) {
   const [open, setOpen] = useState(!step.passed)
   return (
-    <div className="border border-slate-200 rounded-lg overflow-hidden">
-      <div
+    <div className={`border rounded-lg overflow-hidden ${step.passed ? 'border-line' : 'border-rose-200'}`}>
+      <button
+        type="button"
+        aria-expanded={open}
         onClick={() => setOpen((o) => !o)}
-        className="px-3 py-2 bg-slate-50 flex items-center justify-between gap-2 cursor-pointer hover:bg-slate-100"
+        className="w-full px-3 py-2 bg-surface-subtle flex items-center justify-between gap-2 text-left hover:bg-surface-hover"
       >
-        <div className="flex items-center gap-2 font-mono">
-          {open ? <ChevronDown className="w-3.5 h-3.5" /> : <ChevronRight className="w-3.5 h-3.5" />}
-          <span className="font-semibold">
-            #{index + 1} {step.step_name || step.step_id}
+        <div className="flex items-center gap-2 font-mono min-w-0">
+          {open ? <ChevronDown className="w-3.5 h-3.5 shrink-0" /> : <ChevronRight className="w-3.5 h-3.5 shrink-0" />}
+          {step.passed ? (
+            <CheckCircle2 className="w-3.5 h-3.5 text-emerald-700 shrink-0" aria-label="通过" />
+          ) : (
+            <XCircle className="w-3.5 h-3.5 text-rose-700 shrink-0" aria-label="失败" />
+          )}
+          <span className="font-semibold text-fg shrink-0">
+            <span className="tg-tabular">#{index + 1}</span> {step.step_name || step.step_id}
           </span>
-          <span className="text-slate-600">
+          <span className="text-fg-muted truncate min-w-0">
             {step.actual_request.method} {step.actual_request.url}
           </span>
         </div>
-        <div className="flex items-center gap-2 font-mono">
-          <span>HTTP {step.status || 'ERR'}</span>
-          <span>{step.timing.total_ms.toFixed(1)} ms</span>
-          <span className={step.passed ? 'text-emerald-700 font-semibold' : 'text-rose-700 font-semibold'}>
-            {step.passed ? '✓ 通过' : '✗ 失败'}
+        <div className="flex items-center gap-2 font-mono tg-tabular shrink-0">
+          <span
+            className={`px-1.5 py-0.5 rounded border text-[10px] ${
+              step.status >= 200 && step.status < 400
+                ? 'bg-emerald-50 border-emerald-200 text-emerald-700'
+                : 'bg-rose-50 border-rose-200 text-rose-700'
+            }`}
+          >
+            {step.status || 'ERR'}
           </span>
+          <span className="text-fg-muted">{step.timing.total_ms.toFixed(1)} ms</span>
         </div>
-      </div>
+      </button>
       {open && (
-        <div className="p-3 bg-white border-t border-slate-200 space-y-2 text-xs">
+        <div className="p-3 bg-surface border-t border-line space-y-2 text-xs">
           {step.error && <div className="text-rose-700 font-medium">{step.error}</div>}
           {(step.extracts?.length || 0) > 0 && (
             <div className="flex flex-wrap gap-1.5">
               {step.extracts!.map((ex, idx) => (
                 <span
                   key={idx}
-                  className={`px-2 py-0.5 rounded border font-mono ${
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border font-mono ${
                     ex.matched ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-800'
                   }`}
                 >
-                  提取 {ex.name}={ex.matched ? ex.value : `失败(${ex.error || '未匹配'})`}
+                  {ex.matched ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                  {ex.name}={ex.matched ? ex.value : ex.error || '未匹配'}
                 </span>
               ))}
             </div>
@@ -874,16 +1459,17 @@ function DryRunStepCard({ index, step }: { index: number; step: DebugRunResult['
               {step.asserts!.map((as, idx) => (
                 <span
                   key={idx}
-                  className={`px-2 py-0.5 rounded border ${
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded border ${
                     as.passed ? 'bg-emerald-50 border-emerald-200 text-emerald-800' : 'bg-rose-50 border-rose-200 text-rose-800'
                   }`}
                 >
-                  {as.passed ? '✓' : '✗'} {as.description || as.desc} {as.message}
+                  {as.passed ? <CheckCircle2 className="w-3 h-3" /> : <XCircle className="w-3 h-3" />}
+                  {as.description || as.desc} {as.message}
                 </span>
               ))}
             </div>
           )}
-          <pre className="p-2.5 rounded bg-slate-900 text-slate-100 font-mono overflow-auto max-h-40 whitespace-pre-wrap">
+          <pre className="p-2.5 rounded-lg border tg-code-surface font-mono overflow-auto max-h-40 whitespace-pre-wrap">
             {step.body || '(空响应体)'}
           </pre>
         </div>
@@ -892,21 +1478,29 @@ function DryRunStepCard({ index, step }: { index: number; step: DebugRunResult['
   )
 }
 
+const fieldCls = 'px-2 py-1 border border-line-strong rounded bg-surface text-fg focus:border-sky-500 focus:outline-none'
+const monoFieldCls = `${fieldCls} font-mono`
+const subLabelCls = 'block text-[11px] text-fg-muted mb-0.5'
+const idInputProps = { autoCorrect: 'off', autoCapitalize: 'none', spellCheck: false } as const
+
 function ScenarioStepListEditor({
   steps,
-  apis,
   onChange,
   depth,
-  defaultAddApiId,
 }: {
   steps: ScenarioStep[]
-  apis: FlatAPI[]
   onChange: (next: ScenarioStep[]) => void
   depth: number
-  defaultAddApiId: string
 }) {
-  const [expandedOverride, setExpandedOverride] = useState<Record<number, boolean>>({})
-  const [subAddApiId, setSubAddApiId] = useState(defaultAddApiId || apis[0]?.id || '')
+  const { apiMap, onEditAPI, newAllocator, keyOf, preserveKey } = useStepCtx()
+  const [overrideOpen, setOverrideOpen] = useState<Record<string, boolean>>({})
+  const [collapsed, setCollapsed] = useState<Record<string, boolean>>({})
+  const allowControl = depth < 3
+
+  const addStep = (kind: ScenarioStepType, ref?: FlatAPI) => {
+    const alloc = newAllocator()
+    onChange([...steps, makeStep(kind, alloc(kindPrefix(kind)), ref)])
+  }
 
   const moveStep = (idx: number, delta: number) => {
     const target = idx + delta
@@ -917,489 +1511,509 @@ function ScenarioStepListEditor({
     onChange(next)
   }
 
+  const cloneAt = (idx: number) => {
+    const copy = cloneStep(steps[idx], newAllocator())
+    const next = [...steps]
+    next.splice(idx + 1, 0, copy)
+    onChange(next)
+  }
+
+  const nested = (list: ScenarioStep[], apply: (next: ScenarioStep[]) => void) => (
+    <ScenarioStepListEditor steps={list} onChange={apply} depth={depth + 1} />
+  )
+
+  const menu = <AddStepMenu label={depth === 0 ? '添加步骤' : '子步骤'} allowControl={allowControl} onAdd={addStep} />
+
+  if (steps.length === 0) {
+    return (
+      <div className="flex items-center justify-between gap-2 px-3 py-2 border border-dashed border-line-strong rounded-lg text-fg-subtle">
+        <span>{depth === 0 ? '暂无步骤' : '空'}</span>
+        {menu}
+      </div>
+    )
+  }
+
   return (
-    <div className={depth > 0 ? 'pl-3.5 border-l-2 border-sky-300/80 space-y-2' : 'space-y-2'}>
-      {depth > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5 text-[11px]">
-          <select
-            value={subAddApiId || defaultAddApiId || apis[0]?.id || ''}
-            onChange={(e) => setSubAddApiId(e.target.value)}
-            className="px-2 py-1 border border-slate-300 rounded bg-white max-w-[200px]"
-          >
-            <option value="">选择子步骤接口...</option>
-            {apis.map((a) => (
-              <option key={a.id} value={a.id}>
-                [{a.method}] {a.pathLabel}
-              </option>
-            ))}
-          </select>
-          <button
-            type="button"
-            onClick={() => {
-              const chosenId = subAddApiId || defaultAddApiId || apis[0]?.id
-              if (!chosenId) return
-              const found = apis.find((a) => a.id === chosenId)
-              onChange([
-                ...steps,
-                {
-                  id: `sub_${Date.now() % 10000}`,
-                  type: 'http',
-                  name: found?.name || '子接口',
-                  api_id: chosenId,
-                },
-              ])
-            }}
-            className="px-2 py-1 rounded bg-sky-600 text-white font-medium"
-          >
-            + 子接口
-          </button>
-          {depth < 3 && (
+    <div className="space-y-2">
+      {steps.map((st, idx) => {
+        const key = keyOf(st)
+        const kind = (st.type || 'http') as ScenarioStepType
+        const isAPI = isAPIKind(kind)
+        const isContainer = CONTROL_KINDS.has(kind)
+        const refAPI = isAPI && st.api_id ? apiMap.get(st.api_id) : undefined
+        const isOvOpen = Boolean(overrideOpen[key])
+        const isCollapsed = Boolean(collapsed[key])
+        const meta = KIND_META[kind]
+        const count = isContainer ? childCount(st) : 0
+        const updateStep = (patch: Partial<ScenarioStep>) =>
+          onChange(
+            steps.map((row, i) => {
+              if (i !== idx) return row
+              const nextRow = { ...row, ...patch }
+              preserveKey(row, nextRow)
+              return nextRow
+            })
+          )
+
+        let apiChip: ReactNode = null
+        if (isAPI) {
+          const text = refAPI ? (
             <>
-              <button
-                type="button"
-                onClick={() => onChange([...steps, makeControlStep('group', Date.now() % 10000)])}
-                className="px-2 py-1 rounded border border-slate-300 bg-white text-slate-700"
-              >
-                + 分组
-              </button>
-              <button
-                type="button"
-                onClick={() => onChange([...steps, makeControlStep('loop', Date.now() % 10000)])}
-                className="px-2 py-1 rounded border border-slate-300 bg-white text-slate-700"
-              >
-                + 循环
-              </button>
-              <button
-                type="button"
-                onClick={() => onChange([...steps, makeControlStep('if', Date.now() % 10000)])}
-                className="px-2 py-1 rounded border border-slate-300 bg-white text-slate-700"
-              >
-                + 条件
-              </button>
-              <button
-                type="button"
-                onClick={() => onChange([...steps, makeControlStep('script', Date.now() % 10000)])}
-                className="px-2 py-1 rounded border border-amber-300 bg-amber-50 text-amber-900"
-              >
-                + 脚本
-              </button>
+              <MethodTag method={refAPI.method} />
+              <span className="truncate min-w-0">{refAPI.url || refAPI.pathLabel}</span>
             </>
-          )}
-        </div>
-      )}
+          ) : (
+            <span className="truncate min-w-0">接口不存在 · {st.api_id || '-'}</span>
+          )
+          const base = `inline-flex items-center gap-1 font-mono text-[11px] px-2 py-0.5 rounded border max-w-xs min-w-0 ${
+            refAPI ? 'border-line bg-surface-subtle text-fg-muted' : 'border-rose-200 bg-rose-50 text-rose-700'
+          }`
+          apiChip =
+            onEditAPI && st.api_id && refAPI ? (
+              <button
+                type="button"
+                title="去工作台编辑"
+                aria-label={`去工作台编辑 ${refAPI.name}`}
+                onClick={() => onEditAPI(st.api_id!)}
+                className={`${base} group/api cursor-pointer hover:bg-sky-50 hover:border-sky-300 hover:text-tidal`}
+              >
+                {text}
+                <ExternalLink className="w-3 h-3 shrink-0 text-tidal/80 group-hover/api:text-tidal" />
+              </button>
+            ) : (
+              <span className={base} title={refAPI?.pathLabel}>
+                {text}
+              </span>
+            )
+        }
 
-      {steps.length === 0 ? (
-        <div className="text-center py-4 text-slate-400 border border-dashed border-slate-200 rounded-lg">
-          {depth === 0 ? '请从上方选择接口或控制流节点添加步骤。' : '当前分支暂无子步骤，可通过上方按钮添加。'}
-        </div>
-      ) : (
-        steps.map((st, idx) => {
-          const kind = (st.type || 'http') as ScenarioStepType
-          const isAPI = kind === 'http' || kind === 'ws' || kind === 'grpc' || kind === 'sse'
-          const refAPI = isAPI ? apis.find((a) => a.id === st.api_id) : undefined
-          const isOvOpen = Boolean(expandedOverride[idx])
-          const updateStep = (patch: Partial<ScenarioStep>) =>
-            onChange(steps.map((row, i) => (i === idx ? { ...row, ...patch } : row)))
-          const badge = stepTypeBadge(kind)
+        return (
+          <div
+            key={key}
+            className={`border rounded-lg p-3 space-y-2.5 ${meta ? `border-l-[3px] ${meta.accent}` : ''} ${
+              st.disabled ? 'bg-surface-subtle border-line opacity-65' : 'bg-surface border-line'
+            }`}
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              {isContainer && (
+                <button
+                  type="button"
+                  aria-expanded={!isCollapsed}
+                  aria-label={isCollapsed ? '展开' : '折叠'}
+                  title={isCollapsed ? '展开' : '折叠'}
+                  onClick={() => setCollapsed((m) => ({ ...m, [key]: !m[key] }))}
+                  className="p-0.5 -ml-1 rounded text-fg-subtle hover:text-fg hover:bg-surface-hover"
+                >
+                  {isCollapsed ? <ChevronRight className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+                </button>
+              )}
+              <input
+                type="checkbox"
+                checked={!st.disabled}
+                onChange={(e) => updateStep({ disabled: !e.target.checked })}
+                title="启用"
+                aria-label="启用此步骤"
+              />
+              <span className="font-mono text-fg-subtle tg-tabular">#{idx + 1}</span>
+              {meta && (
+                <span className={`px-1.5 py-0.5 rounded border text-[10px] font-semibold ${meta.badge}`}>{meta.label}</span>
+              )}
+              {isContainer && (
+                <span
+                  title={`${count} 个子步骤`}
+                  className="px-1.5 py-0.5 rounded-full bg-surface-subtle border border-line text-fg-muted text-[10px] font-mono tg-tabular"
+                >
+                  {count}
+                </span>
+              )}
+              <input
+                type="text"
+                name="step-id"
+                aria-label="步骤 ID"
+                value={st.id}
+                placeholder="step ID"
+                {...idInputProps}
+                onChange={(e) => updateStep({ id: e.target.value })}
+                className={`w-28 ${monoFieldCls}`}
+              />
+              <input
+                type="text"
+                aria-label="步骤名称"
+                value={st.name || ''}
+                placeholder={refAPI?.name || '步骤名称'}
+                onChange={(e) => updateStep({ name: e.target.value })}
+                className={`w-36 ${fieldCls}`}
+              />
+              {apiChip}
 
-          return (
-            <div
-              key={`${st.id}-${idx}`}
-              className={`border rounded-lg p-3 space-y-2.5 ${
-                st.disabled ? 'bg-slate-50 border-slate-200 opacity-65' : 'bg-white border-slate-200'
-              }`}
-            >
-              <div className="flex flex-wrap items-center gap-2">
-                <input
-                  type="checkbox"
-                  checked={!st.disabled}
-                  onChange={(e) => updateStep({ disabled: !e.target.checked })}
-                  title="启用或禁用此步骤"
-                />
-                <span className="font-mono text-slate-400">#{idx + 1}</span>
-                {badge && (
-                  <span className="px-1.5 py-0.5 rounded bg-indigo-50 border border-indigo-200 text-indigo-800 font-mono text-[10px] font-semibold">
-                    {badge}
-                  </span>
-                )}
-                <input
-                  type="text"
-                  value={st.id}
-                  placeholder="step ID"
-                  onChange={(e) => updateStep({ id: e.target.value })}
-                  className="w-28 px-2 py-1 border border-slate-300 rounded font-mono"
-                />
-                <input
-                  type="text"
-                  value={st.name || ''}
-                  placeholder={refAPI?.name || '步骤名称'}
-                  onChange={(e) => updateStep({ name: e.target.value })}
-                  className="w-36 px-2 py-1 border border-slate-300 rounded"
-                />
-                {isAPI && (
-                  <span className="font-mono text-[11px] px-2 py-0.5 rounded bg-slate-100 text-slate-700 truncate max-w-xs">
-                    {refAPI ? `${refAPI.method} ${refAPI.url}` : `API ID: ${st.api_id || '-'}`}
-                  </span>
-                )}
-
-                <div className="flex flex-wrap items-center gap-1 ml-auto">
-                  <span className="text-slate-500">思考时间：</span>
-                  <select
-                    value={st.think?.type || ''}
-                    onChange={(e) => {
-                      const t = e.target.value as '' | 'fixed' | 'uniform' | 'normal'
-                      if (!t) updateStep({ think: null })
-                      else if (t === 'fixed') updateStep({ think: { type: 'fixed', min: '500ms' } })
-                      else if (t === 'uniform') updateStep({ think: { type: 'uniform', min: '500ms', max: '1500ms' } })
-                      else updateStep({ think: { type: 'normal', mean: '800ms', stddev: '200ms', min: '100ms', max: '3s' } })
-                    }}
-                    className="px-1.5 py-1 border border-slate-300 rounded bg-white"
-                  >
-                    <option value="">无</option>
-                    <option value="fixed">固定</option>
-                    <option value="uniform">均匀分布</option>
-                    <option value="normal">正态分布</option>
-                  </select>
-                  {st.think?.type === 'fixed' && (
-                    <input
-                      type="text"
-                      value={st.think.min || ''}
-                      onChange={(e) => updateStep({ think: { ...st.think!, min: e.target.value } })}
-                      placeholder="500ms"
-                      className="w-16 px-1.5 py-1 border border-slate-300 rounded font-mono"
-                    />
-                  )}
-                  {st.think?.type === 'uniform' && (
-                    <>
-                      <input
-                        type="text"
-                        value={st.think.min || ''}
-                        onChange={(e) => updateStep({ think: { ...st.think!, min: e.target.value } })}
-                        placeholder="min"
-                        className="w-16 px-1.5 py-1 border border-slate-300 rounded font-mono"
-                      />
-                      <input
-                        type="text"
-                        value={st.think.max || ''}
-                        onChange={(e) => updateStep({ think: { ...st.think!, max: e.target.value } })}
-                        placeholder="max"
-                        className="w-16 px-1.5 py-1 border border-slate-300 rounded font-mono"
-                      />
-                    </>
-                  )}
-                  {st.think?.type === 'normal' && (
-                    <>
-                      <input
-                        type="text"
-                        value={st.think.mean || ''}
-                        onChange={(e) => updateStep({ think: { ...st.think!, mean: e.target.value } })}
-                        placeholder="均值 800ms"
-                        title="正态分布均值 mean"
-                        className="w-16 px-1.5 py-1 border border-slate-300 rounded font-mono"
-                      />
-                      <input
-                        type="text"
-                        value={st.think.stddev || ''}
-                        onChange={(e) => updateStep({ think: { ...st.think!, stddev: e.target.value } })}
-                        placeholder="标准差 200ms"
-                        title="正态分布标准差 stddev"
-                        className="w-16 px-1.5 py-1 border border-slate-300 rounded font-mono"
-                      />
-                    </>
-                  )}
-
-                  {isAPI && (
+              <div className="flex flex-wrap items-center gap-1 ml-auto">
+                {!isContainer && (
+                  <>
                     <select
-                      value={st.on_error || ''}
-                      title="步骤失败策略"
-                      onChange={(e) =>
-                        updateStep({
-                          on_error: (e.target.value || undefined) as
-                            | ''
-                            | 'continue'
-                            | 'abort_iteration'
-                            | 'abort_vu'
-                            | undefined,
-                        })
-                      }
-                      className="px-1.5 py-1 border border-slate-300 rounded bg-white text-slate-700"
+                      aria-label="思考时间"
+                      title="思考时间"
+                      value={st.think?.type || ''}
+                      onChange={(e) => {
+                        const t = e.target.value as '' | 'fixed' | 'uniform' | 'normal'
+                        if (!t) updateStep({ think: null })
+                        else if (t === 'fixed') updateStep({ think: { type: 'fixed', min: '500ms' } })
+                        else if (t === 'uniform') updateStep({ think: { type: 'uniform', min: '500ms', max: '1500ms' } })
+                        else updateStep({ think: { type: 'normal', mean: '800ms', stddev: '200ms', min: '100ms', max: '3s' } })
+                      }}
+                      className={`${fieldCls} px-1.5`}
                     >
-                      <option value="">继承默认策略</option>
-                      <option value="continue">继续</option>
-                      <option value="abort_iteration">中止本轮迭代</option>
-                      <option value="abort_vu">停止当前 VU</option>
+                      <option value="">无思考时间</option>
+                      <option value="fixed">思考 · 固定</option>
+                      <option value="uniform">思考 · 均匀</option>
+                      <option value="normal">思考 · 正态</option>
                     </select>
-                  )}
+                    {st.think?.type === 'fixed' && (
+                      <input
+                        type="text"
+                        aria-label="固定思考时间"
+                        value={st.think.min || ''}
+                        {...idInputProps}
+                        onChange={(e) => updateStep({ think: { ...st.think!, min: e.target.value } })}
+                        placeholder="500ms"
+                        className={`w-16 ${monoFieldCls} px-1.5`}
+                      />
+                    )}
+                    {st.think?.type === 'uniform' && (
+                      <>
+                        <input
+                          type="text"
+                          aria-label="最小思考时间"
+                          value={st.think.min || ''}
+                          {...idInputProps}
+                          onChange={(e) => updateStep({ think: { ...st.think!, min: e.target.value } })}
+                          placeholder="min"
+                          className={`w-16 ${monoFieldCls} px-1.5`}
+                        />
+                        <input
+                          type="text"
+                          aria-label="最大思考时间"
+                          value={st.think.max || ''}
+                          {...idInputProps}
+                          onChange={(e) => updateStep({ think: { ...st.think!, max: e.target.value } })}
+                          placeholder="max"
+                          className={`w-16 ${monoFieldCls} px-1.5`}
+                        />
+                      </>
+                    )}
+                    {st.think?.type === 'normal' && (
+                      <>
+                        <input
+                          type="text"
+                          aria-label="均值"
+                          title="均值"
+                          value={st.think.mean || ''}
+                          {...idInputProps}
+                          onChange={(e) => updateStep({ think: { ...st.think!, mean: e.target.value } })}
+                          placeholder="均值"
+                          className={`w-16 ${monoFieldCls} px-1.5`}
+                        />
+                        <input
+                          type="text"
+                          aria-label="标准差"
+                          title="标准差"
+                          value={st.think.stddev || ''}
+                          {...idInputProps}
+                          onChange={(e) => updateStep({ think: { ...st.think!, stddev: e.target.value } })}
+                          placeholder="标准差"
+                          className={`w-16 ${monoFieldCls} px-1.5`}
+                        />
+                      </>
+                    )}
+                  </>
+                )}
 
-                  {isAPI && (
-                    <button
-                      type="button"
-                      onClick={() => setExpandedOverride((m) => ({ ...m, [idx]: !m[idx] }))}
-                      className={`inline-flex items-center gap-1 px-2 py-1 rounded border ${
-                        st.override
-                          ? 'bg-sky-50 border-sky-300 text-sky-700'
-                          : 'border-slate-200 text-slate-600 hover:bg-slate-50'
-                      }`}
-                    >
-                      <SlidersHorizontal className="w-3 h-3" /> 覆盖参数
-                    </button>
-                  )}
-                  <button type="button" onClick={() => moveStep(idx, -1)} className="p-1 text-slate-400 hover:text-slate-700">
-                    <ArrowUp className="w-3.5 h-3.5" />
-                  </button>
-                  <button type="button" onClick={() => moveStep(idx, 1)} className="p-1 text-slate-400 hover:text-slate-700">
-                    <ArrowDown className="w-3.5 h-3.5" />
-                  </button>
+                {isAPI && (
+                  <select
+                    value={st.on_error || ''}
+                    aria-label="失败策略"
+                    title="失败策略"
+                    onChange={(e) =>
+                      updateStep({
+                        on_error: (e.target.value || undefined) as '' | 'continue' | 'abort_iteration' | 'abort_vu' | undefined,
+                      })
+                    }
+                    className={`${fieldCls} px-1.5`}
+                  >
+                    <option value="">失败 · 默认</option>
+                    <option value="continue">失败 · 继续</option>
+                    <option value="abort_iteration">失败 · 中止迭代</option>
+                    <option value="abort_vu">失败 · 停止 VU</option>
+                  </select>
+                )}
+
+                {isAPI && (
                   <button
                     type="button"
-                    onClick={() => onChange(steps.filter((_, i) => i !== idx))}
-                    className="p-1 text-slate-400 hover:text-rose-600"
+                    aria-expanded={isOvOpen}
+                    onClick={() => setOverrideOpen((m) => ({ ...m, [key]: !m[key] }))}
+                    className={`inline-flex items-center gap-1 px-2 py-1 rounded border ${
+                      st.override ? 'bg-sky-50 border-sky-300 text-sky-700' : 'border-line text-fg-muted hover:bg-surface-hover'
+                    }`}
                   >
-                    <Trash2 className="w-3.5 h-3.5" />
+                    <SlidersHorizontal className="w-3 h-3" /> 覆盖
                   </button>
+                )}
+                <button
+                  type="button"
+                  title="克隆"
+                  aria-label="克隆步骤"
+                  onClick={() => cloneAt(idx)}
+                  className="p-1 rounded text-fg-subtle hover:text-tidal hover:bg-surface-hover"
+                >
+                  <Copy className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  title="上移"
+                  aria-label="上移"
+                  disabled={idx === 0}
+                  onClick={() => moveStep(idx, -1)}
+                  className="p-1 rounded text-fg-subtle hover:text-fg hover:bg-surface-hover disabled:opacity-30"
+                >
+                  <ArrowUp className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  title="下移"
+                  aria-label="下移"
+                  disabled={idx === steps.length - 1}
+                  onClick={() => moveStep(idx, 1)}
+                  className="p-1 rounded text-fg-subtle hover:text-fg hover:bg-surface-hover disabled:opacity-30"
+                >
+                  <ArrowDown className="w-3.5 h-3.5" />
+                </button>
+                <ConfirmDeleteButton label="删除步骤" onConfirm={() => onChange(steps.filter((_, i) => i !== idx))} />
+              </div>
+            </div>
+
+            {isAPI && isOvOpen && (
+              <div className="pt-2 border-t border-line space-y-3 bg-surface-subtle p-3 rounded">
+                <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
+                  <input
+                    type="text"
+                    aria-label="覆盖方法"
+                    value={st.override?.method || ''}
+                    placeholder="方法"
+                    {...idInputProps}
+                    onChange={(e) => updateStep({ override: { ...(st.override || {}), method: e.target.value || undefined } })}
+                    className={monoFieldCls}
+                  />
+                  <input
+                    type="text"
+                    aria-label="覆盖 URL"
+                    value={st.override?.url || ''}
+                    placeholder={refAPI?.url || 'URL'}
+                    {...idInputProps}
+                    onChange={(e) => updateStep({ override: { ...(st.override || {}), url: e.target.value || undefined } })}
+                    className={`sm:col-span-3 ${monoFieldCls}`}
+                  />
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <div className="font-medium text-fg-muted mb-1">请求头</div>
+                    <KeyValueEditor
+                      items={st.override?.headers || []}
+                      onChange={(next) => updateStep({ override: { ...(st.override || {}), headers: next } })}
+                      compact
+                    />
+                  </div>
+                  <div>
+                    <div className="font-medium text-fg-muted mb-1">请求体</div>
+                    <textarea
+                      rows={3}
+                      aria-label="覆盖请求体"
+                      value={st.override?.body?.content || ''}
+                      placeholder="留空沿用原接口"
+                      {...idInputProps}
+                      onChange={(e) => {
+                        const val = e.target.value
+                        updateStep({
+                          override: {
+                            ...(st.override || {}),
+                            body: val
+                              ? {
+                                  type: val.trim().startsWith('{') || val.trim().startsWith('[') ? 'json' : 'raw',
+                                  content: val,
+                                }
+                              : undefined,
+                          },
+                        })
+                      }}
+                      className={`w-full p-2 ${monoFieldCls}`}
+                    />
+                  </div>
                 </div>
               </div>
+            )}
 
-              {isAPI && isOvOpen && (
-                <div className="mt-2 pt-2 border-t border-slate-200 space-y-3 bg-slate-50/60 p-3 rounded">
-                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-2">
-                    <input
-                      type="text"
-                      value={st.override?.method || ''}
-                      placeholder="覆盖方法 (如 POST)"
-                      onChange={(e) =>
-                        updateStep({ override: { ...(st.override || {}), method: e.target.value || undefined } })
-                      }
-                      className="px-2 py-1 border border-slate-300 rounded font-mono bg-white"
-                    />
-                    <input
-                      type="text"
-                      value={st.override?.url || ''}
-                      placeholder="覆盖 URL（留空沿用原接口）"
-                      onChange={(e) =>
-                        updateStep({ override: { ...(st.override || {}), url: e.target.value || undefined } })
-                      }
-                      className="sm:col-span-3 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
-                    />
-                  </div>
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                    <div>
-                      <div className="font-medium text-slate-600 mb-1">追加/覆盖请求头</div>
-                      <KeyValueEditor
-                        items={st.override?.headers || []}
-                        onChange={(next) =>
-                          updateStep({ override: { ...(st.override || {}), headers: next } })
-                        }
-                        compact
-                      />
-                    </div>
-                    <div>
-                      <div className="font-medium text-slate-600 mb-1">覆盖 JSON/文本请求体</div>
-                      <textarea
-                        rows={3}
-                        value={st.override?.body?.content || ''}
-                        placeholder="留空则继承原接口请求体；输入 JSON 将以 JSON 类型覆盖"
-                        onChange={(e) => {
-                          const val = e.target.value
-                          updateStep({
-                            override: {
-                              ...(st.override || {}),
-                              body: val
-                                ? {
-                                    type: val.trim().startsWith('{') || val.trim().startsWith('[') ? 'json' : 'raw',
-                                    content: val,
-                                  }
-                                : undefined,
-                            },
-                          })
-                        }}
-                        className="w-full p-2 border border-slate-300 rounded font-mono bg-white"
-                      />
-                    </div>
-                  </div>
-                </div>
-              )}
+            {kind === 'script' && (
+              <div className="border-t border-line pt-2">
+                <CodeEditor
+                  value={st.script || ''}
+                  onChange={(next) => updateStep({ script: next })}
+                  rows={4}
+                  ariaLabel="脚本"
+                  placeholder="vars.sign = hmac_sha256(vars.secret, vars.payload)"
+                  snippets={SCRIPT_SNIPPETS}
+                />
+              </div>
+            )}
 
-              {kind === 'script' && (
-                <div className="space-y-2 border-t border-slate-100 pt-2">
-                  <div className="flex items-start gap-2 rounded-md border border-amber-300 bg-amber-50 px-3 py-2 text-[11px] text-amber-950">
-                    <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
-                    <div>
-                      <strong>沙箱隔离与性能开销提示：</strong>
-                      脚本在隔离 JavaScript 沙箱中执行，禁止文件/网络/系统调用且受超时约束；高频高并发压测中频繁执行脚本会额外占用发压机 CPU，能使用 JSONPath/XPath 提取与断言规则实现的逻辑建议优先采用声明式步骤（管理员亦可在「系统治理」中全局禁用脚本）。
-                    </div>
-                  </div>
-                  <textarea
-                    rows={4}
-                    value={st.script || ''}
-                    onChange={(e) => updateStep({ script: e.target.value })}
-                    placeholder="vars.sign = 'ok'; // 可读写 vars、data、env"
-                    className="w-full p-2.5 border border-slate-300 rounded font-mono text-xs bg-slate-950 text-emerald-300"
-                  />
-                </div>
-              )}
+            {isContainer && !isCollapsed && (
+              <div className="pl-3 space-y-2">
+                {kind === 'group' && nested(st.children || [], (next) => updateStep({ children: next }))}
 
-              {kind === 'group' && (
-                <div className="pl-4 border-l-2 border-sky-200 space-y-2">
-                  <div className="text-[11px] text-slate-500">事务分组将聚合统计其所有子步骤的整体事务耗时（is_group=true）。</div>
-                  <ScenarioStepListEditor
-                    steps={st.children || []}
-                    apis={apis}
-                    onChange={(next) => updateStep({ children: next })}
-                    depth={depth + 1}
-                    defaultAddApiId={defaultAddApiId}
-                  />
-                </div>
-              )}
-
-              {kind === 'loop' && (
-                <div className="pl-4 border-l-2 border-indigo-200 space-y-2">
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                    <div>
-                      <label className="block text-[11px] text-slate-600 mb-0.5">固定次数 (loop_count)</label>
-                      <input
-                        type="number"
-                        min={0}
-                        value={st.loop_count ?? 1}
-                        onChange={(e) => updateStep({ loop_count: Math.max(0, Number(e.target.value) || 0) })}
-                        className="w-full px-2 py-1 border border-slate-300 rounded font-mono"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] text-slate-600 mb-0.5">While 条件表达式（可选）</label>
-                      <input
-                        type="text"
-                        value={st.while || ''}
-                        onChange={(e) => updateStep({ while: e.target.value || undefined })}
-                        placeholder="{{has_more}} == true"
-                        className="w-full px-2 py-1 border border-slate-300 rounded font-mono"
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-[11px] text-slate-600 mb-0.5">最大迭代保护 (max_iterations)</label>
-                      <input
-                        type="number"
-                        min={1}
-                        value={st.max_iterations ?? 100}
-                        onChange={(e) => updateStep({ max_iterations: Math.max(1, Number(e.target.value) || 100) })}
-                        className="w-full px-2 py-1 border border-slate-300 rounded font-mono"
-                      />
-                    </div>
-                  </div>
-                  <ScenarioStepListEditor
-                    steps={st.children || []}
-                    apis={apis}
-                    onChange={(next) => updateStep({ children: next })}
-                    depth={depth + 1}
-                    defaultAddApiId={defaultAddApiId}
-                  />
-                </div>
-              )}
-
-              {kind === 'if' && (
-                <div className="pl-4 border-l-2 border-emerald-200 space-y-2">
-                  <div>
-                    <label className="block text-[11px] text-slate-600 mb-0.5">条件表达式 (expr)</label>
-                    <input
-                      type="text"
-                      value={st.expr || ''}
-                      onChange={(e) => updateStep({ expr: e.target.value })}
-                      placeholder='{{code}} == "200"'
-                      className="w-full px-2.5 py-1 border border-slate-300 rounded font-mono"
-                    />
-                  </div>
-                  <div>
-                    <div className="text-[11px] font-semibold text-emerald-800 mb-1">条件成立分支 (Then)</div>
-                    <ScenarioStepListEditor
-                      steps={st.children || []}
-                      apis={apis}
-                      onChange={(next) => updateStep({ children: next })}
-                      depth={depth + 1}
-                      defaultAddApiId={defaultAddApiId}
-                    />
-                  </div>
-                  <div>
-                    <div className="text-[11px] font-semibold text-slate-600 mb-1">条件不成立分支 (Else)</div>
-                    <ScenarioStepListEditor
-                      steps={st.else || []}
-                      apis={apis}
-                      onChange={(next) => updateStep({ else: next })}
-                      depth={depth + 1}
-                      defaultAddApiId={defaultAddApiId}
-                    />
-                  </div>
-                </div>
-              )}
-
-              {kind === 'weighted' && (
-                <div className="pl-4 border-l-2 border-amber-200 space-y-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-[11px] text-slate-600">每次迭代按相对权重随机选择一个分支执行：</span>
-                    <button
-                      type="button"
-                      onClick={() =>
-                        updateStep({
-                          branches: [
-                            ...(st.branches || []),
-                            { name: `分支 ${(st.branches?.length || 0) + 1}`, weight: 10, steps: [] },
-                          ],
-                        })
-                      }
-                      className="text-[11px] text-sky-700 hover:underline font-medium"
-                    >
-                      + 添加权重分支
-                    </button>
-                  </div>
-                  {(st.branches || []).map((br, bIdx) => {
-                    const updateBr = (patch: Partial<ScenarioWeightedBranch>) =>
-                      updateStep({
-                        branches: (st.branches || []).map((x, j) => (j === bIdx ? { ...x, ...patch } : x)),
-                      })
-                    return (
-                      <div key={bIdx} className="p-2.5 rounded border border-slate-200 bg-slate-50/70 space-y-2">
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            value={br.name || ''}
-                            placeholder="分支名称"
-                            onChange={(e) => updateBr({ name: e.target.value })}
-                            className="w-36 px-2 py-1 border border-slate-300 rounded bg-white"
-                          />
-                          <span className="text-slate-500">权重：</span>
-                          <input
-                            type="number"
-                            min={0.1}
-                            step="any"
-                            value={br.weight}
-                            onChange={(e) => updateBr({ weight: Math.max(0.1, Number(e.target.value) || 1) })}
-                            className="w-20 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
-                          />
-                          <button
-                            type="button"
-                            onClick={() =>
-                              updateStep({ branches: (st.branches || []).filter((_, j) => j !== bIdx) })
-                            }
-                            className="ml-auto p-1 text-slate-400 hover:text-rose-600"
-                          >
-                            <Trash2 className="w-3.5 h-3.5" />
-                          </button>
-                        </div>
-                        <ScenarioStepListEditor
-                          steps={br.steps || []}
-                          apis={apis}
-                          onChange={(next) => updateBr({ steps: next })}
-                          depth={depth + 1}
-                          defaultAddApiId={defaultAddApiId}
+                {kind === 'loop' && (
+                  <>
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                      <div>
+                        <label className={subLabelCls}>次数</label>
+                        <input
+                          type="number"
+                          min={0}
+                          value={st.loop_count ?? 1}
+                          onChange={(e) => updateStep({ loop_count: Math.max(0, Number(e.target.value) || 0) })}
+                          className={`w-full ${monoFieldCls} tg-tabular`}
                         />
                       </div>
-                    )
-                  })}
-                </div>
-              )}
-            </div>
-          )
-        })
+                      <div>
+                        <label className={subLabelCls}>While 条件</label>
+                        <input
+                          type="text"
+                          value={st.while || ''}
+                          {...idInputProps}
+                          onChange={(e) => updateStep({ while: e.target.value || undefined })}
+                          placeholder="{{has_more}} == true"
+                          className={`w-full ${monoFieldCls}`}
+                        />
+                      </div>
+                      <div>
+                        <label className={subLabelCls}>最大迭代</label>
+                        <input
+                          type="number"
+                          min={1}
+                          value={st.max_iterations ?? 100}
+                          onChange={(e) => updateStep({ max_iterations: Math.max(1, Number(e.target.value) || 100) })}
+                          className={`w-full ${monoFieldCls} tg-tabular`}
+                        />
+                      </div>
+                    </div>
+                    {nested(st.children || [], (next) => updateStep({ children: next }))}
+                  </>
+                )}
+
+                {kind === 'if' && (
+                  <>
+                    <div>
+                      <label className={subLabelCls}>条件</label>
+                      <input
+                        type="text"
+                        value={st.expr || ''}
+                        {...idInputProps}
+                        onChange={(e) => updateStep({ expr: e.target.value })}
+                        placeholder='{{code}} == "200"'
+                        className={`w-full ${monoFieldCls}`}
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-[11px] font-semibold font-mono text-emerald-700">THEN</div>
+                      {nested(st.children || [], (next) => updateStep({ children: next }))}
+                    </div>
+                    <div className="space-y-1">
+                      <div className="text-[11px] font-semibold font-mono text-fg-muted">ELSE</div>
+                      {nested(st.else || [], (next) => updateStep({ else: next }))}
+                    </div>
+                  </>
+                )}
+
+                {kind === 'weighted' && (
+                  <WeightedBranches
+                    branches={st.branches || []}
+                    onChange={(next) => updateStep({ branches: next })}
+                    renderSteps={nested}
+                  />
+                )}
+              </div>
+            )}
+          </div>
+        )
+      })}
+      {depth > 0 && menu}
+    </div>
+  )
+}
+
+function WeightedBranches({
+  branches,
+  onChange,
+  renderSteps,
+}: {
+  branches: ScenarioWeightedBranch[]
+  onChange: (next: ScenarioWeightedBranch[]) => void
+  renderSteps: (list: ScenarioStep[], apply: (next: ScenarioStep[]) => void) => ReactNode
+}) {
+  const total = branches.reduce((s, b) => s + (Number(b.weight) || 0), 0)
+  return (
+    <div className="space-y-2">
+      {total > 0 && branches.length > 0 && (
+        <div className="flex h-1.5 rounded-full overflow-hidden bg-surface-subtle" aria-hidden="true">
+          {branches.map((b, i) => (
+            <div
+              key={i}
+              style={{ width: `${((Number(b.weight) || 0) / total) * 100}%` }}
+              className={i % 2 === 0 ? 'bg-amber-500' : 'bg-amber-400/60'}
+            />
+          ))}
+        </div>
       )}
+      {branches.map((br, bIdx) => {
+        const updateBr = (patch: Partial<ScenarioWeightedBranch>) =>
+          onChange(branches.map((x, j) => (j === bIdx ? { ...x, ...patch } : x)))
+        const pct = total > 0 ? ((Number(br.weight) || 0) / total) * 100 : 0
+        return (
+          <div key={bIdx} className="p-2.5 rounded border border-line bg-surface-subtle space-y-2">
+            <div className="flex items-center gap-2">
+              <input
+                type="text"
+                aria-label="分支名称"
+                value={br.name || ''}
+                placeholder="分支名称"
+                onChange={(e) => updateBr({ name: e.target.value })}
+                className={`w-36 ${fieldCls}`}
+              />
+              <label className="inline-flex items-center gap-1 text-fg-muted">
+                权重
+                <input
+                  type="number"
+                  min={0.1}
+                  step="any"
+                  value={br.weight}
+                  onChange={(e) => updateBr({ weight: Math.max(0.1, Number(e.target.value) || 1) })}
+                  className={`w-20 ${monoFieldCls} tg-tabular`}
+                />
+              </label>
+              <span className="px-1.5 py-0.5 rounded-full bg-amber-50 border border-amber-200 text-amber-700 text-[10px] font-mono tg-tabular">
+                {pct.toFixed(pct < 10 ? 1 : 0)}%
+              </span>
+              <span className="ml-auto" />
+              <ConfirmDeleteButton label="删除分支" onConfirm={() => onChange(branches.filter((_, j) => j !== bIdx))} />
+            </div>
+            {renderSteps(br.steps || [], (next) => updateBr({ steps: next }))}
+          </div>
+        )
+      })}
+      <button
+        type="button"
+        onClick={() => onChange([...branches, { name: `分支 ${branches.length + 1}`, weight: 10, steps: [] }])}
+        className="inline-flex items-center gap-1 text-[11px] text-tidal hover:underline font-medium"
+      >
+        <Plus className="w-3 h-3" /> 分支
+      </button>
     </div>
   )
 }

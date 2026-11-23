@@ -1,3 +1,4 @@
+import { useLayoutEffect, useRef } from 'react'
 import { CheckCircle2, AlertCircle, Info, X } from 'lucide-react'
 
 export interface ToastItem {
@@ -6,6 +7,10 @@ export interface ToastItem {
   message: string
 }
 
+/**
+ * Toasts live in a manual popover so they render in the top layer, above any open modal <dialog>.
+ * Re-showing on every change moves the popover to the top of the top-layer stack.
+ */
 export function ToastContainer({
   items,
   onDismiss,
@@ -13,13 +18,33 @@ export function ToastContainer({
   items: ToastItem[]
   onDismiss: (id: number) => void
 }) {
-  if (items.length === 0) return null
+  const ref = useRef<HTMLDivElement | null>(null)
+
+  useLayoutEffect(() => {
+    const el = ref.current
+    if (!el || typeof el.showPopover !== 'function') return
+    try {
+      if (el.matches(':popover-open')) el.hidePopover()
+      if (items.length > 0) el.showPopover()
+    } catch {
+      // popover unsupported: element stays a fixed-position block
+    }
+  }, [items])
+
   return (
-    <div className="fixed bottom-4 right-4 z-50 flex flex-col gap-2 max-w-sm">
+    <div
+      ref={ref}
+      popover="manual"
+      aria-live="polite"
+      className={`fixed inset-auto bottom-4 right-4 z-50 m-0 flex max-w-sm flex-col gap-2 overflow-visible border-0 bg-transparent p-0 ${
+        items.length === 0 ? 'hidden' : ''
+      }`}
+    >
       {items.map((t) => (
         <div
           key={t.id}
-          className={`flex items-start gap-2.5 rounded-lg border px-3.5 py-2.5 text-sm shadow-lg bg-white ${
+          role={t.kind === 'error' ? 'alert' : 'status'}
+          className={`flex items-start gap-2.5 rounded-lg border bg-surface px-3.5 py-2.5 text-sm shadow-lg ${
             t.kind === 'error'
               ? 'border-rose-200 text-rose-800'
               : t.kind === 'success'
@@ -28,19 +53,20 @@ export function ToastContainer({
           }`}
         >
           {t.kind === 'error' ? (
-            <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-500" />
+            <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
           ) : t.kind === 'success' ? (
-            <CheckCircle2 className="w-4 h-4 shrink-0 mt-0.5 text-emerald-600" />
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
           ) : (
-            <Info className="w-4 h-4 shrink-0 mt-0.5 text-sky-500" />
+            <Info className="mt-0.5 h-4 w-4 shrink-0 text-sky-500" />
           )}
           <span className="flex-1 break-words leading-snug">{t.message}</span>
           <button
             type="button"
             onClick={() => onDismiss(t.id)}
-            className="text-slate-400 hover:text-slate-600 shrink-0"
+            aria-label="关闭"
+            className="shrink-0 text-fg-subtle hover:text-fg"
           >
-            <X className="w-4 h-4" />
+            <X className="h-4 w-4" />
           </button>
         </div>
       ))}

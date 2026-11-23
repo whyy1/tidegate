@@ -1,30 +1,172 @@
 @import "tailwindcss";
 @import "uplot/dist/uPlot.min.css";
+@import "./styles/palette.css";
+
+/*
+ * Theme switching: the page follows the OS by default (<meta name="color-scheme" content="light dark">).
+ * /theme-init.js pins "light" or "dark" on the <meta> before first paint; the :has() rules below map it
+ * back onto the CSS color-scheme property so light-dark() tokens and native UI follow the override.
+ */
+@custom-variant dark {
+  @media (prefers-color-scheme: dark) {
+    :root:not(:has(> head > meta[name="color-scheme"][content="light"])) & {
+      @slot;
+    }
+  }
+  :root:has(> head > meta[name="color-scheme"][content="dark"]) & {
+    @slot;
+  }
+}
+
+@theme inline {
+  --color-canvas: var(--tg-canvas);
+  --color-surface: var(--tg-surface);
+  --color-surface-subtle: var(--tg-surface-subtle);
+  --color-surface-hover: var(--tg-surface-hover);
+  --color-line: var(--tg-border);
+  --color-line-strong: var(--tg-border-strong);
+  --color-fg: var(--tg-text);
+  --color-fg-muted: var(--tg-text-muted);
+  --color-fg-subtle: var(--tg-text-subtle);
+  --color-tidal: var(--tg-tidal-600);
+  --color-tidal-soft: var(--tg-tidal-500);
+  --color-primary: var(--tg-primary);
+  --color-primary-hover: var(--tg-primary-hover);
+}
 
 :root {
-  accent-color: var(--tg-tidal-600);
+  color-scheme: light dark;
+
+  /* Fixed deep-sea brand constants (sidebar, hero, telemetry, terminal surfaces) */
   --tg-navy-950: #07192e;
   --tg-navy-900: #0b2a4a;
   --tg-navy-800: #123862;
-  --tg-tidal-600: #0284c7;
-  --tg-tidal-500: #0ea5e9;
   --tg-tidal-400: #38bdf8;
-  --tg-canvas: #f3f6fa;
-  --tg-surface: #ffffff;
-  --tg-surface-subtle: #f8fafc;
-  --tg-border: #e2e8f0;
-  --tg-border-strong: #cbd5e1;
-  --tg-scrollbar-thumb: #94a3b8;
-  --tg-scrollbar-track: #f1f5f9;
+
+  /* Raw light / dark pairs */
+  --tg-canvas-light: #eef2f7;
+  --tg-canvas-dark: #090d16;
+  --tg-surface-light: #ffffff;
+  --tg-surface-dark: #0f1623;
+  --tg-surface-subtle-light: #f6f8fb;
+  --tg-surface-subtle-dark: #162032;
+  --tg-surface-hover-light: #eef2f7;
+  --tg-surface-hover-dark: #1b2638;
+  --tg-border-light: #e2e8f0;
+  --tg-border-dark: rgb(148 163 184 / 0.14);
+  --tg-border-strong-light: #cbd5e1;
+  --tg-border-strong-dark: rgb(148 163 184 / 0.26);
+  --tg-text-light: #0f172a;
+  --tg-text-dark: #e6ebf2;
+  --tg-text-muted-light: #475569;
+  --tg-text-muted-dark: #a5b0c0;
+  --tg-text-subtle-light: #64748b;
+  --tg-text-subtle-dark: #8391a6;
+  --tg-tidal-600-light: #0284c7;
+  --tg-tidal-600-dark: #38bdf8;
+  --tg-tidal-500-light: #0ea5e9;
+  --tg-tidal-500-dark: #7dd3fc;
+  --tg-primary-light: #0b2a4a;
+  --tg-primary-dark: #0369a1;
+  --tg-primary-hover-light: #123d69;
+  --tg-primary-hover-dark: #0477b8;
+  --tg-scrollbar-thumb-light: #94a3b8;
+  --tg-scrollbar-thumb-dark: #475569;
+  --tg-scrollbar-track-light: #eef2f7;
+  --tg-scrollbar-track-dark: #0f1623;
+  --tg-selection-light: #bae6fd;
+  --tg-selection-dark: rgb(56 189 248 / 0.32);
+  --tg-shadow-light: rgb(15 23 42 / 0.08);
+  --tg-shadow-dark: rgb(0 0 0 / 0.45);
+
+  /* Fallback: browsers without light-dark() follow the OS preference only */
+  --tg-canvas: var(--tg-canvas-light);
+  --tg-surface: var(--tg-surface-light);
+  --tg-surface-subtle: var(--tg-surface-subtle-light);
+  --tg-surface-hover: var(--tg-surface-hover-light);
+  --tg-border: var(--tg-border-light);
+  --tg-border-strong: var(--tg-border-strong-light);
+  --tg-text: var(--tg-text-light);
+  --tg-text-muted: var(--tg-text-muted-light);
+  --tg-text-subtle: var(--tg-text-subtle-light);
+  --tg-tidal-600: var(--tg-tidal-600-light);
+  --tg-tidal-500: var(--tg-tidal-500-light);
+  --tg-primary: var(--tg-primary-light);
+  --tg-primary-hover: var(--tg-primary-hover-light);
+  --tg-scrollbar-thumb: var(--tg-scrollbar-thumb-light);
+  --tg-scrollbar-track: var(--tg-scrollbar-track-light);
+  --tg-selection: var(--tg-selection-light);
+  --tg-shadow: var(--tg-shadow-light);
+
+  accent-color: var(--tg-tidal-600);
+  color: var(--tg-text);
+  background-color: var(--tg-canvas);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --tg-canvas: var(--tg-canvas-dark);
+    --tg-surface: var(--tg-surface-dark);
+    --tg-surface-subtle: var(--tg-surface-subtle-dark);
+    --tg-surface-hover: var(--tg-surface-hover-dark);
+    --tg-border: var(--tg-border-dark);
+    --tg-border-strong: var(--tg-border-strong-dark);
+    --tg-text: var(--tg-text-dark);
+    --tg-text-muted: var(--tg-text-muted-dark);
+    --tg-text-subtle: var(--tg-text-subtle-dark);
+    --tg-tidal-600: var(--tg-tidal-600-dark);
+    --tg-tidal-500: var(--tg-tidal-500-dark);
+    --tg-primary: var(--tg-primary-dark);
+    --tg-primary-hover: var(--tg-primary-hover-dark);
+    --tg-scrollbar-thumb: var(--tg-scrollbar-thumb-dark);
+    --tg-scrollbar-track: var(--tg-scrollbar-track-dark);
+    --tg-selection: var(--tg-selection-dark);
+    --tg-shadow: var(--tg-shadow-dark);
+  }
+}
+
+@supports (color: light-dark(white, black)) {
+  :root {
+    --tg-canvas: light-dark(var(--tg-canvas-light), var(--tg-canvas-dark));
+    --tg-surface: light-dark(var(--tg-surface-light), var(--tg-surface-dark));
+    --tg-surface-subtle: light-dark(var(--tg-surface-subtle-light), var(--tg-surface-subtle-dark));
+    --tg-surface-hover: light-dark(var(--tg-surface-hover-light), var(--tg-surface-hover-dark));
+    --tg-border: light-dark(var(--tg-border-light), var(--tg-border-dark));
+    --tg-border-strong: light-dark(var(--tg-border-strong-light), var(--tg-border-strong-dark));
+    --tg-text: light-dark(var(--tg-text-light), var(--tg-text-dark));
+    --tg-text-muted: light-dark(var(--tg-text-muted-light), var(--tg-text-muted-dark));
+    --tg-text-subtle: light-dark(var(--tg-text-subtle-light), var(--tg-text-subtle-dark));
+    --tg-tidal-600: light-dark(var(--tg-tidal-600-light), var(--tg-tidal-600-dark));
+    --tg-tidal-500: light-dark(var(--tg-tidal-500-light), var(--tg-tidal-500-dark));
+    --tg-primary: light-dark(var(--tg-primary-light), var(--tg-primary-dark));
+    --tg-primary-hover: light-dark(var(--tg-primary-hover-light), var(--tg-primary-hover-dark));
+    --tg-scrollbar-thumb: light-dark(var(--tg-scrollbar-thumb-light), var(--tg-scrollbar-thumb-dark));
+    --tg-scrollbar-track: light-dark(var(--tg-scrollbar-track-light), var(--tg-scrollbar-track-dark));
+    --tg-selection: light-dark(var(--tg-selection-light), var(--tg-selection-dark));
+    --tg-shadow: light-dark(var(--tg-shadow-light), var(--tg-shadow-dark));
+  }
+}
+
+:root:has(> head > meta[name="color-scheme"][content="dark"]) {
+  color-scheme: dark;
+}
+
+:root:has(> head > meta[name="color-scheme"][content="light"]) {
+  color-scheme: light;
 }
 
 body {
   font-family: system-ui, -apple-system, "Segoe UI", Roboto, "PingFang SC", "Microsoft YaHei", sans-serif;
   background-color: var(--tg-canvas);
-  color: #0f172a;
+  color: var(--tg-text);
+  -webkit-font-smoothing: antialiased;
 }
 
-code, pre, .font-mono {
+::selection {
+  background-color: var(--tg-selection);
+}
+
+code, pre, kbd, .font-mono {
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
 }
 
@@ -63,8 +205,25 @@ code, pre, .font-mono {
   border-block-end: 2px solid var(--tg-tidal-600);
 }
 
-/* Subtle architectural grid background for telemetry strips & hero panels */
+@layer components {
+/* ===== Fixed deep-sea regions (component-specific color scheme) ===== */
+.tg-sidebar,
+.tg-hero-grid,
+.tg-telemetry-strip,
+.tg-code-surface,
+.tg-fixed-dark {
+  color-scheme: only dark;
+  /* Inherited colors must be re-specified under a color-scheme override. */
+  accent-color: var(--tg-tidal-400);
+}
+
+.tg-sidebar {
+  color: #e2e8f0;
+  background: linear-gradient(180deg, #07192e 0%, #0b2a4a 58%, #08203b 100%);
+}
+
 .tg-hero-grid {
+  color: #e2e8f0;
   background-color: var(--tg-navy-950);
   background-image:
     radial-gradient(circle at 80% 15%, rgb(56 189 248 / 0.16), transparent 46%),
@@ -79,15 +238,38 @@ code, pre, .font-mono {
   color: #f8fafc;
 }
 
-/* Native <dialog> modal scroll containment & backdrop */
-dialog.tg-dialog[open] {
+.tg-code-surface {
+  color: #e2e8f0;
+  background-color: #07192e;
+  border-color: rgb(148 163 184 / 0.16);
+}
+
+.tg-fixed-dark {
+  color: #e2e8f0;
+}
+
+/* ===== Native <dialog> modal ===== */
+dialog.tg-dialog {
   margin: auto;
   padding: 0;
+  max-width: calc(100vw - 2rem);
+  max-height: calc(100dvh - 2rem);
   border: 1px solid var(--tg-border);
-  border-radius: 0.75rem;
-  box-shadow: 0 24px 60px -12px rgb(7 25 46 / 0.38);
+  border-radius: 0.875rem;
+  box-shadow: 0 28px 70px -18px rgb(2 8 23 / 0.55), 0 0 0 1px rgb(148 163 184 / 0.04);
   background: var(--tg-surface);
-  color: #0f172a;
+  color: var(--tg-text);
+  overflow: hidden;
+}
+
+dialog.tg-dialog:not([open]) {
+  display: none;
+}
+
+dialog.tg-dialog[open] {
+  display: flex;
+  flex-direction: column;
+  animation: tg-dialog-in 160ms cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 
 dialog.tg-dialog:modal {
@@ -97,11 +279,22 @@ dialog.tg-dialog:modal {
 dialog.tg-dialog::backdrop {
   overflow: hidden;
   overscroll-behavior: contain;
-  background-color: rgb(7 25 46 / 0.56);
+  background-color: rgb(4 12 24 / 0.58);
   backdrop-filter: blur(3px);
 }
 
-/* Standard scrollbar color/thickness with guarded WebKit fallback */
+@keyframes tg-dialog-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* ===== Scrollbars ===== */
 .tg-scroller {
   --scrollbar-thumb: var(--tg-scrollbar-thumb);
   --scrollbar-track: var(--tg-scrollbar-track);
@@ -141,6 +334,96 @@ dialog.tg-dialog::backdrop {
   .tg-scroller-dark::-webkit-scrollbar-track {
     background: var(--scrollbar-track);
   }
+}
+
+/* ===== Theme toggle: show the icon for the currently rendered scheme, no JS needed ===== */
+.tg-theme-icon-dark {
+  display: none;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(:has(> head > meta[name="color-scheme"][content="light"])) .tg-theme-icon-light {
+    display: none;
+  }
+  :root:not(:has(> head > meta[name="color-scheme"][content="light"])) .tg-theme-icon-dark {
+    display: inline-block;
+  }
+}
+
+:root:has(> head > meta[name="color-scheme"][content="dark"]) .tg-theme-icon-light {
+  display: none;
+}
+
+:root:has(> head > meta[name="color-scheme"][content="dark"]) .tg-theme-icon-dark {
+  display: inline-block;
+}
+
+/* ===== uPlot legend & cursor readout follow the theme ===== */
+.uplot,
+.uplot .u-legend {
+  font-family: inherit;
+  color: var(--tg-text-muted);
+}
+
+.uplot .u-legend {
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.uplot .u-legend .u-value {
+  color: var(--tg-text);
+}
+
+.uplot .u-cursor-x,
+.uplot .u-cursor-y {
+  border-color: var(--tg-border-strong);
+}
+
+.uplot .u-select {
+  background: rgb(56 189 248 / 0.12);
+}
+
+/* ===== Small shared primitives ===== */
+.tg-swap-in {
+  animation: tg-swap-in 180ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@keyframes tg-swap-in {
+  from {
+    opacity: 0;
+    transform: translateX(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.tg-scope-scan {
+  animation: tg-scope-scan 6.5s linear infinite;
+}
+
+@keyframes tg-scope-scan {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(620px);
+  }
+}
+.tg-kbd {
+  display: inline-flex;
+  align-items: center;
+  padding: 0 0.3rem;
+  min-height: 1.1rem;
+  border-radius: 0.25rem;
+  border: 1px solid var(--tg-border-strong);
+  background: var(--tg-surface-subtle);
+  color: var(--tg-text-subtle);
+  font-size: 10px;
+  line-height: 1;
+}
+
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -8,6 +8,7 @@ import type {
   AuditEntry,
   CollectionTestRequest,
   CollectionTestResult,
+  CreateAPIToken,
   CreateAPITokenResult,
   DataFile,
   DebugAPIResponse,
@@ -22,6 +23,7 @@ import type {
   JoinTokenCreated,
   KeyValue,
   LoadConfig,
+  MCPCatalog,
   MetricsSinkConfig,
   PreviewResult,
   Project,
@@ -468,14 +470,9 @@ export const api = {
 
   // Personal API Tokens
   listAPITokens: async () => (await request<APIToken[] | null>('/api/v1/auth/tokens')) || [],
-  createAPIToken: (body: {
-    name: string
-    role?: UserRole
-    scopes?: string[]
-    project_ids?: string[]
-    ttl_days?: number
-    expires_in?: string
-  }) => request<CreateAPITokenResult>('/api/v1/auth/tokens', { method: 'POST', jsonBody: body }),
+  createAPIToken: (body: CreateAPIToken) =>
+    request<CreateAPITokenResult>('/api/v1/auth/tokens', { method: 'POST', jsonBody: body }),
+  getMCPCatalog: () => request<MCPCatalog>('/api/v1/mcp/catalog'),
   revokeAPIToken: (id: string) =>
     request<void>(`/api/v1/auth/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
@@ -487,6 +484,8 @@ export const api = {
     request<{ user: User }>(`/api/v1/users/${id}`, { method: 'PATCH', jsonBody: body }),
   deleteUser: (id: number) => request<void>(`/api/v1/users/${id}`, { method: 'DELETE' }),
   adminResetUserTOTP: (id: number) => request<void>(`/api/v1/users/${id}/totp`, { method: 'DELETE' }),
+  adminResetUserPassword: (id: number, password: string) =>
+    request<void>(`/api/v1/users/${id}/password`, { method: 'POST', jsonBody: { password } }),
   getSecurityPolicy: () => request<SecurityPolicy>('/api/v1/settings/security'),
   putSecurityPolicy: (pol: SecurityPolicy) =>
     request<SecurityPolicy>('/api/v1/settings/security', { method: 'PUT', jsonBody: pol }),

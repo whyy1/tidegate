@@ -186,8 +186,30 @@ func (s *Server) dispatch(r *http.Request, u *auth.User, pol controller.Security
 		return map[string]any{}, nil
 
 	case "tools/list":
+		hasWriteProj := false
+		hasWriteChecked := false
 		specs := make([]Tool, 0, len(s.tools))
 		for _, td := range s.tools {
+			if pol.IsMCPToolDisabled(td.spec.Name) {
+				continue
+			}
+			if td.scope != "" {
+				if err := auth.CheckScope(r.Context(), td.scope); err != nil {
+					continue
+				}
+			}
+			if err := auth.CheckMCPTool(r.Context(), td.spec.Name); err != nil {
+				continue
+			}
+			if !td.readOnly && u != nil && !u.Role.CanWrite() && td.spec.Name != "import_api_spec" {
+				if !hasWriteChecked {
+					hasWriteProj = s.hasAnyWritableProject(r.Context(), u)
+					hasWriteChecked = true
+				}
+				if !hasWriteProj {
+					continue
+				}
+			}
 			specs = append(specs, td.spec)
 		}
 		return map[string]any{"tools": specs}, nil
@@ -257,10 +279,19 @@ func (s *Server) dispatch(r *http.Request, u *auth.User, pol controller.Security
 }
 
 func (s *Server) invokeTool(r *http.Request, u *auth.User, pol controller.SecurityPolicy, td toolDef, args json.RawMessage) *CallToolResult {
+	if pol.IsMCPToolDisabled(td.spec.Name) {
+		if td.spec.Name == "manage_load_run" && pol.MCPDisableLoadRuns {
+			return toolErrorResult(errors.New("管理员已在安全策略中禁用通过 MCP 控制或启动压测任务"))
+		}
+		return toolErrorResult(fmt.Errorf("管理员已在安全策略中禁用 MCP 工具 %q", td.spec.Name))
+	}
 	if td.scope != "" {
 		if err := auth.CheckScope(r.Context(), td.scope); err != nil {
 			return toolErrorResult(err)
 		}
+	}
+	if err := auth.CheckMCPTool(r.Context(), td.spec.Name); err != nil {
+		return toolErrorResult(err)
 	}
 	if !td.readOnly && !u.Role.CanWrite() && s.auth == nil {
 		return toolErrorResult(fmt.Errorf("权限不足：当前令牌/用户角色为 %s，仅只读工具允许访问（需要 member 或 admin 权限）", u.Role))
@@ -308,6 +339,92 @@ func (s *Server) accessibleProjects(ctx context.Context, u *auth.User) ([]*store
 		}
 	}
 	return out, nil
+}
+
+// ToolCatalogItem describes an MCP tool's metadata, scope, and global policy availability.
+type ToolCatalogItem struct {
+	Name            string `json:"name"`
+	Title           string `json:"title"`
+	Description     string `json:"description"`
+	Category        string `json:"category"` // read | write | debug | run
+	Scope           string `json:"scope"`
+	PreviewReadOnly bool   `json:"preview_read_only,omitempty"`
+	ReadOnly        bool   `json:"read_only"`
+	Destructive     bool   `json:"destructive"`
+	OpenWorld       bool   `json:"open_world"`
+	GloballyEnabled bool   `json:"globally_enabled"`
+}
+
+func toolCategory(td toolDef) string {
+	switch {
+	case td.readOnly:
+		return "read"
+	case td.spec.Name == "save_api" || td.spec.Name == "import_api_spec" || td.spec.Name == "save_scenario":
+		return "write"
+	case td.scope == "run":
+		return "run"
+	default:
+		return "debug"
+	}
+}
+
+// Catalog returns metadata for all registered MCP tools evaluated against pol.
+func (s *Server) Catalog(pol controller.SecurityPolicy) []ToolCatalogItem {
+	out := make([]ToolCatalogItem, 0, len(s.tools))
+	for _, td := range s.tools {
+		title := td.spec.Name
+		var destructive, openWorld bool
+		if td.spec.Annotations != nil {
+			if td.spec.Annotations.Title != "" {
+				title = td.spec.Annotations.Title
+			}
+			if td.spec.Annotations.DestructiveHint != nil {
+				destructive = *td.spec.Annotations.DestructiveHint
+			}
+			if td.spec.Annotations.OpenWorldHint != nil {
+				openWorld = *td.spec.Annotations.OpenWorldHint
+			}
+		}
+		scope := td.scope
+		previewRO := false
+		if td.spec.Name == "import_api_spec" {
+			scope = "write"
+			previewRO = true
+		}
+		out = append(out, ToolCatalogItem{
+			Name:            td.spec.Name,
+			Title:           title,
+			Description:     td.spec.Description,
+			Category:        toolCategory(td),
+			Scope:           scope,
+			PreviewReadOnly: previewRO,
+			ReadOnly:        td.readOnly,
+			Destructive:     destructive,
+			OpenWorld:       openWorld,
+			GloballyEnabled: !pol.IsMCPToolDisabled(td.spec.Name),
+		})
+	}
+	return out
+}
+
+func (s *Server) hasAnyWritableProject(ctx context.Context, u *auth.User) bool {
+	if s.auth == nil || u == nil {
+		return true
+	}
+	if u.Role.CanWrite() {
+		return true
+	}
+	list, err := s.store.ListProjects()
+	if err != nil {
+		return false
+	}
+	tok, _ := auth.TokenFromContext(ctx)
+	for _, pr := range list {
+		if role, allowed, err := s.auth.ResolveProjectRole(ctx, u, tok, pr.ID); err == nil && allowed && role.CanWrite() {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) authorizeProject(ctx context.Context, u *auth.User, pid string, needWrite bool) (auth.Role, error) {

@@ -146,7 +146,7 @@ export function CommandPalette({
       {
         id: 'act-nav-workbench',
         category: 'action',
-        label: '接口工作台',
+        label: '工作台',
         hint: '',
         run: () => {
           onChangeTab('workbench')
@@ -156,7 +156,7 @@ export function CommandPalette({
       {
         id: 'act-nav-scenarios',
         category: 'action',
-        label: '场景编排',
+        label: '场景与数据',
         hint: '',
         run: () => {
           onChangeTab('scenarios')
@@ -176,7 +176,7 @@ export function CommandPalette({
       {
         id: 'act-nav-agents',
         category: 'action',
-        label: '集群节点',
+        label: '发压节点',
         hint: '',
         run: () => {
           onChangeTab('agents')
@@ -200,7 +200,7 @@ export function CommandPalette({
         id: `env-${env.id}`,
         category: 'env',
         label: `切换环境：${env.name}`,
-        hint: env.base_url || '未设置 BaseURL',
+        hint: env.base_url || '',
         badge: env.id === activeEnvId ? '当前' : '环境',
         run: () => {
           onSelectEnv(env.id)
@@ -214,7 +214,7 @@ export function CommandPalette({
         id: `scen-${sc.id}`,
         category: 'scenario',
         label: sc.name,
-        hint: `${sc.steps?.length || 0} 个步骤 · 模式 ${sc.load?.mode || 'vus'}`,
+        hint: `${sc.steps?.length || 0} 步 / ${sc.load?.mode === 'rate' ? 'QPS' : 'VU'}`,
         badge: '场景',
         run: () => {
           onChangeTab('scenarios')
@@ -228,7 +228,7 @@ export function CommandPalette({
         id: `api-${a.id}`,
         category: 'api',
         label: a.name,
-        hint: `${a.path} · ${a.url || '(未填 URL)'}`,
+        hint: a.url ? `${a.path}  ${a.url}` : a.path,
         badge: a.method,
         run: () => {
           onOpenAPI(a.id)
@@ -268,11 +268,11 @@ export function CommandPalette({
   return (
     <dialog
       ref={dialogRef}
-      {...({ closedby: 'any' } as Record<string, string>)}
+      closedby="any"
       aria-labelledby="tg-cmd-title"
-      className="tg-dialog w-full max-w-xl overflow-hidden"
+      className="tg-dialog w-[min(36rem,calc(100vw-2rem))] mt-[12vh] overflow-hidden"
     >
-      <search className="px-4 py-3 border-b border-slate-200 flex items-center gap-2.5 bg-white">
+      <search className="px-4 py-3 border-b border-slate-200 flex items-center gap-2.5 bg-surface">
         <Search className="w-4 h-4 text-sky-600 shrink-0" />
         <h2 id="tg-cmd-title" className="sr-only">
           全局命令与接口搜索
@@ -298,7 +298,7 @@ export function CommandPalette({
               items[selectedIdx].run()
             }
           }}
-          placeholder="搜索接口、场景、环境或命令..."
+          placeholder="接口、场景、环境、命令"
           className="flex-1 min-w-0 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none"
         />
         <button
@@ -311,7 +311,7 @@ export function CommandPalette({
         </button>
       </search>
 
-      <div className="max-h-[55vh] overflow-y-auto tg-scroller divide-y divide-slate-100 bg-white">
+      <div className="max-h-[55vh] overflow-y-auto tg-scroller divide-y divide-slate-100 bg-surface">
         {items.length === 0 ? (
           <div className="py-10 text-center text-xs text-slate-400">无匹配结果</div>
         ) : (
@@ -345,8 +345,12 @@ export function CommandPalette({
       </div>
 
       <div className="px-4 py-2 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500 font-mono">
-        <span>↑↓ 选择 · Enter 跳转</span>
-        <span>Esc</span>
+        <span className="flex items-center gap-1">
+          <kbd className="tg-kbd">↑</kbd>
+          <kbd className="tg-kbd">↓</kbd>
+          <kbd className="tg-kbd">Enter</kbd>
+        </span>
+        <kbd className="tg-kbd">Esc</kbd>
       </div>
     </dialog>
   )

@@ -940,9 +940,42 @@ export interface APIToken {
   role: UserRole
   scopes?: string[]
   project_ids?: string[]
+  /** Empty = inherit every MCP tool unlocked by scopes; non-empty = only these MCP tools. */
+  mcp_tools?: string[]
   created_at: string
   last_used_at?: string
   expires_at?: string
+}
+
+export interface CreateAPIToken {
+  name: string
+  role?: UserRole
+  scopes?: string[]
+  project_ids?: string[]
+  mcp_tools?: string[]
+  ttl_days?: number
+  expires_in?: string
+}
+
+export type MCPToolCategory = 'read' | 'write' | 'debug' | 'run'
+
+export interface MCPToolCatalogItem {
+  name: string
+  title: string
+  description: string
+  category: MCPToolCategory
+  scope: string
+  preview_read_only?: boolean
+  read_only: boolean
+  destructive: boolean
+  open_world: boolean
+  globally_enabled: boolean
+}
+
+export interface MCPCatalog {
+  tools: MCPToolCatalogItem[]
+  effective_max_vus: number
+  effective_max_duration_sec: number
 }
 
 export interface CreateAPITokenResult {
@@ -960,6 +993,7 @@ export interface SecurityPolicy {
   mcp_disable_load_runs?: boolean
   mcp_max_vus?: number
   mcp_max_duration_sec?: number
+  mcp_disabled_tools?: string[]
 }
 
 export interface MetricsSinkConfig {

@@ -1,7 +1,8 @@
-import { useEffect, useState, type FormEvent } from 'react'
-import { Plus, Save, Trash2, X } from 'lucide-react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
+import { CircleCheck, Copy, Plus, Save, Trash2, X } from 'lucide-react'
 import { api, APIError } from '../lib/api'
 import type { Environment, KeyValue } from '../lib/types'
+import { useNativeDialog } from '../lib/useNativeDialog'
 import { KeyValueEditor } from './KeyValueEditor'
 
 interface Props {
@@ -15,6 +16,12 @@ interface Props {
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
 }
 
+interface Draft {
+  name: string
+  baseURL: string
+  vars: KeyValue[]
+}
+
 export function EnvModal({
   open,
   projectId,
@@ -25,6 +32,7 @@ export function EnvModal({
   onEnvironmentsChanged,
   onToast,
 }: Props) {
+  const dialogRef = useNativeDialog(open, onClose)
   const [selectedId, setSelectedId] = useState<string>('')
   const [name, setName] = useState('')
   const [baseURL, setBaseURL] = useState('')
@@ -32,6 +40,9 @@ export function EnvModal({
   const [version, setVersion] = useState('')
   const [busy, setBusy] = useState(false)
   const [confirmDel, setConfirmDel] = useState(false)
+  const [cloneSource, setCloneSource] = useState('')
+  const draftRef = useRef<Draft | null>(null)
+  const confirmTimer = useRef<number>(0)
 
   useEffect(() => {
     if (!open) return
@@ -42,12 +53,16 @@ export function EnvModal({
   useEffect(() => {
     setConfirmDel(false)
     if (selectedId === 'new') {
-      setName('')
-      setBaseURL('http://127.0.0.1:8080')
-      setVars([])
+      const draft = draftRef.current
+      draftRef.current = null
+      setName(draft?.name ?? '')
+      setBaseURL(draft?.baseURL ?? '')
+      setVars(draft?.vars ?? [])
       setVersion('')
+      if (!draft) setCloneSource('')
       return
     }
+    setCloneSource('')
     const found = environments.find((e) => e.id === selectedId)
     if (found) {
       setName(found.name)
@@ -57,7 +72,22 @@ export function EnvModal({
     }
   }, [selectedId, environments])
 
-  if (!open) return null
+  useEffect(() => () => window.clearTimeout(confirmTimer.current), [])
+
+  const isNew = selectedId === 'new'
+
+  const handleClone = () => {
+    if (isNew) return
+    const secretCount = vars.filter((v) => v.secret).length
+    draftRef.current = {
+      name: `${name.trim()} 副本`,
+      baseURL,
+      vars: vars.map((v) => (v.secret ? { ...v, value: '' } : { ...v })),
+    }
+    setCloneSource(name.trim())
+    setSelectedId('new')
+    if (secretCount > 0) onToast('info', `${secretCount} 个密文变量需重新填写`)
+  }
 
   const handleSave = async (e: FormEvent) => {
     e.preventDefault()
@@ -65,7 +95,7 @@ export function EnvModal({
     setBusy(true)
     const cleanedVars = vars.filter((v) => v.name.trim() !== '' || v.value !== '')
     try {
-      if (selectedId === 'new') {
+      if (isNew) {
         const created = await api.createEnvironment(projectId, {
           name: name.trim(),
           base_url: baseURL.trim(),
@@ -94,11 +124,14 @@ export function EnvModal({
   }
 
   const handleDelete = async () => {
-    if (selectedId === 'new' || !selectedId) return
+    if (isNew || !selectedId) return
     if (!confirmDel) {
       setConfirmDel(true)
+      window.clearTimeout(confirmTimer.current)
+      confirmTimer.current = window.setTimeout(() => setConfirmDel(false), 3000)
       return
     }
+    window.clearTimeout(confirmTimer.current)
     setBusy(true)
     try {
       await api.deleteEnvironment(projectId, selectedId, version)
@@ -117,118 +150,181 @@ export function EnvModal({
   }
 
   return (
-    <div className="fixed inset-0 z-40 bg-slate-900/40 flex items-center justify-center p-4">
-      <div className="w-full max-w-3xl bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col max-h-[82vh]">
-        <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-          <h2 className="text-sm font-semibold text-slate-900">环境与环境变量管理</h2>
-          <button type="button" onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 rounded">
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="flex flex-1 min-h-0">
-          <div className="w-52 border-r border-slate-200 bg-slate-50/70 p-3 flex flex-col gap-1 overflow-y-auto">
+    <dialog
+      ref={dialogRef}
+      closedby="any"
+      aria-labelledby="env-modal-title"
+      className="tg-dialog w-[min(56rem,calc(100vw-2rem))] h-[min(40rem,86dvh)] max-h-[86dvh]"
+    >
+      {open && (
+        <>
+          <header className="px-5 py-3 border-b border-line flex items-center justify-between bg-surface-subtle shrink-0">
+            <h2 id="env-modal-title" className="text-sm font-semibold text-fg">
+              环境
+            </h2>
             <button
               type="button"
-              onClick={() => setSelectedId('new')}
-              className={`flex items-center gap-1.5 px-2.5 py-2 rounded-md text-xs font-medium ${
-                selectedId === 'new'
-                  ? 'bg-sky-600 text-white'
-                  : 'text-sky-700 hover:bg-sky-50 border border-dashed border-sky-300'
-              }`}
+              onClick={onClose}
+              aria-label="关闭"
+              className="p-1 text-fg-subtle hover:text-fg rounded hover:bg-surface-hover"
             >
-              <Plus className="w-3.5 h-3.5" /> 新建环境
+              <X className="w-4 h-4" />
             </button>
-            <div className="mt-1 space-y-1">
-              {environments.map((env) => (
-                <button
-                  key={env.id}
-                  type="button"
-                  onClick={() => setSelectedId(env.id)}
-                  className={`w-full text-left px-2.5 py-2 rounded-md text-xs transition-colors ${
-                    selectedId === env.id
-                      ? 'bg-white border border-sky-400 text-slate-900 font-semibold shadow-xs'
-                      : 'text-slate-700 hover:bg-slate-100'
-                  }`}
-                >
-                  <div className="truncate">{env.name}</div>
-                  {env.base_url && <div className="text-[10px] text-slate-400 truncate font-mono">{env.base_url}</div>}
-                </button>
-              ))}
-            </div>
-          </div>
+          </header>
 
-          <form onSubmit={handleSave} className="flex-1 p-5 overflow-y-auto space-y-4 text-xs">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">环境名称</label>
-                <input
-                  type="text"
-                  required
-                  value={name}
-                  onChange={(e) => setName(e.target.value)}
-                  placeholder="例如 测试环境 / 生产环境"
-                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md focus:border-sky-500 focus:outline-none"
-                />
+          <div className="flex flex-1 min-h-0">
+            <nav
+              aria-label="环境列表"
+              className="w-56 shrink-0 border-r border-line bg-surface-subtle p-2.5 flex flex-col gap-1 overflow-y-auto tg-scroller"
+            >
+              <button
+                type="button"
+                onClick={() => {
+                  draftRef.current = null
+                  setCloneSource('')
+                  if (selectedId === 'new') {
+                    setName('')
+                    setBaseURL('')
+                    setVars([])
+                  } else {
+                    setSelectedId('new')
+                  }
+                }}
+                className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium ${
+                  isNew && !cloneSource
+                    ? 'bg-sky-600 text-white'
+                    : 'text-sky-700 hover:bg-sky-50 border border-dashed border-sky-300'
+                }`}
+              >
+                <Plus className="w-3.5 h-3.5" /> 新建环境
+              </button>
+              {isNew && cloneSource && (
+                <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs bg-sky-600 text-white min-w-0">
+                  <Copy className="w-3.5 h-3.5 shrink-0" />
+                  <span className="truncate">克隆自 {cloneSource}</span>
+                </div>
+              )}
+              <ul className="mt-1 space-y-0.5">
+                {environments.map((env) => {
+                  const selected = selectedId === env.id
+                  const active = activeEnvId === env.id
+                  return (
+                    <li key={env.id}>
+                      <button
+                        type="button"
+                        onClick={() => setSelectedId(env.id)}
+                        aria-current={selected ? 'true' : undefined}
+                        className={`w-full text-left px-2.5 py-1.5 rounded-md text-xs border transition-colors ${
+                          selected
+                            ? 'bg-surface border-sky-400 text-fg font-semibold shadow-xs'
+                            : 'border-transparent text-fg-muted hover:bg-surface-hover'
+                        }`}
+                      >
+                        <span className="flex items-center gap-1.5 min-w-0">
+                          <span className="truncate">{env.name}</span>
+                          {active && <CircleCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" aria-label="当前环境" />}
+                        </span>
+                        {env.base_url && (
+                          <span className="block text-[11px] text-fg-subtle truncate font-mono font-normal">{env.base_url}</span>
+                        )}
+                      </button>
+                    </li>
+                  )
+                })}
+              </ul>
+            </nav>
+
+            <form onSubmit={handleSave} className="flex-1 min-w-0 flex flex-col text-xs">
+              <div className="flex-1 min-h-0 overflow-y-auto tg-scroller p-5 space-y-4">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <label className="block">
+                    <span className="block font-medium text-fg-muted mb-1">名称</span>
+                    <input
+                      type="text"
+                      name="env_name"
+                      required
+                      autoComplete="off"
+                      value={name}
+                      onChange={(e) => setName(e.target.value)}
+                      placeholder="测试环境"
+                      className="w-full px-2.5 py-1.5 border border-line-strong rounded-md bg-surface text-fg focus:border-sky-500 focus:outline-none"
+                    />
+                  </label>
+                  <label className="block">
+                    <span className="block font-medium text-fg-muted mb-1">Base URL</span>
+                    <input
+                      type="text"
+                      name="base_url"
+                      inputMode="url"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      value={baseURL}
+                      onChange={(e) => setBaseURL(e.target.value)}
+                      placeholder="https://api.example.com"
+                      className="w-full px-2.5 py-1.5 border border-line-strong rounded-md bg-surface text-fg font-mono focus:border-sky-500 focus:outline-none"
+                    />
+                  </label>
+                </div>
+
+                <fieldset className="min-w-0">
+                  <legend className="font-medium text-fg-muted mb-1.5">变量</legend>
+                  <KeyValueEditor items={vars} onChange={setVars} keyPlaceholder="变量名" valuePlaceholder="变量值" />
+                </fieldset>
               </div>
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">Base URL（基础地址）</label>
-                <input
-                  type="text"
-                  value={baseURL}
-                  onChange={(e) => setBaseURL(e.target.value)}
-                  placeholder="https://api.example.com"
-                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded-md font-mono focus:border-sky-500 focus:outline-none"
-                />
-              </div>
-            </div>
 
-            <div>
-              <label className="block font-medium text-slate-700 mb-1.5">
-                环境变量（高于项目变量，勾选「密」加密存储）
-              </label>
-              <KeyValueEditor items={vars} onChange={setVars} keyPlaceholder="变量名" valuePlaceholder="变量值" />
-            </div>
-
-            <div className="flex items-center justify-between pt-3 border-t border-slate-200">
-              <div>
-                {selectedId !== 'new' && (
+              <footer className="shrink-0 flex flex-wrap items-center justify-between gap-2 px-5 py-3 border-t border-line bg-surface-subtle">
+                <div className="flex items-center gap-2">
+                  {!isNew && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => void handleDelete()}
+                        onBlur={() => setConfirmDel(false)}
+                        disabled={busy}
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border font-medium ${
+                          confirmDel
+                            ? 'bg-rose-600 border-rose-600 text-white hover:bg-rose-solid'
+                            : 'border-rose-200 text-rose-700 hover:bg-rose-50'
+                        }`}
+                      >
+                        <Trash2 className="w-3.5 h-3.5" /> {confirmDel ? '确认删除？' : '删除'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={handleClone}
+                        disabled={busy}
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted"
+                      >
+                        <Copy className="w-3.5 h-3.5" /> 克隆环境
+                      </button>
+                    </>
+                  )}
+                </div>
+                <div className="flex items-center gap-2">
+                  {!isNew && selectedId !== activeEnvId && (
+                    <button
+                      type="button"
+                      onClick={() => onSelectEnv(selectedId)}
+                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted"
+                    >
+                      <CircleCheck className="w-3.5 h-3.5" /> 设为当前
+                    </button>
+                  )}
                   <button
-                    type="button"
-                    onClick={() => void handleDelete()}
+                    type="submit"
                     disabled={busy}
-                    className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border font-medium ${
-                      confirmDel
-                        ? 'bg-rose-600 border-rose-600 text-white'
-                        : 'border-rose-200 text-rose-700 hover:bg-rose-50'
-                    }`}
+                    className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-primary hover:bg-primary-hover text-white font-medium disabled:opacity-50"
                   >
-                    <Trash2 className="w-3.5 h-3.5" /> {confirmDel ? '再次点击确认删除' : '删除此环境'}
+                    <Save className="w-3.5 h-3.5" /> {isNew ? '创建环境' : '保存'}
                   </button>
-                )}
-              </div>
-              <div className="flex items-center gap-2">
-                {selectedId !== 'new' && selectedId !== activeEnvId && (
-                  <button
-                    type="button"
-                    onClick={() => onSelectEnv(selectedId)}
-                    className="px-3 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-50 text-slate-700"
-                  >
-                    设为当前激活环境
-                  </button>
-                )}
-                <button
-                  type="submit"
-                  disabled={busy}
-                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white font-medium disabled:opacity-50"
-                >
-                  <Save className="w-3.5 h-3.5" /> {selectedId === 'new' ? '创建环境' : '保存环境'}
-                </button>
-              </div>
-            </div>
-          </form>
-        </div>
-      </div>
-    </div>
+                </div>
+              </footer>
+            </form>
+          </div>
+        </>
+      )}
+    </dialog>
   )
 }

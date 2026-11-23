@@ -1,9 +1,44 @@
-import { useEffect, useState, type FormEvent } from 'react'
-import { Bot, Check, Copy, Key, KeyRound, Laptop, LogOut, Plus, ShieldCheck, Trash2, X } from 'lucide-react'
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from 'react'
+import {
+  ArrowRight,
+  Ban,
+  Bot,
+  Check,
+  Copy,
+  Download,
+  Eye,
+  EyeOff,
+  Key,
+  KeyRound,
+  Laptop,
+  LogOut,
+  Monitor,
+  Moon,
+  Palette,
+  Plus,
+  ShieldCheck,
+  SlidersHorizontal,
+  Sun,
+  Trash2,
+  X,
+} from 'lucide-react'
 import { api, APIError } from '../lib/api'
-import type { APIToken, Project, SessionItem, TOTPEnrollment, User, UserRole } from '../lib/types'
+import { copyText, downloadText, fileStamp } from '../lib/download'
+import { qrToDataURL } from '../lib/qrcode'
+import { setPreference, useColorScheme, type ResolvedScheme, type SchemePreference } from '../lib/theme'
+import { useNativeDialog } from '../lib/useNativeDialog'
+import type {
+  APIToken,
+  MCPToolCatalogItem,
+  MCPToolCategory,
+  Project,
+  SessionItem,
+  TOTPEnrollment,
+  User,
+  UserRole,
+} from '../lib/types'
 
-export type AccountModalTab = 'sessions' | 'tokens' | 'totp' | 'mcp' | 'password'
+export type AccountModalTab = 'sessions' | 'tokens' | 'totp' | 'mcp' | 'password' | 'appearance'
 
 interface Props {
   open: boolean
@@ -16,6 +51,122 @@ interface Props {
   onLoggedOut: () => void
 }
 
+// ---------------------------------------------------------------------------
+// Shared styles
+
+const inputCls =
+  'px-2.5 py-1.5 rounded-md border border-line-strong bg-surface text-fg placeholder:text-fg-subtle focus:border-tidal focus:outline-none'
+const btnSecondary =
+  'inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-md border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium disabled:opacity-50'
+const btnPrimary =
+  'inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md bg-primary hover:bg-primary-hover text-white font-medium disabled:opacity-50'
+const badge = 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] leading-4 border'
+
+const SCOPES: { id: string; desc: string; adminOnly?: boolean }[] = [
+  { id: 'read', desc: '只读查询' },
+  { id: 'write', desc: '资产编排' },
+  { id: 'debug', desc: '接口调试 · 集合回归' },
+  { id: 'run', desc: '压测启停' },
+  { id: 'mcp', desc: 'MCP 接入' },
+  { id: 'admin', desc: '系统管理', adminOnly: true },
+]
+
+const CATEGORY_LABEL: Record<MCPToolCategory, string> = {
+  read: '只读探查',
+  write: '资产编排',
+  debug: '调试回归',
+  run: '压测控制',
+}
+const CATEGORY_ORDER: MCPToolCategory[] = ['read', 'write', 'debug', 'run']
+
+type ToolState = 'on' | 'off' | 'role' | 'disabled'
+
+/** Mirrors the server: empty scopes inherit everything; otherwise `mcp` gates the endpoint and the tool's own scope gates the tool. */
+function scopeUnlocks(tool: MCPToolCatalogItem, scopes: string[]): boolean {
+  if (scopes.length === 0) return true
+  if (!scopes.includes('mcp')) return false
+  return !tool.scope || scopes.includes(tool.scope)
+}
+
+function toolState(tool: MCPToolCatalogItem, scopes: string[], role: UserRole, whitelist: string[] | null): ToolState {
+  if (!scopeUnlocks(tool, scopes)) return 'off'
+  if (whitelist && !whitelist.includes(tool.name)) return 'off'
+  if (!tool.globally_enabled) return 'disabled'
+  if (role === 'viewer' && !tool.read_only) return 'role'
+  return 'on'
+}
+
+const isExpired = (t: APIToken) => !!t.expires_at && new Date(t.expires_at).getTime() < Date.now()
+const hasMCP = (t: APIToken) => !isExpired(t) && (!t.scopes || t.scopes.length === 0 || t.scopes.includes('mcp'))
+
+// ---------------------------------------------------------------------------
+// Small hooks
+
+/** Copy with a ~1.5s "copied" icon swap keyed by `id`. */
+function useCopyFlag(onFail: () => void) {
+  const [copied, setCopied] = useState<string | null>(null)
+  const timer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
+  const copy = useCallback(
+    async (id: string, text: string) => {
+      const ok = await copyText(text)
+      if (!ok) {
+        onFail()
+        return
+      }
+      setCopied(id)
+      window.clearTimeout(timer.current)
+      timer.current = window.setTimeout(() => setCopied(null), 1500)
+    },
+    [onFail]
+  )
+  return { copied, copy }
+}
+
+/** Inline two-step confirm: first click arms for 3s, second click runs. */
+function useArm() {
+  const [armed, setArmed] = useState<string | null>(null)
+  const timer = useRef<number | undefined>(undefined)
+  useEffect(() => () => window.clearTimeout(timer.current), [])
+  const reset = useCallback(() => {
+    window.clearTimeout(timer.current)
+    setArmed(null)
+  }, [])
+  const trigger = useCallback(
+    (id: string, run: () => void) => {
+      if (armed === id) {
+        reset()
+        run()
+        return
+      }
+      setArmed(id)
+      window.clearTimeout(timer.current)
+      timer.current = window.setTimeout(() => setArmed(null), 3000)
+    },
+    [armed, reset]
+  )
+  return { armed, trigger, reset }
+}
+
+const darkMQ = () => window.matchMedia('(prefers-color-scheme: dark)')
+function useSystemScheme(): ResolvedScheme {
+  return useSyncExternalStore(
+    (cb) => {
+      const mq = darkMQ()
+      mq.addEventListener('change', cb)
+      return () => mq.removeEventListener('change', cb)
+    },
+    () => (darkMQ().matches ? 'dark' : 'light'),
+    () => 'light'
+  )
+}
+
+function CopyIcon({ done, className = 'w-3.5 h-3.5' }: { done: boolean; className?: string }) {
+  return done ? <Check className={`${className} text-emerald-600`} /> : <Copy className={className} />
+}
+
+// ---------------------------------------------------------------------------
+
 export function AccountModal({
   open,
   initialTab = 'sessions',
@@ -26,47 +177,72 @@ export function AccountModal({
   onToast,
   onLoggedOut,
 }: Props) {
+  const dialogRef = useNativeDialog(open, onClose)
   const [tab, setTab] = useState<AccountModalTab>(initialTab)
+
   const [sessions, setSessions] = useState<SessionItem[]>([])
   const [loading, setLoading] = useState(false)
+
   const [tokens, setTokens] = useState<APIToken[]>([])
   const [loadingTokens, setLoadingTokens] = useState(false)
+  const [catalog, setCatalog] = useState<MCPToolCatalogItem[] | null>(null)
+  const [catalogError, setCatalogError] = useState(false)
   const [tokName, setTokName] = useState('')
   const [tokRole, setTokRole] = useState<UserRole>(user.role)
   const [tokTTLDays, setTokTTLDays] = useState<number>(30)
   const [tokScopes, setTokScopes] = useState<string[]>([])
   const [tokProjectIDs, setTokProjectIDs] = useState<string[]>([])
+  const [restrictTools, setRestrictTools] = useState(false)
+  const [toolPick, setToolPick] = useState<string[]>([])
   const [creatingTok, setCreatingTok] = useState(false)
-  const [newPlaintext, setNewPlaintext] = useState('')
-  const [copiedTok, setCopiedTok] = useState(false)
+  const [newToken, setNewToken] = useState<{ token: APIToken; plaintext: string } | null>(null)
+  /** Plaintexts minted while this dialog is open; never persisted. */
+  const [plaintexts, setPlaintexts] = useState<Record<string, string>>({})
+
+  const [mcpMode, setMcpMode] = useState<'http' | 'stdio'>('http')
+  const [mcpTokenId, setMcpTokenId] = useState('')
+  const [mcpQuickRW, setMcpQuickRW] = useState(false)
+
   const [enrollment, setEnrollment] = useState<TOTPEnrollment | null>(null)
   const [totpConfirmCode, setTotpConfirmCode] = useState('')
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([])
-  const [copiedRecovery, setCopiedRecovery] = useState(false)
   const [disablePwd, setDisablePwd] = useState('')
   const [disableCode, setDisableCode] = useState('')
   const [totpBusy, setTotpBusy] = useState(false)
-  const [mcpMode, setMcpMode] = useState<'http' | 'stdio'>('http')
-  const [copiedMcp, setCopiedMcp] = useState(false)
+
   const [curPwd, setCurPwd] = useState('')
   const [newPwd, setNewPwd] = useState('')
   const [confirmPwd, setConfirmPwd] = useState('')
+  const [showPwd, setShowPwd] = useState(false)
   const [savingPwd, setSavingPwd] = useState(false)
 
+  const scheme = useColorScheme()
+  const systemScheme = useSystemScheme()
+  const { copied, copy } = useCopyFlag(useCallback(() => onToast('info', '复制失败，请手动选择文本复制'), [onToast]))
+  const { armed, trigger, reset: disarm } = useArm()
+
   useEffect(() => {
-    if (open) {
-      setTab(initialTab)
-      setCopiedMcp(false)
-      setEnrollment(null)
-      setTotpConfirmCode('')
-      setRecoveryCodes([])
-      setCopiedRecovery(false)
-      setDisablePwd('')
-      setDisableCode('')
-    }
+    if (!open) return
+    setTab(initialTab)
+    setEnrollment(null)
+    setTotpConfirmCode('')
+    setRecoveryCodes([])
+    setDisablePwd('')
+    setDisableCode('')
+    setNewToken(null)
+    setPlaintexts({})
+    setMcpTokenId('')
+    setCatalog(null)
+    setCatalogError(false)
+    setRestrictTools(false)
+    setToolPick([])
   }, [open, initialTab])
 
-  const loadSessions = async () => {
+  useEffect(() => {
+    setTokRole(user.role)
+  }, [user.role])
+
+  const loadSessions = useCallback(async () => {
     setLoading(true)
     try {
       const res = await api.listSessions()
@@ -76,9 +252,9 @@ export function AccountModal({
     } finally {
       setLoading(false)
     }
-  }
+  }, [onToast])
 
-  const loadTokens = async () => {
+  const loadTokens = useCallback(async () => {
     setLoadingTokens(true)
     try {
       setTokens(await api.listAPITokens())
@@ -87,101 +263,141 @@ export function AccountModal({
     } finally {
       setLoadingTokens(false)
     }
-  }
+  }, [onToast])
 
   useEffect(() => {
     if (!open) return
+    disarm()
     if (tab === 'sessions') void loadSessions()
     if (tab === 'tokens' || tab === 'mcp') void loadTokens()
   }, [open, tab])
 
   useEffect(() => {
-    setTokRole(user.role)
-  }, [user.role])
+    if (!open || tab !== 'tokens' || catalog || catalogError) return
+    let cancelled = false
+    api
+      .getMCPCatalog()
+      .then((c) => !cancelled && setCatalog(c.tools || []))
+      .catch(() => !cancelled && setCatalogError(true))
+    return () => {
+      cancelled = true
+    }
+  }, [open, tab, catalog, catalogError])
 
-  if (!open) return null
+  // ----- derived -----
 
   const allowedTokenRoles: UserRole[] =
     user.role === 'admin' ? ['viewer', 'member', 'admin'] : user.role === 'member' ? ['viewer', 'member'] : ['viewer']
+  const scopeOptions = SCOPES.filter((s) => !s.adminOnly || user.role === 'admin')
 
-  const origin = typeof window !== 'undefined' ? window.location.origin : 'https://127.0.0.1:8080'
-  const tokenPlaceholder = newPlaintext || '<使用上方按钮生成或填入 tg_ 令牌>'
-  const httpConfigSnippet = JSON.stringify(
+  const sortedCatalog = useMemo(
+    () =>
+      (catalog || [])
+        .slice()
+        .sort((a, b) => CATEGORY_ORDER.indexOf(a.category) - CATEGORY_ORDER.indexOf(b.category)),
+    [catalog]
+  )
+  const scopeUnlocked = sortedCatalog.filter((t) => scopeUnlocks(t, tokScopes)).map((t) => t.name)
+  const whitelist = restrictTools ? toolPick.filter((n) => scopeUnlocked.includes(n)) : null
+  const toolStates = sortedCatalog.map((t) => ({ tool: t, state: toolState(t, tokScopes, tokRole, whitelist) }))
+  const usableCount = toolStates.filter((t) => t.state === 'on').length
+  const mcpBlocked = tokScopes.length > 0 && !tokScopes.includes('mcp')
+
+  const mcpTokens = useMemo(() => tokens.filter(hasMCP), [tokens])
+  const selectedMcpToken = mcpTokens.find((t) => t.id === mcpTokenId) || null
+
+  // Default MCP token: prefer one minted in this dialog (plaintext known), then the newest.
+  useEffect(() => {
+    if (selectedMcpToken || mcpTokens.length === 0) return
+    const minted = mcpTokens.find((t) => plaintexts[t.id])
+    const newest = mcpTokens.slice().sort((a, b) => b.created_at.localeCompare(a.created_at))[0]
+    setMcpTokenId((minted || newest).id)
+  }, [mcpTokens, selectedMcpToken, plaintexts])
+
+  const qrSrc = useMemo(() => {
+    if (!enrollment) return ''
+    try {
+      return qrToDataURL(enrollment.otpauth_url, { scale: 4 })
+    } catch {
+      return ''
+    }
+  }, [enrollment])
+
+  const origin = typeof window !== 'undefined' ? window.location.origin : ''
+  const mcpPlaintext = selectedMcpToken ? plaintexts[selectedMcpToken.id] : undefined
+  const tokenValue = mcpPlaintext || (selectedMcpToken ? `<${selectedMcpToken.prefix}… 令牌明文>` : '<tg_ 令牌明文>')
+  const mcpSnippet = JSON.stringify(
     {
       mcpServers: {
-        tidegate: {
-          serverUrl: `${origin}/api/v1/mcp`,
-          headers: {
-            Authorization: `Bearer ${tokenPlaceholder}`,
-          },
-        },
+        tidegate:
+          mcpMode === 'http'
+            ? { serverUrl: `${origin}/api/v1/mcp`, headers: { Authorization: `Bearer ${tokenValue}` } }
+            : { command: 'tidegate', args: ['mcp', '--url', origin, '--token', tokenValue] },
       },
     },
     null,
     2
   )
-  const stdioConfigSnippet = JSON.stringify(
-    {
-      mcpServers: {
-        tidegate: {
-          command: 'tidegate',
-          args: ['mcp', '--url', origin, '--token', tokenPlaceholder],
-        },
-      },
-    },
-    null,
-    2
-  )
-  const activeSnippet = mcpMode === 'http' ? httpConfigSnippet : stdioConfigSnippet
 
-  const availableTokenScopes =
-    user.role === 'admin'
-      ? [
-          { id: 'read', label: 'read (只读)' },
-          { id: 'write', label: 'write (写入)' },
-          { id: 'debug', label: 'debug (调试)' },
-          { id: 'run', label: 'run (压测/集合)' },
-          { id: 'mcp', label: 'mcp (MCP 协议)' },
-          { id: 'admin', label: 'admin (系统管理)' },
-        ]
-      : [
-          { id: 'read', label: 'read (只读)' },
-          { id: 'write', label: 'write (写入)' },
-          { id: 'debug', label: 'debug (调试)' },
-          { id: 'run', label: 'run (压测/集合)' },
-          { id: 'mcp', label: 'mcp (MCP 协议)' },
-        ]
+  const uniqueTokenName = (base: string) => {
+    const taken = new Set(tokens.map((t) => t.name))
+    if (!taken.has(base)) return base
+    for (let i = 2; ; i++) if (!taken.has(`${base} ${i}`)) return `${base} ${i}`
+  }
 
-  const toggleTokScope = (scope: string) => {
+  // ----- actions -----
+
+  const toggleTokScope = (scope: string) =>
     setTokScopes((prev) => (prev.includes(scope) ? prev.filter((x) => x !== scope) : [...prev, scope]))
+
+  const toggleTokProject = (pid: string) =>
+    setTokProjectIDs((prev) => (prev.includes(pid) ? prev.filter((x) => x !== pid) : [...prev, pid]))
+
+  const toggleRestrict = () => {
+    if (!restrictTools) setToolPick(scopeUnlocked)
+    setRestrictTools((v) => !v)
   }
 
-  const toggleTokProject = (pid: string) => {
-    setTokProjectIDs((prev) => (prev.includes(pid) ? prev.filter((x) => x !== pid) : [...prev, pid]))
-  }
+  const togglePick = (name: string) =>
+    setToolPick((prev) => (prev.includes(name) ? prev.filter((x) => x !== name) : [...prev, name]))
+
+  const rememberMinted = (token: APIToken, plaintext: string) =>
+    setPlaintexts((prev) => ({ ...prev, [token.id]: plaintext }))
 
   const handleCreateToken = async (e: FormEvent) => {
     e.preventDefault()
-    if (!tokName.trim()) {
-      onToast('error', '请输入 API 令牌名称')
+    const name = tokName.trim()
+    if (!name) {
+      onToast('error', '请输入令牌名称')
       return
+    }
+    let mcpTools: string[] | undefined
+    if (whitelist) {
+      if (whitelist.length === 0) {
+        onToast('error', '限定 MCP 工具时至少勾选一个')
+        return
+      }
+      if (whitelist.length < scopeUnlocked.length) mcpTools = whitelist
     }
     setCreatingTok(true)
     try {
       const res = await api.createAPIToken({
-        name: tokName.trim(),
+        name,
         role: tokRole,
         scopes: tokScopes.length > 0 ? tokScopes : undefined,
         project_ids: tokProjectIDs.length > 0 ? tokProjectIDs : undefined,
+        mcp_tools: mcpTools,
         ttl_days: tokTTLDays > 0 ? tokTTLDays : undefined,
       })
-      setNewPlaintext(res.plaintext)
-      setCopiedTok(false)
+      setNewToken(res)
+      rememberMinted(res.token, res.plaintext)
       setTokName('')
       setTokScopes([])
       setTokProjectIDs([])
+      setRestrictTools(false)
+      setToolPick([])
       await loadTokens()
-      onToast('success', '已生成新的 API 访问令牌，可直接用于 CLI 或 MCP 接入')
+      onToast('success', `已生成令牌「${res.token.name}」`)
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '生成 API 令牌失败')
     } finally {
@@ -189,24 +405,35 @@ export function AccountModal({
     }
   }
 
-  const handleQuickMCPToken = async (readonly: boolean) => {
+  const handleQuickMCPToken = async () => {
+    const readwrite = mcpQuickRW && user.role !== 'viewer'
     setCreatingTok(true)
     try {
       const res = await api.createAPIToken({
-        name: readonly ? 'mcp-readonly' : 'mcp-readwrite',
-        role: readonly ? 'viewer' : 'member',
-        scopes: readonly ? ['mcp', 'read'] : ['mcp', 'read', 'write', 'debug', 'run'],
+        name: uniqueTokenName(readwrite ? 'MCP 读写' : 'MCP 只读'),
+        role: readwrite ? 'member' : 'viewer',
+        scopes: readwrite ? ['mcp', 'read', 'write', 'debug', 'run'] : ['mcp', 'read'],
         ttl_days: 30,
       })
-      setNewPlaintext(res.plaintext)
-      setCopiedTok(false)
-      setCopiedMcp(false)
+      rememberMinted(res.token, res.plaintext)
+      setMcpTokenId(res.token.id)
       await loadTokens()
-      onToast('success', readonly ? '已生成只读 MCP 令牌并填入配置' : '已生成读写 MCP 令牌并填入配置')
+      onToast('success', `已生成令牌「${res.token.name}」并填入配置`)
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '生成 MCP 令牌失败')
     } finally {
       setCreatingTok(false)
+    }
+  }
+
+  const handleRevokeToken = async (tok: APIToken) => {
+    try {
+      await api.revokeAPIToken(tok.id)
+      onToast('success', `已吊销令牌「${tok.name}」`)
+      if (newToken?.token.id === tok.id) setNewToken(null)
+      await loadTokens()
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : '吊销 API 令牌失败')
     }
   }
 
@@ -226,19 +453,19 @@ export function AccountModal({
 
   const handleConfirmTOTP = async (e: FormEvent) => {
     e.preventDefault()
-    if (!totpConfirmCode.trim()) {
-      onToast('error', '请输入 6 位动态验证码')
+    const code = totpConfirmCode.trim()
+    if (!/^\d{6}$/.test(code)) {
+      onToast('error', '请输入 6 位数字验证码')
       return
     }
     setTotpBusy(true)
     try {
-      const res = await api.confirmTOTP(totpConfirmCode.trim())
+      const res = await api.confirmTOTP(code)
       setRecoveryCodes(res.recovery_codes || [])
-      setCopiedRecovery(false)
       setEnrollment(null)
       setTotpConfirmCode('')
       onUserUpdated?.({ ...user, totp_enabled: true })
-      onToast('success', '已启用 TOTP 双因素认证，请妥善保存恢复码')
+      onToast('success', '已启用双因素认证，请保存恢复码')
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '绑定验证器失败')
     } finally {
@@ -259,7 +486,7 @@ export function AccountModal({
       setDisableCode('')
       setRecoveryCodes([])
       onUserUpdated?.({ ...user, totp_enabled: false })
-      onToast('success', '已关闭双因素认证 (2FA)')
+      onToast('success', '已关闭双因素认证')
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '关闭 2FA 失败')
     } finally {
@@ -267,17 +494,12 @@ export function AccountModal({
     }
   }
 
-  const handleRevokeToken = async (tok: APIToken) => {
-    try {
-      await api.revokeAPIToken(tok.id)
-      onToast('success', `已吊销令牌「${tok.name}」`)
-      await loadTokens()
-    } catch (err) {
-      onToast('error', err instanceof APIError ? err.message : '吊销 API 令牌失败')
-    }
+  const downloadRecovery = () => {
+    const body = [`Tidegate 恢复码 · ${user.username} · ${new Date().toLocaleString()}`, '', ...recoveryCodes, ''].join('\r\n')
+    downloadText(`tidegate-recovery-codes-${user.username}-${fileStamp()}.txt`, body)
   }
 
-  const handleRevoke = async (s: SessionItem) => {
+  const handleRevokeSession = async (s: SessionItem) => {
     try {
       await api.revokeSession(s.id)
       onToast('success', s.current ? '已注销当前会话' : '已踢出该设备会话')
@@ -316,588 +538,898 @@ export function AccountModal({
     }
   }
 
+  const handleLogout = async () => {
+    try {
+      await api.logout()
+    } catch {
+      // session may already be gone
+    }
+    onLoggedOut()
+    onClose()
+  }
+
+  // ----- render helpers -----
+
+  const dangerBtn = (id: string, label: string, confirmLabel: string, run: () => void) => {
+    const isArmed = armed === id
+    return (
+      <button
+        type="button"
+        onClick={() => trigger(id, run)}
+        onBlur={() => isArmed && disarm()}
+        className={`shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-md border font-medium transition-colors ${
+          isArmed
+            ? 'border-rose-600 bg-rose-600 hover:bg-rose-solid text-white'
+            : 'border-rose-200 text-rose-700 hover:bg-rose-50'
+        }`}
+      >
+        <Trash2 className="w-3.5 h-3.5" /> {isArmed ? confirmLabel : label}
+      </button>
+    )
+  }
+
+  const tabs = [
+    { id: 'sessions' as const, label: '会话', icon: Laptop },
+    { id: 'tokens' as const, label: 'API 令牌', icon: Key },
+    { id: 'mcp' as const, label: 'MCP 接入', icon: Bot },
+    { id: 'totp' as const, label: '双因素认证', icon: ShieldCheck },
+    { id: 'password' as const, label: '密码', icon: KeyRound },
+    { id: 'appearance' as const, label: '外观', icon: Palette },
+  ]
+
   return (
-    <div className="fixed inset-0 z-40 bg-slate-950/50 backdrop-blur-[2px] flex items-center justify-center p-4">
-      <div className="w-full max-w-2xl bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden">
-        <div className="px-5 py-3 tg-telemetry-strip flex items-center justify-between">
-          <div className="flex items-center gap-3 min-w-0">
-            <h2 className="text-sm font-semibold text-white">账号与令牌</h2>
-            <span className="text-xs text-sky-200/80 font-mono truncate">
-              {user.username} · {user.role}
-            </span>
-          </div>
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="关闭弹窗"
-            className="p-1 text-slate-300 hover:text-white rounded hover:bg-white/10"
+    <dialog
+      ref={dialogRef}
+      closedby="any"
+      aria-label="账号与令牌"
+      className="tg-dialog w-[min(50rem,calc(100vw-2rem))] h-[min(42rem,86dvh)]"
+    >
+      {open && (
+        <>
+          <header className="px-5 py-3 tg-telemetry-strip flex items-center justify-between gap-3">
+            <div className="flex items-center gap-3 min-w-0">
+              <h2 className="text-sm font-semibold text-white">账号与令牌</h2>
+              <span className="text-xs text-sky-200/80 font-mono truncate">{user.username}</span>
+              <span className="px-1.5 py-0.5 rounded bg-white/10 text-sky-100 font-mono text-[11px]">{user.role}</span>
+              {user.totp_enabled && (
+                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-400/15 text-emerald-200 text-[11px]">
+                  <ShieldCheck className="w-3 h-3" /> 2FA
+                </span>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={onClose}
+              aria-label="关闭"
+              className="p-1 text-slate-300 hover:text-white rounded hover:bg-white/10"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </header>
+
+          <div
+            role="tablist"
+            aria-label="账号与安全"
+            className="tg-tablist px-5 border-b border-line bg-surface-subtle gap-5 text-xs font-medium"
           >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
+            {tabs.map((t) => {
+              const Icon = t.icon
+              const selected = tab === t.id
+              return (
+                <button
+                  key={t.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={selected}
+                  onClick={() => setTab(t.id)}
+                  className={`tg-tab inline-flex items-center gap-1.5 py-2.5 transition-colors ${
+                    selected ? 'text-tidal' : 'text-fg-muted hover:text-fg'
+                  }`}
+                >
+                  <Icon className="w-3.5 h-3.5" />
+                  <span>{t.label}</span>
+                </button>
+              )
+            })}
+          </div>
 
-        <div role="tablist" aria-label="账号与安全页签" className="tg-tablist px-5 border-b border-slate-200 bg-slate-50 gap-5 text-xs font-medium">
-          {(
-            [
-              { id: 'sessions' as const, label: '活动会话', icon: Laptop },
-              { id: 'tokens' as const, label: 'API 访问令牌', icon: Key },
-              { id: 'totp' as const, label: '双因素认证 2FA', icon: ShieldCheck },
-              { id: 'mcp' as const, label: 'MCP 客户端接入', icon: Bot },
-              { id: 'password' as const, label: '修改密码', icon: KeyRound },
-            ] as const
-          ).map((t) => {
-            const Icon = t.icon
-            const selected = tab === t.id
-            return (
-              <button
-                key={t.id}
-                type="button"
-                role="tab"
-                aria-selected={selected}
-                onClick={() => setTab(t.id)}
-                className={`tg-tab inline-flex items-center gap-1.5 py-2.5 transition-colors ${
-                  selected ? 'text-sky-700' : 'text-slate-500 hover:text-slate-900'
-                }`}
-              >
-                <Icon className="w-3.5 h-3.5" />
-                <span>{t.label}</span>
-              </button>
-            )
-          })}
-        </div>
-
-        <div className="p-5 max-h-[65vh] overflow-y-auto tg-scroller">
-          {tab === 'sessions' && (
-            <div className="space-y-3">
-              {loading ? (
-                <p className="text-xs text-slate-500">正在加载会话...</p>
+          <div role="tabpanel" className="flex-1 min-h-0 overflow-y-auto tg-scroller p-5 text-xs text-fg">
+            {/* ================= Sessions ================= */}
+            {tab === 'sessions' &&
+              (loading && sessions.length === 0 ? (
+                <p className="text-fg-subtle">正在加载会话…</p>
               ) : sessions.length === 0 ? (
-                <p className="text-xs text-slate-500">暂无活动会话记录。</p>
+                <p className="text-fg-subtle">暂无活动会话</p>
               ) : (
-                sessions.map((s) => (
-                  <div
-                    key={s.id}
-                    className="flex items-center justify-between gap-3 p-3 rounded-lg border border-slate-200 bg-slate-50/50 text-xs"
-                  >
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2 font-medium text-slate-800">
-                        <span className="font-mono">{s.remote_addr || '本机'}</span>
-                        {s.current && (
-                          <span className="px-1.5 py-0.5 text-[10px] rounded bg-emerald-100 text-emerald-800 font-semibold">
-                            当前会话
+                <ul className="rounded-lg border border-line divide-y divide-line">
+                  {sessions.map((s) => (
+                    <li key={s.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                      <div className="min-w-0">
+                        <div className="flex items-center gap-2 font-medium text-fg">
+                          <span className="font-mono">{s.remote_addr || '本机'}</span>
+                          {s.current && (
+                            <span className={`${badge} bg-emerald-50 text-emerald-700 border-emerald-200`}>当前</span>
+                          )}
+                        </div>
+                        <p className="text-fg-muted truncate mt-0.5">{s.user_agent || '未知终端'}</p>
+                        <p className="tg-tabular text-[11px] text-fg-subtle mt-0.5">
+                          活跃 {new Date(s.last_seen_at).toLocaleString()} · 过期 {new Date(s.expires_at).toLocaleString()}
+                        </p>
+                      </div>
+                      {dangerBtn(`session:${s.id}`, s.current ? '退出' : '注销', s.current ? '确认退出？' : '确认注销？', () =>
+                        void handleRevokeSession(s)
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              ))}
+
+            {/* ================= API tokens ================= */}
+            {tab === 'tokens' && (
+              <div className="space-y-4">
+                <form onSubmit={handleCreateToken} className="rounded-lg border border-line bg-surface-subtle">
+                  <div className="flex flex-wrap items-center gap-2 p-3">
+                    <input
+                      type="text"
+                      name="token-name"
+                      aria-label="令牌名称"
+                      autoComplete="off"
+                      autoCorrect="off"
+                      autoCapitalize="none"
+                      spellCheck={false}
+                      value={tokName}
+                      onChange={(e) => setTokName(e.target.value)}
+                      placeholder="自动化流水线 / MCP 客户端"
+                      className={`${inputCls} flex-1 min-w-[12rem]`}
+                    />
+                    <select
+                      aria-label="角色"
+                      value={tokRole}
+                      onChange={(e) => setTokRole(e.target.value as UserRole)}
+                      className={`${inputCls} font-mono`}
+                    >
+                      {allowedTokenRoles.map((r) => (
+                        <option key={r} value={r}>
+                          {r}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      aria-label="有效期"
+                      value={tokTTLDays}
+                      onChange={(e) => setTokTTLDays(Number(e.target.value))}
+                      className={`${inputCls} tg-tabular`}
+                    >
+                      <option value={7}>7 天</option>
+                      <option value={30}>30 天</option>
+                      <option value={90}>90 天</option>
+                      <option value={365}>365 天</option>
+                      <option value={0}>长期有效</option>
+                    </select>
+                    <button type="submit" disabled={creatingTok} className={btnPrimary}>
+                      <Plus className="w-3.5 h-3.5" /> 创建
+                    </button>
+                  </div>
+
+                  <fieldset className="px-3 pb-3 pt-2.5 border-t border-line">
+                    <legend className="sr-only">Scope</legend>
+                    <div className="flex items-center justify-between gap-2 mb-1.5">
+                      <span className="text-[11px] font-medium text-fg-muted">Scope</span>
+                      {tokScopes.length === 0 && (
+                        <span className={`${badge} bg-surface text-fg-muted border-line`}>未勾选 · 继承角色全部权限</span>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {scopeOptions.map((sc) => {
+                        const on = tokScopes.includes(sc.id)
+                        return (
+                          <label
+                            key={sc.id}
+                            className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md border cursor-pointer transition-colors ${
+                              on ? 'border-sky-300 bg-sky-50' : 'border-line bg-surface hover:border-line-strong'
+                            }`}
+                          >
+                            <input type="checkbox" checked={on} onChange={() => toggleTokScope(sc.id)} />
+                            <span className="font-mono text-[11px] text-fg">{sc.id}</span>
+                            <span className="text-[11px] text-fg-muted">{sc.desc}</span>
+                          </label>
+                        )
+                      })}
+                    </div>
+                  </fieldset>
+
+                  <fieldset className="px-3 pb-3 pt-2.5 border-t border-line">
+                    <legend className="sr-only">MCP 工具</legend>
+                    <div className="flex flex-wrap items-center justify-between gap-2 mb-1.5">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[11px] font-medium text-fg-muted">MCP 工具</span>
+                        {catalog && (
+                          <span className="tg-tabular text-[11px] text-fg-subtle">
+                            {usableCount}/{catalog.length}
+                          </span>
+                        )}
+                        {mcpBlocked && (
+                          <span className={`${badge} bg-amber-50 text-amber-800 border-amber-200`}>
+                            <Ban className="w-3 h-3" /> 缺少 mcp Scope
                           </span>
                         )}
                       </div>
-                      <p className="text-slate-500 truncate mt-0.5">{s.user_agent || '未知终端'}</p>
-                      <p className="tg-tabular text-[11px] text-slate-400 mt-0.5">
-                        最近活跃：{new Date(s.last_seen_at).toLocaleString()} · 过期时间：
-                        {new Date(s.expires_at).toLocaleString()}
-                      </p>
-                    </div>
-                    <button
-                      type="button"
-                      onClick={() => void handleRevoke(s)}
-                      className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-rose-200 text-rose-700 hover:bg-rose-50"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" /> {s.current ? '退出' : '注销'}
-                    </button>
-                  </div>
-                ))
-              )}
-            </div>
-          )}
-
-          {tab === 'tokens' && (
-            <div className="space-y-4 text-xs">
-              <form onSubmit={handleCreateToken} className="p-3 rounded-lg border border-slate-200 bg-slate-50/60 space-y-3">
-                <div className="font-medium text-slate-800">生成长期 CLI / CI / MCP Bearer 令牌（tg_ 前缀）</div>
-                <div className="grid grid-cols-12 gap-2 items-center">
-                  <input
-                    type="text"
-                    value={tokName}
-                    onChange={(e) => setTokName(e.target.value)}
-                    placeholder="令牌用途（如 Claude MCP / GitLab CI）"
-                    className="col-span-5 px-2.5 py-1.5 border border-slate-300 rounded bg-white"
-                  />
-                  <select
-                    value={tokRole}
-                    onChange={(e) => setTokRole(e.target.value as UserRole)}
-                    className="col-span-3 px-2 py-1.5 border border-slate-300 rounded bg-white"
-                  >
-                    {allowedTokenRoles.map((r) => (
-                      <option key={r} value={r}>
-                        权限：{r}
-                      </option>
-                    ))}
-                  </select>
-                  <select
-                    value={tokTTLDays}
-                    onChange={(e) => setTokTTLDays(Number(e.target.value))}
-                    className="col-span-2 px-2 py-1.5 border border-slate-300 rounded bg-white"
-                  >
-                    <option value={7}>7 天</option>
-                    <option value={30}>30 天</option>
-                    <option value={90}>90 天</option>
-                    <option value={365}>365 天</option>
-                    <option value={0}>长期有效</option>
-                  </select>
-                  <button
-                    type="submit"
-                    disabled={creatingTok}
-                    className="col-span-2 inline-flex items-center justify-center gap-1 px-2.5 py-1.5 rounded bg-sky-600 hover:bg-sky-700 text-white font-medium disabled:opacity-50"
-                  >
-                    <Plus className="w-3.5 h-3.5" /> 创建
-                  </button>
-                </div>
-
-                <fieldset className="space-y-1.5 pt-2 border-t border-slate-200/80">
-                  <legend className="text-[11px] font-medium text-slate-600 px-1">
-                    权限范围 Scope（不选则继承角色）
-                  </legend>
-                  <div className="flex flex-wrap gap-2">
-                    {availableTokenScopes.map((sc) => (
-                      <label
-                        key={sc.id}
-                        className="inline-flex items-center gap-1.5 px-2 py-1 rounded border border-slate-200 bg-white cursor-pointer hover:border-sky-300"
-                      >
-                        <input
-                          type="checkbox"
-                          checked={tokScopes.includes(sc.id)}
-                          onChange={() => toggleTokScope(sc.id)}
-                        />
-                        <span className="font-mono text-[11px] text-slate-700">{sc.label}</span>
-                      </label>
-                    ))}
-                  </div>
-                </fieldset>
-
-                {projects.length > 0 && (
-                  <fieldset className="space-y-1.5 pt-2 border-t border-slate-200/80">
-                    <legend className="text-[11px] font-medium text-slate-600 px-1">
-                      限定项目（不选则全部可访问）
-                    </legend>
-                    <div className="flex flex-wrap gap-2">
-                      {projects.map((p) => (
-                        <label
-                          key={p.id}
-                          className="inline-flex items-center gap-1.5 px-2 py-1 rounded border border-slate-200 bg-white cursor-pointer hover:border-sky-300"
+                      {catalog && catalog.length > 0 && !mcpBlocked && (
+                        <button
+                          type="button"
+                          aria-pressed={restrictTools}
+                          onClick={toggleRestrict}
+                          className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md border text-[11px] font-medium ${
+                            restrictTools
+                              ? 'border-sky-300 bg-sky-50 text-sky-700'
+                              : 'border-line bg-surface text-fg-muted hover:text-fg'
+                          }`}
                         >
-                          <input
-                            type="checkbox"
-                            checked={tokProjectIDs.includes(p.id)}
-                            onChange={() => toggleTokProject(p.id)}
-                          />
-                          <span className="text-[11px] text-slate-700">{p.name}</span>
-                        </label>
-                      ))}
+                          <SlidersHorizontal className="w-3 h-3" /> 限定 MCP 工具
+                        </button>
+                      )}
                     </div>
+                    {catalogError ? (
+                      <p className="text-fg-subtle">工具目录读取失败</p>
+                    ) : !catalog ? (
+                      <p className="text-fg-subtle">正在读取工具目录…</p>
+                    ) : (
+                      <div className="grid sm:grid-cols-2 gap-x-4 gap-y-2">
+                        {CATEGORY_ORDER.map((cat) => {
+                          const items = toolStates.filter((t) => t.tool.category === cat)
+                          if (items.length === 0) return null
+                          return (
+                            <div key={cat} className="min-w-0">
+                              <div className="text-[11px] text-fg-subtle mb-1">
+                                {CATEGORY_LABEL[cat]} <span className="tg-tabular">{items.length}</span>
+                              </div>
+                              <div className="flex flex-wrap gap-1">
+                                {items.map(({ tool, state }) => {
+                                  const pickable = restrictTools && scopeUnlocks(tool, tokScopes)
+                                  const tone =
+                                    state === 'on'
+                                      ? 'border-sky-200 bg-sky-50 text-sky-800'
+                                      : state === 'role'
+                                        ? 'border-dashed border-amber-300 bg-amber-50 text-amber-800'
+                                        : state === 'disabled'
+                                          ? 'border-line bg-surface text-fg-subtle line-through'
+                                          : 'border-dashed border-line bg-transparent text-fg-subtle'
+                                  const hint =
+                                    state === 'disabled'
+                                      ? '已被管理员全局禁用'
+                                      : state === 'role'
+                                        ? 'viewer 角色仅在项目授权后可调用'
+                                        : `scope: ${tool.scope || '—'}`
+                                  const body = (
+                                    <>
+                                      {pickable && (
+                                        <input
+                                          type="checkbox"
+                                          className="w-3 h-3"
+                                          checked={toolPick.includes(tool.name)}
+                                          onChange={() => togglePick(tool.name)}
+                                        />
+                                      )}
+                                      {state === 'disabled' && <Ban className="w-3 h-3 no-underline" />}
+                                      <span className="font-mono">{tool.name}</span>
+                                    </>
+                                  )
+                                  return pickable ? (
+                                    <label
+                                      key={tool.name}
+                                      title={`${tool.title} · ${hint}`}
+                                      className={`${badge} ${tone} cursor-pointer`}
+                                    >
+                                      {body}
+                                    </label>
+                                  ) : (
+                                    <span key={tool.name} title={`${tool.title} · ${hint}`} className={`${badge} ${tone}`}>
+                                      {body}
+                                    </span>
+                                  )
+                                })}
+                              </div>
+                            </div>
+                          )
+                        })}
+                      </div>
+                    )}
                   </fieldset>
-                )}
-              </form>
 
-              {newPlaintext && (
-                <div className="p-3 rounded-lg border border-emerald-300 bg-emerald-50 space-y-1.5">
-                  <div className="flex items-center justify-between text-emerald-900 font-semibold">
-                    <span>新令牌明文（仅本次展示，关闭后不可再次查看）：</span>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        try {
-                          await navigator.clipboard.writeText(newPlaintext)
-                          setCopiedTok(true)
-                          onToast('success', '已复制 API 令牌')
-                        } catch {
-                          onToast('info', '请手动复制上方令牌明文')
-                        }
-                      }}
-                      className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-600 text-white"
-                    >
-                      {copiedTok ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />} 复制
-                    </button>
-                  </div>
-                  <div className="font-mono text-[11px] break-all bg-white border border-emerald-200 rounded px-2 py-1.5 text-slate-900">
-                    {newPlaintext}
-                  </div>
-                </div>
-              )}
-
-              {loadingTokens ? (
-                <p className="text-slate-500">正在加载 API 令牌...</p>
-              ) : tokens.length === 0 ? (
-                <p className="text-slate-400">当前账号尚未创建任何 API 访问令牌。</p>
-              ) : (
-                <div className="space-y-2">
-                  {tokens.map((t) => (
-                    <div
-                      key={t.id}
-                      className="flex items-center justify-between gap-3 p-2.5 rounded-lg border border-slate-200 bg-white"
-                    >
-                      <div className="min-w-0">
-                        <div className="flex flex-wrap items-center gap-1.5 font-medium text-slate-800">
-                          <span>{t.name}</span>
-                          <span className="px-1.5 py-0.5 rounded bg-slate-100 text-slate-700 font-mono text-[10px]">
-                            {t.prefix}...
-                          </span>
-                          <span className="px-1.5 py-0.5 rounded bg-sky-50 text-sky-700 font-mono text-[10px]">
-                            {t.role}
-                          </span>
-                          {t.scopes && t.scopes.length > 0 ? (
-                            t.scopes.map((sc) => (
-                              <span
-                                key={sc}
-                                className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-700 border border-indigo-200 font-mono text-[10px]"
-                              >
-                                scope:{sc}
-                              </span>
-                            ))
-                          ) : (
-                            <span className="px-1.5 py-0.5 rounded bg-slate-50 text-slate-500 text-[10px]">
-                              全量 Scope
-                            </span>
-                          )}
-                          {t.project_ids && t.project_ids.length > 0 && (
-                            <span className="px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 text-[10px]">
-                              限定 {t.project_ids.length} 个项目
-                            </span>
-                          )}
-                        </div>
-                        <div className="tg-tabular text-[11px] text-slate-400 mt-0.5">
-                          创建：{new Date(t.created_at).toLocaleString()}
-                          {t.expires_at ? ` · 过期：${new Date(t.expires_at).toLocaleDateString()}` : ' · 永不过期'}
-                          {t.last_used_at ? ` · 最近使用：${new Date(t.last_used_at).toLocaleString()}` : ''}
-                        </div>
+                  {projects.length > 0 && (
+                    <fieldset className="px-3 pb-3 pt-2.5 border-t border-line">
+                      <legend className="sr-only">限定项目</legend>
+                      <div className="flex items-center justify-between gap-2 mb-1.5">
+                        <span className="text-[11px] font-medium text-fg-muted">项目</span>
+                        {tokProjectIDs.length === 0 && (
+                          <span className={`${badge} bg-surface text-fg-muted border-line`}>未勾选 · 全部项目</span>
+                        )}
                       </div>
-                      <button
-                        type="button"
-                        onClick={() => void handleRevokeToken(t)}
-                        className="shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded border border-rose-200 text-rose-700 hover:bg-rose-50"
-                      >
-                        <Trash2 className="w-3.5 h-3.5" /> 吊销
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-
-          {tab === 'totp' && (
-            <div className="space-y-4 text-xs">
-              <div className="flex items-center justify-between p-3 rounded-lg border border-slate-200 bg-slate-50">
-                <div className="font-semibold text-slate-800">TOTP 双因素认证（2FA）</div>
-                <span
-                  className={`px-2.5 py-1 rounded-full font-semibold text-[11px] ${
-                    user.totp_enabled
-                      ? 'bg-emerald-100 text-emerald-800 border border-emerald-200'
-                      : 'bg-slate-200 text-slate-700'
-                  }`}
-                >
-                  {user.totp_enabled ? '已启用 2FA' : '未启用'}
-                </span>
-              </div>
-
-              {recoveryCodes.length > 0 && (
-                <div className="p-3.5 rounded-lg border border-amber-300 bg-amber-50 space-y-2.5">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-semibold text-amber-950">
-                      一次性恢复码（仅展示一次，丢失验证器时可用于紧急登录）：
-                    </span>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        try {
-                          await navigator.clipboard.writeText(recoveryCodes.join('\n'))
-                          setCopiedRecovery(true)
-                          onToast('success', '已复制全部 8 个恢复码')
-                        } catch {
-                          onToast('info', '请手动记录下方恢复码')
-                        }
-                      }}
-                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-amber-700 hover:bg-amber-800 text-white font-medium"
-                    >
-                      {copiedRecovery ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />} 复制全部
-                    </button>
-                  </div>
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-                    {recoveryCodes.map((rc) => (
-                      <div
-                        key={rc}
-                        className="px-2 py-1.5 rounded bg-white border border-amber-200 font-mono text-center text-slate-900 select-all"
-                      >
-                        {rc}
+                      <div className="flex flex-wrap gap-1.5">
+                        {projects.map((p) => {
+                          const on = tokProjectIDs.includes(p.id)
+                          return (
+                            <label
+                              key={p.id}
+                              className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-md border cursor-pointer ${
+                                on ? 'border-sky-300 bg-sky-50' : 'border-line bg-surface hover:border-line-strong'
+                              }`}
+                            >
+                              <input type="checkbox" checked={on} onChange={() => toggleTokProject(p.id)} />
+                              <span className="text-[11px] text-fg">{p.name}</span>
+                            </label>
+                          )
+                        })}
                       </div>
-                    ))}
-                  </div>
-                </div>
-              )}
+                    </fieldset>
+                  )}
+                </form>
 
-              {!user.totp_enabled ? (
-                enrollment ? (
-                  <form onSubmit={handleConfirmTOTP} className="space-y-3 p-3.5 rounded-lg border border-slate-200 bg-white">
-                    <div className="font-semibold text-slate-800">步骤 1：在验证器 App 中添加账号密钥</div>
-                    <div className="space-y-2">
-                      <div>
-                        <div className="text-[11px] text-slate-500 mb-1">Base32 手动密钥（Secret）：</div>
-                        <div className="flex items-center gap-2">
-                          <code className="flex-1 px-2.5 py-1.5 rounded bg-slate-50 border border-slate-200 font-mono text-slate-900 select-all">
-                            {enrollment.secret}
-                          </code>
+                {newToken && (
+                  <div className="rounded-lg border border-emerald-300 bg-emerald-50 p-3 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-semibold text-emerald-800">
+                        {newToken.token.name}
+                        <span className="ml-2 font-normal text-emerald-700">明文仅显示一次</span>
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        {hasMCP(newToken.token) && (
                           <button
                             type="button"
-                            onClick={async () => {
-                              try {
-                                await navigator.clipboard.writeText(enrollment.secret)
-                                onToast('success', '已复制 Base32 密钥')
-                              } catch {
-                                onToast('info', '请手动复制密钥')
-                              }
+                            onClick={() => {
+                              setMcpTokenId(newToken.token.id)
+                              setTab('mcp')
                             }}
-                            className="px-2.5 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-50"
+                            className={btnSecondary}
                           >
-                            复制密钥
+                            MCP 配置 <ArrowRight className="w-3.5 h-3.5" />
                           </button>
-                        </div>
-                      </div>
-                      <div>
-                        <div className="text-[11px] text-slate-500 mb-1">otpauth:// 配置 URI：</div>
-                        <div className="px-2.5 py-1.5 rounded bg-slate-50 border border-slate-200 font-mono text-[11px] break-all text-slate-700 select-all">
-                          {enrollment.otpauth_url}
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="pt-2 border-t border-slate-200">
-                      <label htmlFor="tg-totp-confirm" className="block font-semibold text-slate-800 mb-1">
-                        步骤 2：输入验证器动态码以完成绑定
-                      </label>
-                      <p className="text-[11px] text-slate-500 mb-1.5">
-                        请输入验证器当前显示的 6 位数字动态验证码。
-                      </p>
-                      <div className="flex items-center gap-2 max-w-sm">
-                        <input
-                          id="tg-totp-confirm"
-                          type="text"
-                          inputMode="numeric"
-                          autoComplete="one-time-code"
-                          pattern="[0-9]*"
-                          maxLength={6}
-                          spellCheck={false}
-                          required
-                          value={totpConfirmCode}
-                          onChange={(e) => setTotpConfirmCode(e.target.value)}
-                          placeholder="6 位数字验证码"
-                          className="tg-tabular flex-1 px-3 py-1.5 border border-slate-300 rounded-md font-mono tracking-widest focus:border-sky-600 focus:outline-none"
-                        />
+                        )}
                         <button
-                          type="submit"
-                          disabled={totpBusy}
-                          className="px-3.5 py-1.5 rounded-md bg-sky-600 hover:bg-sky-700 text-white font-medium disabled:opacity-50"
+                          type="button"
+                          onClick={() => void copy('new-token', newToken.plaintext)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-solid text-white font-medium"
                         >
-                          {totpBusy ? '验证中...' : '确认启用'}
+                          {copied === 'new-token' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} 复制
                         </button>
                       </div>
                     </div>
-                  </form>
+                    <code className="block font-mono text-[11px] break-all bg-surface border border-emerald-200 rounded px-2 py-1.5 text-fg select-all">
+                      {newToken.plaintext}
+                    </code>
+                  </div>
+                )}
+
+                {loadingTokens && tokens.length === 0 ? (
+                  <p className="text-fg-subtle">正在加载令牌…</p>
+                ) : tokens.length === 0 ? (
+                  <p className="text-fg-subtle">暂无 API 令牌</p>
                 ) : (
-                  <div className="p-4 rounded-lg border border-dashed border-slate-300 bg-slate-50/70 space-y-2.5">
-                    <p className="text-slate-600 leading-relaxed">
-                      启用双因素认证后，Web 控制台登录除用户名密码外还需提供 6 位 TOTP 动态码（不影响已签发的 Bearer API 令牌自动化调用）。
-                    </p>
+                  <ul className="rounded-lg border border-line divide-y divide-line">
+                    {tokens.map((t) => {
+                      const expired = isExpired(t)
+                      return (
+                        <li key={t.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span className={`font-medium ${expired ? 'text-fg-subtle line-through' : 'text-fg'}`}>
+                                {t.name}
+                              </span>
+                              <span className={`${badge} font-mono bg-surface-subtle text-fg-muted border-line`}>
+                                {t.prefix}…
+                              </span>
+                              <span className={`${badge} font-mono bg-sky-50 text-sky-700 border-sky-200`}>{t.role}</span>
+                              {t.scopes && t.scopes.length > 0 ? (
+                                t.scopes.map((sc) => (
+                                  <span key={sc} className={`${badge} font-mono bg-indigo-50 text-indigo-700 border-indigo-200`}>
+                                    {sc}
+                                  </span>
+                                ))
+                              ) : (
+                                <span className={`${badge} bg-surface-subtle text-fg-muted border-line`}>全部 Scope</span>
+                              )}
+                              {t.mcp_tools && t.mcp_tools.length > 0 && (
+                                <span
+                                  title={t.mcp_tools.join('\n')}
+                                  className={`${badge} bg-violet-50 text-violet-700 border-violet-200`}
+                                >
+                                  <SlidersHorizontal className="w-3 h-3" />
+                                  MCP 限定 <span className="tg-tabular">{t.mcp_tools.length}</span>
+                                </span>
+                              )}
+                              {t.project_ids && t.project_ids.length > 0 && (
+                                <span className={`${badge} bg-amber-50 text-amber-800 border-amber-200`}>
+                                  项目 <span className="tg-tabular">{t.project_ids.length}</span>
+                                </span>
+                              )}
+                              {expired && <span className={`${badge} bg-rose-50 text-rose-700 border-rose-200`}>已过期</span>}
+                            </div>
+                            <div className="tg-tabular text-[11px] text-fg-subtle mt-0.5">
+                              创建 {new Date(t.created_at).toLocaleString()}
+                              {t.expires_at ? ` · 过期 ${new Date(t.expires_at).toLocaleDateString()}` : ' · 长期有效'}
+                              {t.last_used_at ? ` · 最近使用 ${new Date(t.last_used_at).toLocaleString()}` : ''}
+                            </div>
+                          </div>
+                          {dangerBtn(`token:${t.id}`, '吊销', '确认吊销？', () => void handleRevokeToken(t))}
+                        </li>
+                      )
+                    })}
+                  </ul>
+                )}
+              </div>
+            )}
+
+            {/* ================= MCP ================= */}
+            {tab === 'mcp' && (
+              <div className="space-y-3">
+                <div className="flex flex-wrap items-center gap-2">
+                  <div role="radiogroup" aria-label="传输方式" className="inline-flex rounded-lg border border-line bg-surface-subtle p-0.5">
+                    {(
+                      [
+                        ['http', 'Streamable HTTP'],
+                        ['stdio', 'CLI Stdio'],
+                      ] as const
+                    ).map(([id, label]) => (
+                      <button
+                        key={id}
+                        type="button"
+                        role="radio"
+                        aria-checked={mcpMode === id}
+                        onClick={() => setMcpMode(id)}
+                        className={`px-3 py-1 rounded-md font-medium ${
+                          mcpMode === id ? 'bg-surface text-fg shadow-xs' : 'text-fg-muted hover:text-fg'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+                  <label className="flex items-center gap-1.5 flex-1 min-w-[14rem]">
+                    <span className="text-fg-muted shrink-0">令牌</span>
+                    <select
+                      value={selectedMcpToken?.id || ''}
+                      onChange={(e) => setMcpTokenId(e.target.value)}
+                      disabled={mcpTokens.length === 0}
+                      className={`${inputCls} flex-1 min-w-0 font-mono disabled:opacity-60`}
+                    >
+                      {mcpTokens.length === 0 && <option value="">{loadingTokens ? '加载中…' : '无可用 MCP 令牌'}</option>}
+                      {mcpTokens.map((t) => (
+                        <option key={t.id} value={t.id}>
+                          {t.name} · {t.prefix}… · {t.role}
+                          {plaintexts[t.id] ? ' · 新' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface-subtle px-3 py-2">
+                  <span className="text-fg-muted">新建令牌</span>
+                  {user.role !== 'viewer' && (
+                    <div role="radiogroup" aria-label="权限" className="inline-flex rounded-md border border-line bg-surface p-0.5">
+                      {(
+                        [
+                          [false, '只读'],
+                          [true, '读写'],
+                        ] as const
+                      ).map(([rw, label]) => (
+                        <button
+                          key={label}
+                          type="button"
+                          role="radio"
+                          aria-checked={mcpQuickRW === rw}
+                          onClick={() => setMcpQuickRW(rw)}
+                          className={`px-2 py-0.5 rounded font-medium ${
+                            mcpQuickRW === rw ? 'bg-sky-50 text-sky-700' : 'text-fg-muted hover:text-fg'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                  <button
+                    type="button"
+                    disabled={creatingTok}
+                    onClick={() => void handleQuickMCPToken()}
+                    className={`ml-auto ${mcpTokens.length === 0 ? btnPrimary : btnSecondary}`}
+                  >
+                    <Plus className="w-3.5 h-3.5" /> {creatingTok ? '生成中…' : '生成'}
+                  </button>
+                </div>
+
+                <div className="rounded-lg border tg-code-surface overflow-hidden">
+                  <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-white/10">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className="font-mono text-[11px] text-slate-400 truncate">mcp_config.json</span>
+                      {selectedMcpToken &&
+                        (mcpPlaintext ? (
+                          <span className="px-1.5 py-0.5 rounded text-[11px] bg-emerald-400/15 text-emerald-300">
+                            已填入明文 · 仅本次可见
+                          </span>
+                        ) : (
+                          <span className="px-1.5 py-0.5 rounded text-[11px] bg-amber-400/15 text-amber-300">
+                            需替换为令牌明文
+                          </span>
+                        ))}
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => void copy('mcp', mcpSnippet)}
+                      className="inline-flex items-center gap-1 px-2 py-1 rounded text-slate-200 hover:bg-white/10"
+                    >
+                      <CopyIcon done={copied === 'mcp'} /> 复制
+                    </button>
+                  </div>
+                  <pre className="p-3.5 font-mono text-[11px] leading-relaxed text-sky-100 overflow-x-auto tg-scroller-dark">
+                    {mcpSnippet}
+                  </pre>
+                </div>
+              </div>
+            )}
+
+            {/* ================= TOTP ================= */}
+            {tab === 'totp' && (
+              <div className="space-y-4">
+                <div className="flex items-center justify-between">
+                  <h3 className="font-semibold text-fg">TOTP 双因素认证</h3>
+                  <span
+                    className={`${badge} rounded-full px-2 font-semibold ${
+                      user.totp_enabled
+                        ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
+                        : 'bg-surface-subtle text-fg-muted border-line'
+                    }`}
+                  >
+                    {user.totp_enabled ? '已启用' : '未启用'}
+                  </span>
+                </div>
+
+                {recoveryCodes.length > 0 && (
+                  <div className="rounded-lg border border-amber-300 bg-amber-50 p-3 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-semibold text-amber-900">恢复码 · 仅显示一次</span>
+                      <div className="flex items-center gap-1.5">
+                        <button type="button" onClick={downloadRecovery} className={btnSecondary}>
+                          <Download className="w-3.5 h-3.5" /> 下载 .txt
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void copy('recovery', recoveryCodes.join('\n'))}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md bg-amber-600 hover:bg-amber-solid text-white font-medium"
+                        >
+                          {copied === 'recovery' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} 复制全部
+                        </button>
+                      </div>
+                    </div>
+                    <ol className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {recoveryCodes.map((rc) => (
+                        <li
+                          key={rc}
+                          className="tg-tabular px-2 py-1.5 rounded bg-surface border border-amber-200 font-mono text-center text-fg select-all"
+                        >
+                          {rc}
+                        </li>
+                      ))}
+                    </ol>
+                  </div>
+                )}
+
+                {!user.totp_enabled ? (
+                  enrollment ? (
+                    <div className="grid sm:grid-cols-[auto_1fr] gap-5 rounded-lg border border-line p-4">
+                      <figure className="justify-self-center sm:justify-self-start">
+                        {qrSrc ? (
+                          <img
+                            src={qrSrc}
+                            width={184}
+                            height={184}
+                            alt="验证器绑定二维码"
+                            className="block rounded-md border border-line bg-white [image-rendering:pixelated]"
+                          />
+                        ) : (
+                          <div className="w-[184px] h-[184px] grid place-items-center rounded-md border border-dashed border-line text-fg-subtle">
+                            使用右侧密钥手动添加
+                          </div>
+                        )}
+                      </figure>
+
+                      <div className="min-w-0 space-y-4">
+                        <div>
+                          <div className="text-[11px] text-fg-muted mb-1">Base32 密钥</div>
+                          <div className="flex items-center gap-2">
+                            <code className="flex-1 min-w-0 px-2.5 py-1.5 rounded-md bg-surface-subtle border border-line font-mono tracking-wider text-fg break-all select-all">
+                              {enrollment.secret.replace(/(.{4})(?=.)/g, '$1 ')}
+                            </code>
+                            <button
+                              type="button"
+                              onClick={() => void copy('secret', enrollment.secret)}
+                              aria-label="复制密钥"
+                              className={btnSecondary}
+                            >
+                              <CopyIcon done={copied === 'secret'} /> 复制
+                            </button>
+                          </div>
+                          <details className="mt-1.5 group">
+                            <summary className="cursor-pointer text-[11px] text-fg-subtle hover:text-fg-muted select-none">
+                              otpauth URI
+                            </summary>
+                            <div className="mt-1 flex items-start gap-2">
+                              <code className="flex-1 min-w-0 px-2 py-1 rounded bg-surface-subtle border border-line font-mono text-[11px] text-fg-muted break-all select-all">
+                                {enrollment.otpauth_url}
+                              </code>
+                              <button
+                                type="button"
+                                onClick={() => void copy('otpauth', enrollment.otpauth_url)}
+                                aria-label="复制 otpauth URI"
+                                className="p-1.5 rounded-md border border-line hover:bg-surface-hover text-fg-muted"
+                              >
+                                <CopyIcon done={copied === 'otpauth'} />
+                              </button>
+                            </div>
+                          </details>
+                        </div>
+
+                        <form onSubmit={handleConfirmTOTP} className="pt-3 border-t border-line">
+                          <label htmlFor="tg-totp-confirm" className="block text-[11px] text-fg-muted mb-1">
+                            6 位验证码
+                          </label>
+                          <div className="flex items-center gap-2">
+                            <input
+                              id="tg-totp-confirm"
+                              name="totp-code"
+                              type="text"
+                              inputMode="numeric"
+                              autoComplete="one-time-code"
+                              autoCorrect="off"
+                              autoCapitalize="none"
+                              pattern="[0-9]{6}"
+                              maxLength={6}
+                              spellCheck={false}
+                              required
+                              value={totpConfirmCode}
+                              onChange={(e) => setTotpConfirmCode(e.target.value.replace(/\D/g, ''))}
+                              placeholder="000000"
+                              className={`${inputCls} tg-tabular w-36 font-mono text-sm tracking-[0.3em]`}
+                            />
+                            <button type="submit" disabled={totpBusy || totpConfirmCode.length !== 6} className={btnPrimary}>
+                              {totpBusy ? '验证中…' : '确认启用'}
+                            </button>
+                            <button type="button" onClick={() => setEnrollment(null)} className={btnSecondary}>
+                              取消
+                            </button>
+                          </div>
+                        </form>
+                      </div>
+                    </div>
+                  ) : (
                     <button
                       type="button"
                       disabled={totpBusy}
                       onClick={() => void handleStartEnrollTOTP()}
-                      className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-[#0B2A4A] hover:bg-[#123862] text-white font-medium disabled:opacity-50"
+                      className={btnPrimary}
                     >
-                      <ShieldCheck className="w-3.5 h-3.5" /> {totpBusy ? '生成中...' : '开始绑定验证器'}
+                      <ShieldCheck className="w-3.5 h-3.5" /> {totpBusy ? '生成中…' : '绑定验证器'}
                     </button>
-                  </div>
-                )
-              ) : (
-                <form onSubmit={handleDisableTOTP} className="space-y-3 p-3.5 rounded-lg border border-slate-200 bg-white max-w-md">
-                  <div className="font-semibold text-slate-800">停用双因素认证（2FA）</div>
-                  <div>
-                    <label htmlFor="tg-totp-disable-pwd" className="block font-medium text-slate-700 mb-1">
-                      当前登录密码
-                    </label>
-                    <input
-                      id="tg-totp-disable-pwd"
-                      type="password"
-                      required
-                      value={disablePwd}
-                      onChange={(e) => setDisablePwd(e.target.value)}
-                      className="w-full px-3 py-1.5 border border-slate-300 rounded-md focus:border-sky-500 focus:outline-none"
-                    />
-                  </div>
-                  <div>
-                    <label htmlFor="tg-totp-disable-code" className="block font-medium text-slate-700 mb-1">
-                      当前动态验证码或恢复码
-                    </label>
-                    <p className="text-[11px] text-slate-500 mb-1">
-                      输入当前 6 位动态验证码或任意一个尚未使用的 8 位恢复码（XXXX-XXXX）。
-                    </p>
-                    <input
-                      id="tg-totp-disable-code"
-                      type="text"
-                      inputMode="numeric"
-                      autoComplete="one-time-code"
-                      pattern="[0-9A-Za-z-]*"
-                      maxLength={12}
-                      spellCheck={false}
-                      required
-                      value={disableCode}
-                      onChange={(e) => setDisableCode(e.target.value)}
-                      placeholder="6 位数字验证码或 XXXX-XXXX"
-                      className="tg-tabular w-full px-3 py-1.5 border border-slate-300 rounded-md font-mono tracking-wider focus:border-sky-500 focus:outline-none"
-                    />
-                  </div>
-                  <button
-                    type="submit"
-                    disabled={totpBusy}
-                    className="px-3.5 py-1.5 rounded-md border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-800 font-medium disabled:opacity-50"
-                  >
-                    {totpBusy ? '处理中...' : '停用 2FA'}
-                  </button>
-                </form>
-              )}
-            </div>
-          )}
+                  )
+                ) : (
+                  <form onSubmit={handleDisableTOTP} className="rounded-lg border border-line p-4 max-w-md">
+                    <fieldset className="space-y-3">
+                      <legend className="font-semibold text-fg mb-2">停用 2FA</legend>
+                      <div>
+                        <label htmlFor="tg-totp-disable-pwd" className="block text-[11px] text-fg-muted mb-1">
+                          当前密码
+                        </label>
+                        <input
+                          id="tg-totp-disable-pwd"
+                          name="current-password"
+                          type="password"
+                          autoComplete="current-password"
+                          required
+                          value={disablePwd}
+                          onChange={(e) => setDisablePwd(e.target.value)}
+                          className={`${inputCls} w-full`}
+                        />
+                      </div>
+                      <div>
+                        <label htmlFor="tg-totp-disable-code" className="block text-[11px] text-fg-muted mb-1">
+                          验证码或恢复码
+                        </label>
+                        <input
+                          id="tg-totp-disable-code"
+                          name="totp-code"
+                          type="text"
+                          inputMode="numeric"
+                          autoComplete="one-time-code"
+                          autoCorrect="off"
+                          autoCapitalize="none"
+                          pattern="[0-9A-Za-z-]*"
+                          maxLength={12}
+                          spellCheck={false}
+                          required
+                          value={disableCode}
+                          onChange={(e) => setDisableCode(e.target.value)}
+                          placeholder="000000 或 XXXX-XXXX"
+                          className={`${inputCls} tg-tabular w-full font-mono tracking-wider`}
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={totpBusy}
+                        className="px-3 py-1.5 rounded-md border border-rose-300 bg-rose-50 hover:bg-rose-100 text-rose-700 font-medium disabled:opacity-50"
+                      >
+                        {totpBusy ? '处理中…' : '停用 2FA'}
+                      </button>
+                    </fieldset>
+                  </form>
+                )}
+              </div>
+            )}
 
-          {tab === 'mcp' && (
-            <div className="space-y-3 text-xs">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <div className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5">
-                  <button
-                    type="button"
-                    onClick={() => setMcpMode('http')}
-                    className={`px-3 py-1 rounded-md font-medium ${
-                      mcpMode === 'http' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
-                    }`}
-                  >
-                    Streamable HTTP
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => setMcpMode('stdio')}
-                    className={`px-3 py-1 rounded-md font-medium ${
-                      mcpMode === 'stdio' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
-                    }`}
-                  >
-                    CLI Stdio
-                  </button>
+            {/* ================= Password ================= */}
+            {tab === 'password' && (
+              <form onSubmit={handleChangePwd} className="space-y-3 max-w-sm">
+                <input type="text" name="username" autoComplete="username" value={user.username} readOnly hidden />
+                <div>
+                  <label htmlFor="tg-pwd-current" className="block text-[11px] text-fg-muted mb-1">
+                    当前密码
+                  </label>
+                  <input
+                    id="tg-pwd-current"
+                    name="current-password"
+                    type="password"
+                    autoComplete="current-password"
+                    required
+                    value={curPwd}
+                    onChange={(e) => setCurPwd(e.target.value)}
+                    className={`${inputCls} w-full`}
+                  />
                 </div>
-
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <button
-                    type="button"
-                    disabled={creatingTok}
-                    onClick={() => void handleQuickMCPToken(true)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-medium disabled:opacity-50"
-                  >
-                    <Plus className="w-3.5 h-3.5 text-sky-600" /> 生成只读 MCP 令牌
-                  </button>
-                  {user.role !== 'viewer' && (
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <label htmlFor="tg-pwd-new" className="text-[11px] text-fg-muted">
+                      新密码
+                    </label>
+                    <span
+                      className={`tg-tabular text-[11px] ${newPwd.length >= 10 ? 'text-emerald-600' : 'text-fg-subtle'}`}
+                    >
+                      {newPwd.length}/10
+                    </span>
+                  </div>
+                  <div className="relative">
+                    <input
+                      id="tg-pwd-new"
+                      name="new-password"
+                      type={showPwd ? 'text' : 'password'}
+                      autoComplete="new-password"
+                      minLength={10}
+                      required
+                      value={newPwd}
+                      onChange={(e) => setNewPwd(e.target.value)}
+                      className={`${inputCls} w-full pr-8`}
+                    />
                     <button
                       type="button"
-                      disabled={creatingTok}
-                      onClick={() => void handleQuickMCPToken(false)}
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-sky-300 bg-sky-50 hover:bg-sky-100 text-sky-800 font-medium disabled:opacity-50"
+                      aria-pressed={showPwd}
+                      aria-label={showPwd ? '隐藏密码' : '显示密码'}
+                      onClick={() => setShowPwd((v) => !v)}
+                      className="absolute right-1.5 top-1/2 -translate-y-1/2 p-1 rounded text-fg-subtle hover:text-fg"
                     >
-                      <Plus className="w-3.5 h-3.5" /> 生成读写 MCP 令牌
+                      {showPwd ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
                     </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      try {
-                        await navigator.clipboard.writeText(activeSnippet)
-                        setCopiedMcp(true)
-                        onToast('success', '已复制 mcp_config.json 配置片段')
-                      } catch {
-                        onToast('info', '请手动复制下方 JSON 配置')
-                      }
-                    }}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-[#0B2A4A] hover:bg-[#123862] text-white font-medium"
-                  >
-                    {copiedMcp ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} 复制 JSON
-                  </button>
+                  </div>
                 </div>
-              </div>
+                <div>
+                  <label htmlFor="tg-pwd-confirm" className="block text-[11px] text-fg-muted mb-1">
+                    确认新密码
+                  </label>
+                  <input
+                    id="tg-pwd-confirm"
+                    name="confirm-password"
+                    type={showPwd ? 'text' : 'password'}
+                    autoComplete="new-password"
+                    required
+                    value={confirmPwd}
+                    onChange={(e) => setConfirmPwd(e.target.value)}
+                    aria-invalid={confirmPwd.length > 0 && confirmPwd !== newPwd}
+                    className={`${inputCls} w-full ${
+                      confirmPwd.length > 0 && confirmPwd !== newPwd ? 'border-rose-400 focus:border-rose-500' : ''
+                    }`}
+                  />
+                </div>
+                <button type="submit" disabled={savingPwd} className={btnPrimary}>
+                  {savingPwd ? '保存中…' : '修改密码'}
+                </button>
+              </form>
+            )}
 
-              <pre className="p-3.5 rounded-lg bg-[#07192E] text-sky-100 font-mono text-[11px] overflow-x-auto tg-scroller-dark border border-slate-800">
-                {activeSnippet}
-              </pre>
-            </div>
-          )}
+            {/* ================= Appearance ================= */}
+            {tab === 'appearance' && (
+              <fieldset>
+                <legend className="font-semibold text-fg mb-3">外观</legend>
+                <div className="grid grid-cols-3 gap-3 max-w-xl">
+                  {(
+                    [
+                      { id: 'system', label: '跟随系统', icon: Monitor },
+                      { id: 'light', label: '浅色', icon: Sun },
+                      { id: 'dark', label: '深色', icon: Moon },
+                    ] as { id: SchemePreference; label: string; icon: typeof Monitor }[]
+                  ).map((opt) => {
+                    const Icon = opt.icon
+                    const selected = scheme.preference === opt.id
+                    return (
+                      <label
+                        key={opt.id}
+                        className={`group relative flex flex-col gap-2 rounded-lg border p-2 cursor-pointer transition-colors has-[:focus-visible]:ring-2 has-[:focus-visible]:ring-sky-400 ${
+                          selected ? 'border-tidal ring-1 ring-tidal' : 'border-line hover:border-line-strong'
+                        }`}
+                      >
+                        <input
+                          type="radio"
+                          name="tg-color-scheme"
+                          value={opt.id}
+                          checked={selected}
+                          onChange={() => setPreference(opt.id)}
+                          className="sr-only"
+                        />
+                        <SchemePreview kind={opt.id} />
+                        <span className="flex items-center gap-1.5 font-medium text-fg">
+                          <Icon className="w-3.5 h-3.5" />
+                          {opt.label}
+                          {selected && <Check className="w-3.5 h-3.5 ml-auto text-tidal" />}
+                        </span>
+                        {opt.id === 'system' && (
+                          <span className="text-[11px] text-fg-subtle -mt-1">
+                            当前{systemScheme === 'dark' ? '深色' : '浅色'}
+                          </span>
+                        )}
+                      </label>
+                    )
+                  })}
+                </div>
+              </fieldset>
+            )}
+          </div>
 
-          {tab === 'password' && (
-            <form onSubmit={handleChangePwd} className="space-y-3 text-xs max-w-sm">
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">当前密码</label>
-                <input
-                  type="password"
-                  required
-                  value={curPwd}
-                  onChange={(e) => setCurPwd(e.target.value)}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-md focus:border-sky-500 focus:outline-none"
-                />
-              </div>
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">新密码（至少 10 个字符）</label>
-                <input
-                  type="password"
-                  required
-                  value={newPwd}
-                  onChange={(e) => setNewPwd(e.target.value)}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-md focus:border-sky-500 focus:outline-none"
-                />
-              </div>
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">确认新密码</label>
-                <input
-                  type="password"
-                  required
-                  value={confirmPwd}
-                  onChange={(e) => setConfirmPwd(e.target.value)}
-                  className="w-full px-3 py-1.5 border border-slate-300 rounded-md focus:border-sky-500 focus:outline-none"
-                />
-              </div>
-              <button
-                type="submit"
-                disabled={savingPwd}
-                className="px-4 py-2 rounded-md bg-sky-600 hover:bg-sky-700 text-white font-medium disabled:opacity-50"
-              >
-                {savingPwd ? '保存中...' : '确认修改密码'}
-              </button>
-            </form>
-          )}
-        </div>
+          <footer className="px-5 py-3 border-t border-line bg-surface-subtle flex items-center justify-between text-xs">
+            <button
+              type="button"
+              onClick={() => void handleLogout()}
+              className="inline-flex items-center gap-1.5 text-rose-600 hover:text-rose-700 font-medium"
+            >
+              <LogOut className="w-3.5 h-3.5" /> 退出登录
+            </button>
+            <button type="button" onClick={onClose} className={btnSecondary}>
+              关闭
+            </button>
+          </footer>
+        </>
+      )}
+    </dialog>
+  )
+}
 
-        <div className="px-5 py-3 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-xs">
-          <button
-            type="button"
-            onClick={async () => {
-              try {
-                await api.logout()
-              } catch {
-                // ignore
-              }
-              onLoggedOut()
-              onClose()
-            }}
-            className="inline-flex items-center gap-1.5 text-rose-600 hover:text-rose-700 font-medium"
-          >
-            <LogOut className="w-3.5 h-3.5" /> 退出当前账号
-          </button>
-          <button
-            type="button"
-            onClick={onClose}
-            className="px-3 py-1.5 rounded-md border border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
-          >
-            关闭
-          </button>
-        </div>
+/** Tiny fixed-colour UI mock; intentionally not theme-adaptive so each card shows its own scheme. */
+function SchemePreview({ kind }: { kind: SchemePreference }) {
+  const pane = (dark: boolean) => (
+    <div className={`h-full flex ${dark ? 'bg-[#090d16]' : 'bg-[#eef2f7]'}`}>
+      <div className="w-1/4 bg-[#0b2a4a]" />
+      <div className="flex-1 p-1.5 space-y-1">
+        <div className={`h-1.5 w-3/4 rounded-sm ${dark ? 'bg-[#2a3548]' : 'bg-[#cbd5e1]'}`} />
+        <div className={`h-6 rounded-sm border ${dark ? 'bg-[#0f1623] border-[#1e293b]' : 'bg-[#ffffff] border-[#e2e8f0]'}`} />
+        <div className="h-1.5 w-1/3 rounded-sm bg-[#0284c7]" />
       </div>
+    </div>
+  )
+  return (
+    <div aria-hidden className="h-16 rounded-md overflow-hidden border border-line" style={{ colorScheme: 'normal' }}>
+      {kind === 'system' ? (
+        <div className="grid grid-cols-2 h-full">
+          <div className="overflow-hidden">{pane(false)}</div>
+          <div className="overflow-hidden">{pane(true)}</div>
+        </div>
+      ) : (
+        pane(kind === 'dark')
+      )}
     </div>
   )
 }
