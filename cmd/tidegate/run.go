@@ -40,7 +40,7 @@ func cmdRun(args []string, stdout, stderr io.Writer) int {
 	htmlPath := fs.String("html", "", "写出独立 HTML 报告")
 	jtlPath := fs.String("jtl", "", "写出 JMeter JTL 日志文件")
 	quiet := fs.Bool("quiet", false, "不输出每秒摘要")
-	client := fs.String("client", string(engine.ClientFast), "HTTP 客户端：fast 或 std")
+	client := fs.String("client", envOr("TIDEGATE_CLIENT", string(engine.ClientFast)), "HTTP 客户端：fast 或 std")
 	startProfiles := profileFlags(fs)
 	memProfile := fs.String("memprofile", "", "结束时写出堆内存分析文件（pprof）")
 	pos, err := parseArgs(fs, args)

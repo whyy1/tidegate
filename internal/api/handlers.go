@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -46,7 +48,7 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"setup_required": pending,
 		"version":        s.opts.Version,
-		"tls":            s.opts.TLS,
+		"tls":            s.guard.IsSecureRequest(r),
 	})
 }
 
@@ -64,7 +66,7 @@ func (s *Server) handleSetup(w http.ResponseWriter, r *http.Request) {
 		Code:       body.Code,
 		Username:   body.Username,
 		Password:   body.Password,
-		RemoteAddr: r.RemoteAddr,
+		RemoteAddr: s.guard.ClientAddr(r),
 		UserAgent:  r.UserAgent(),
 	})
 	if err != nil {
@@ -93,7 +95,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Username:   body.Username,
 		Password:   body.Password,
 		TOTPCode:   body.TOTPCode,
-		RemoteAddr: r.RemoteAddr,
+		RemoteAddr: s.guard.ClientAddr(r),
 		UserAgent:  r.UserAgent(),
 	})
 	if err != nil {
@@ -150,7 +152,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		CurrentPassword: body.CurrentPassword,
 		NewPassword:     body.NewPassword,
 		KeepSessionID:   keepID,
-		RemoteAddr:      r.RemoteAddr,
+		RemoteAddr:      s.guard.ClientAddr(r),
 	}); err != nil {
 		writeError(w, err)
 		return
@@ -1469,13 +1471,39 @@ func (s *Server) handleRunHistogram(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (s *Server) handleSystemInfo(w http.ResponseWriter, _ *http.Request) {
-	writeJSON(w, http.StatusOK, map[string]any{
+func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
+	clusterAddr := strings.TrimSpace(s.opts.ClusterPublicAddr)
+	if clusterAddr == "" {
+		clusterAddr = s.ctrl.ClusterAddr()
+		if host, port, err := net.SplitHostPort(clusterAddr); err == nil && (host == "" || host == "0.0.0.0" || host == "::") {
+			extHost := ""
+			if strings.TrimSpace(s.opts.PublicURL) != "" {
+				if u, perr := url.Parse(strings.TrimSpace(s.opts.PublicURL)); perr == nil && u.Hostname() != "" {
+					extHost = u.Hostname()
+				}
+			}
+			if extHost == "" && strings.TrimSpace(r.Host) != "" {
+				if h, _, herr := net.SplitHostPort(r.Host); herr == nil && h != "" {
+					extHost = h
+				} else {
+					extHost = strings.Trim(r.Host, "[]")
+				}
+			}
+			if extHost != "" {
+				clusterAddr = net.JoinHostPort(extHost, port)
+			}
+		}
+	}
+	res := map[string]any{
 		"version":                s.opts.Version,
-		"tls":                    s.opts.TLS,
-		"cluster_addr":           s.ctrl.ClusterAddr(),
+		"tls":                    s.guard.IsSecureRequest(r),
+		"cluster_addr":           clusterAddr,
 		"cluster_ca_fingerprint": s.ctrl.ClusterCAFingerprint(),
-	})
+	}
+	if strings.TrimSpace(s.opts.PublicURL) != "" {
+		res["public_url"] = strings.TrimSpace(s.opts.PublicURL)
+	}
+	writeJSON(w, http.StatusOK, res)
 }
 
 func (s *Server) handleDiscoverGRPC(w http.ResponseWriter, r *http.Request) {

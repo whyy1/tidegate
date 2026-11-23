@@ -5,151 +5,136 @@
   </picture>
 </p>
 
-<p align="center">本地优先的 API 管理与分布式压测一体化平台（含安全 MCP 智能体接入）</p>
+<p align="center">本地优先的 API 调试、功能回归与分布式压测控制台（内置安全 MCP 2.0 网关）</p>
+
+<p align="center">
+  <a href="docs/install.md"><strong>安装与环境变量配置</strong></a> ·
+  <a href="docs/user-guide.md"><strong>完整使用教程</strong></a> ·
+  <a href="docs/product-plan.md"><strong>产品架构白皮书</strong></a> ·
+  <a href="#产品界面预览"><strong>界面预览</strong></a> ·
+  <a href="#性能实测对比-vs-k6"><strong>性能对比（vs k6）</strong></a>
+</p>
 
 ---
 
-Tidegate 把接口管理和压测放进同一个工具：在双轴 IDE 风格工作台里管理接口、分屏调试、编排场景，然后直接发起单机或多机分布式压测，同时观测实时图表和发压机自身的硬件与网卡瓶颈；也可通过内置的安全 MCP Server 让 AI 编程助手协作诊断压测报告与编排接口。
+Tidegate 把接口管理、多协议调试、场景编排与高并发分布式压测合并进单一原生二进制：接口定义以 YAML 落盘，调试、批量回归与压测直接共用同一套定义；控制台与发压引擎分进程隔离，发压机饱和时自动捕获硬件瓶颈告警；并通过纯 Go MCP 2.0 服务网关向 AI 助手开放受 RBAC、项目 ACL、Scope 与压测上限保护的协作能力。
 
-数据都在你自己的机器上，不需要云端账号，不加载任何远程代码。
+## 产品界面预览
 
-## 名字的由来
+| 接口工作台与多协议调试 | 场景编排与控制流 |
+| :---: | :---: |
+| ![Tidegate 接口工作台](assets/screenshots/workbench.png) | ![Tidegate 场景编排](assets/screenshots/scenarios.png) |
 
-Tidegate 是潮汐闸门的意思。
+| 实时压测大盘与硬件遥测 | 系统治理与 MCP 客户端接入 |
+| :---: | :---: |
+| ![Tidegate 实时压测](assets/screenshots/live-run.png) | ![Tidegate 治理与 MCP 接入](assets/screenshots/governance-mcp.png) |
 
-压测的流量像潮水，有涨有落：爬坡是涨潮，保持是满潮，下降是退潮。闸门决定放多少水过去、什么时候放。Tidegate 做的就是这件事：按你设定的节奏把流量放向被测系统，再量出它能承受多大的潮。
+---
 
-logo 是一道抬起的闸门，形状正好是字母 T，潮水从闸下流过。
+## 性能实测对比 vs k6
 
-## 它解决什么问题
+以下数据在本机启用 `--split-cpu`（被测服务与发压端各固定隔离一半逻辑核）直接对比实测获得，详见 [bench/harness](bench/harness/main.go)：
 
-- **接口管理和压测不用再换工具。** 接口定义只有一份，调试、场景、压测都引用它，接口改了场景自动跟着变。在接口页面可以一键发起压测。
-- **压测时界面不卡。** 界面和发压引擎是两个进程，引擎只上报每秒聚合后的指标，把 CPU 打满也不影响界面操作。
-- **知道瓶颈在哪一边。** 实时显示每台发压机的带宽占用、CPU、内存和端口。发压机自己成为瓶颈时给出告警，并把这段结果标记为不可信。
-- **单机不够就加机器。** 内置分布式集群，在其他机器上运行一条命令就能加入，多机合并发压，指标自动合并。
-- **AI 助手安全可审计介入。** 内置纯 Go MCP Server，强制 RBAC 权限隔离、Vault 密钥零出域、SSRF 白名单校验与单次压测规模硬护栏。
+- **硬件与环境**：Intel(R) Core(TM) i9-14900KF（32 逻辑处理器），64 GB RAM，Windows 10.0.26100，`go1.26.0`
+- **对比对象**：`tidegate-fast`、`tidegate-std` vs `k6 v2.3.0 (commit/e088784614, go1.26.8, windows/amd64)`
+- **评测口径**：每组稳态保持 `15s`；超过 200 VUs 先以 200 VUs/s 爬坡，Open-loop 先经过 `2s` 预热；全程值含爬坡/预热，“稳态”列仅统计稳定期整秒。
 
-## 功能
+| 测试场景 | 对象 | 并发 / 目标 | 稳态 RPS | 全程 RPS | P50 (ms) | P99 (ms) | 稳态 P99 (ms) | 错误数 | 峰值工作集内存 | 发压 CPU（核） |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| **HTTP/1.1** (`100 VUs`) | `tidegate-fast` | 100 VUs | **265,516** | **265,490** | **0.338** | **1.395** | **1.187** | 0 | **37.3 MB** | 15.23 |
+| **HTTP/1.1** (`100 VUs`) | `tidegate-std` | 100 VUs | 199,851 | 199,822 | 0.354 | 3.681 | 3.565 | 0 | 45.0 MB | 14.22 |
+| **HTTP/1.1** (`100 VUs`) | `k6 v2.3.0` | 100 VUs | - | 171,110 | 0.522 | 1.842 | - | 0 | 598.9 MB | 14.96 |
+| **HTTP/1.1** (`1000 VUs`) | `tidegate-fast` | 1,000 VUs | **211,029** | **184,923** | **3.649** | 28.991 | 28.399 | 0 | **58.2 MB** | 15.42 |
+| **HTTP/1.1** (`1000 VUs`) | `tidegate-std` | 1,000 VUs | 210,823 | 172,267 | 4.065 | **21.679** | **11.111** | 0 | 107.4 MB | 15.18 |
+| **HTTP/1.1** (`1000 VUs`) | `k6 v2.3.0` | 1,000 VUs | - | 98,476 | 5.324 | 34.906 | - | 0 | 750.9 MB | 15.17 |
+| **HTTPS TLS** (`100 VUs`) | `tidegate-fast` | 100 VUs | **207,752** | **207,614** | **0.332** | 6.167 | **1.253** | 0 | **44.5 MB** | 15.34 |
+| **HTTPS TLS** (`100 VUs`) | `tidegate-std` | 100 VUs | 152,585 | 152,473 | 0.353 | 4.459 | 4.703 | 0 | 48.9 MB | 14.63 |
+| **HTTPS TLS** (`100 VUs`) | `k6 v2.3.0` | 100 VUs | - | 158,350 | 0.519 | **3.677** | - | 0 | 598.8 MB | 15.06 |
+| **Open-loop 50k RPS** | `tidegate-std` | 50,000/s | **49,999** | 47,028 | 0.434 | 0.909 | **0.837** | 341 | **93.5 MB** | **3.55** |
+| **Open-loop 50k RPS** | `k6 v2.3.0` | 50,000/s | - | **47,045** | - | **0.515** | - | **0** | 254.1 MB | 5.14 |
+| **Open-loop 50k RPS** | `tidegate-fast` | 50,000/s | 40,078 | 37,847 | 8.083 | 265.983 | 475.135 | 8633 | 88.2 MB | 12.18 |
+| **5,000 VUs + 1s 思考** | `tidegate-fast` | 5,000 VUs | 4,407 | 3,299 | 0.135 | 2.010 | 0.955 | 0 | **184.4 MB** | 0.79 |
+| **5,000 VUs + 1s 思考** | `tidegate-std` | 5,000 VUs | **4,998** | **3,491** | **0.125** | **0.785** | **0.368** | 0 | 353.8 MB | **0.52** |
+| **5,000 VUs + 1s 思考** | `k6 v2.3.0` | 5,000 VUs | - | 3,413 | - | 0.788 | - | 0 | 1,256.2 MB | 0.72 |
 
-| 模块 | 内容 |
+- **闭环高并发与内存优势**：在 HTTP/1.1 1,000 VUs 压测中，`tidegate-fast` 全程与稳态吞吐均约为 `k6 v2.3.0` 的 **1.88× ~ 2.14×**，内存仅为 **1/13**（58.2 MB vs 750.9 MB）；5,000 VUs 思考时间下，`tidegate-fast` / `tidegate-std` 内存仅 **184.4 MB / 353.8 MB**，远低于 k6 的 **1,256.2 MB**。
+- **开环速率（Open-loop）选型建议**：高到达率 `rate` 模式下，`--client std` 凭借平滑连接调度以 **3.55 核 CPU / 93.5 MB** 稳居 49,999 RPS；`fast` 客户端在 Windows 突发到达模式下易发生队列拥塞，建议在 Open-loop `rate` 压测时切换为 `--client std`。
+
+<details>
+<summary>复现命令（4 组标准对比测试）</summary>
+
+```powershell
+$env:CGO_ENABLED = "0"
+go run ./bench/harness --duration 15s --vus 100,1000 --think-vus 0 --split-cpu --out bench/out/http
+go run ./bench/harness --duration 15s --vus 100 --think-vus 0 --tls --split-cpu --out bench/out/tls
+go run ./bench/harness --duration 15s --vus 1000 --think-vus 0 --mode rate --rate 50000 --split-cpu --out bench/out/rate
+go run ./bench/harness --duration 15s --vus="" --think-vus 5000 --think 1s --split-cpu --out bench/out/think
+```
+
+</details>
+
+---
+
+## 核心功能矩阵
+
+| 模块 | 能力范围 |
 |---|---|
-| 接口管理与 IDE 工作台 | 可折叠双轴导航、`Ctrl+K` 全局命令面板、左右/上下可拖拽分屏工作台；`{{var}}` 变量实时补全、项目与目录树、多环境与临时变量池、AES-256-GCM 密钥保险箱；支持 HTTP/1.1 & HTTP/2、WebSocket、gRPC（含 Server Reflection 与 `.proto` 自动发现/示例生成）、SSE 调试、接口级前后置脚本（`pre_script` / `post_script`）、XPath/JSONPath/正则提取、JSON Schema 断言与目录级批量回归测试运行器 |
-| 场景编排与韧性引擎 | 步骤覆盖、事务分组 (`group`) / 循环 (`loop`) / 条件 (`if`) / 权重分流 (`weighted`) 与纯 Go 受限沙箱脚本、`on_error`（`continue` / `abort_iteration` / `abort_vu`）失败策略、固定/均匀/正态思考时间、CSV/JSON/JSONL 数据驱动、多场景加权 Mix 与代理/DNS 覆写 |
-| 压测配置与高性能引擎 | 闭环并发（VUs）与开环速率（RPS）双模式，预热、爬坡、保持、下降阶段编排、`max_dials_per_sec` 平滑建连限速、空闲连接缓冲自动收缩与 SLA 违约自动中止阈值 |
-| 实时图表与观测 | `uPlot` 吞吐量、延迟百分位、并发、双层带宽与瓶颈区间标注；HDR 延迟直方图、时间热力图、五段耗时分解与分节点明细；支持 `/api/v1/metrics/prometheus` 采集及 InfluxDB / Prometheus Pushgateway 实时外发 |
-| 安全与企业治理 | 多角色 RBAC（`admin` / `member` / `viewer`）与项目级访问控制（`ACL` 私有隔离及成员覆写）、RFC 6238 TOTP 双因素认证（2FA）与恢复码、带细粒度 `scopes` / `project_ids` 绑定的 `tg_` API 令牌与限流防护、出站目标 Host/CIDR 白名单、成员并发/RPS 上限、全链路审计日志与自动脱敏 |
-| MCP 2.0 智能体接入 | Streamable HTTP (`POST /api/v1/mcp`) 与 CLI Stdio (`tidegate mcp`) 双传输、16 个带安全注解工具（含批量集合回归 `run_collection_test`）、4 类 `tidegate://` 只读 Resources、4 项专家诊断/压测 Prompts 模板、Vault 零泄露与默认 200 VUs / 300s 护栏 |
-| 报告与对比 | 历史记录、异常采样一键工作台复现、离线单文件 HTML 报告、CSV / JSON / JTL / JUnit XML / HAR 导出、2–6 次多次基线与分步骤回归对比 |
-| 分布式集群 | 集群 ECDSA CA 与双向 mTLS、Join Token 换签与证书持久化重连、`--ca-fingerprint` 指纹校验、节点吊销、标签筛选 (`node_selector`)、自定义权重与断线自动重平衡 / 中止策略 |
-| 导入导出与智能合并 | 两步预览与非破坏性智能合并导入（保留既有断言/提取器/前后置脚本与描述）`.tidegate`、OpenAPI 3.x / Swagger 2.0、Postman v2.1、Apifox、JMeter (`.jmx`)、HAR 1.2、cURL；支持导出 k6 (`.js`)、JMeter (`.jtl`)、OpenAPI 与 Postman |
-| 部署 | 单文件原生可执行文件与多阶段非 root 只读容器镜像，支持 Windows、Linux、macOS |
+| 接口管理与 IDE 工作台 | 可折叠双轴导航、`Ctrl+K` 全局命令面板、左右/上下可拖拽分屏；`{{var}}` 四级变量补全与 AES-256-GCM 密钥保险箱；HTTP/1.1 & HTTP/2、WebSocket、gRPC（含 Server Reflection 与 `.proto` 自动发现/示例生成）、SSE；接口级前后置脚本、JSONPath/XPath/正则提取、JSON Schema 断言与目录批量回归 |
+| 场景编排与韧性引擎 | 步骤参数覆写、`group`/`loop`/`if`/`weighted` 与纯 Go 受限 AST 脚本、`on_error`（`continue`/`abort_iteration`/`abort_vu`）失败策略、固定/均匀/正态思考时间、CSV/JSON/JSONL 数据切片与多场景 `Mix` |
+| 双模压测与实时观测 | 闭环（VUs）与开环（Rate）双模型、在线调压、`max_dials_per_sec` 与空闲连接缓冲收缩、SLA 自动中止；`uPlot` 实时图表、HDR 直方图、时间热力图、硬件双层瓶颈告警、Prometheus 端点与 InfluxDB / Pushgateway 外推 |
+| 企业治理与零信任集群 | RBAC（`admin`/`member`/`viewer`）与项目级私有 ACL、RFC 6238 TOTP 2FA、带 `scopes`/`project_ids` 绑定的 `tg_` 令牌、出站目标 SSRF 白名单与全量 `audit_logs`；ECDSA CA + 双向 mTLS 集群、Token 换签证书与吊销重平衡 |
+| MCP 2.0 智能体接入 | Streamable HTTP (`POST /api/v1/mcp`) 与 CLI Stdio (`tidegate mcp`) 双传输、16 个工具、4 类只读 Resources、4 项专家 Prompts、Vault 零泄露脱敏与默认 200 VUs / 300s 护栏 |
+| 导入导出生态 | 两步预览与非破坏性智能合并（OpenAPI 3.x / Swagger 2.0 / Postman v2.1 / Apifox / JMeter `.jmx` / HAR 1.2 / cURL / `.tidegate`）；导出 `.tidegate`、OpenAPI、Postman、k6 `.js`、HTML/CSV/JSON/JTL/JUnit XML/HAR |
 
-完整的功能架构白皮书见[产品架构与功能白皮书](docs/product-plan.md)。
+---
 
-## 当前进度
+## 快速开始
 
-目前 `v1.1` 全阶段能力（**双轴 IDE Web 工作台与批量回归**、**韧性发压引擎**、**gRPC 服务发现与非破坏性智能合并**、**企业安全（项目级 ACL / Scope 令牌 / 2FA）**、**零信任 mTLS 集群** 以及 **MCP 2.0 智能体网关**）均已完整实现并集成至本地与容器交付物中：
+### 源码构建
 
-- **双轴 IDE 工作台与集合回归测试**：采用左侧可折叠深海导航栏、44px 上下文顶栏、`Ctrl+K` 全局快捷搜索面板与左右/上下可拖拽分屏调试区；内置 `{{var}}` 变量自动补全与带行号脚本编辑器，支持接口级 `pre_script` / `post_script`（含 `resp.status` / `resp.body` / `resp.header` / `resp.json` 与 `jsonpath`），支持一键运行目录/项目功能回归测试与 `tidegate test --junit` CI 流水线接入。
-- **多协议工作台与智能协同**：支持 HTTP/1.1 & HTTP/2、WebSocket、gRPC（支持 Server Reflection `v1`/`v1alpha` 与 `.proto` 声明自动发现及示例 JSON 生成）、SSE 调试与五段耗时瀑布图；OpenAPI / Postman 导入支持字段级非破坏性 `merge` 合并。
-- **韧性引擎与可观测大盘**：支持 `on_error` 迭代/VU 失败策略、`max_dials_per_sec` 建连限速与空闲连接内存收缩（`shrinkIdleBuffers`）；支持控制流、受限纯 Go 脚本沙箱、CSV/JSON/JSONL 数据切片与 `Mix` 混合流量；支持 HDR 直方图与时间×延迟热力图、2–6 次基线回归对比，以及 Prometheus 采集与 InfluxDB/Pushgateway 异步外发。
-- **纵深安全与零信任分布式集群**：控制器内置集群 ECDSA CA 与双向 mTLS；支持项目级私有隔离 ACL、细粒度 Token Scope（`read` / `write` / `debug` / `run` / `mcp` / `admin`）及项目白名单绑定、RFC 6238 TOTP 双因素认证与管理员一键重置；调试历史与外部指标推送均配备自动密文脱敏与防 SSRF 拦截，全链路操作写入 `audit_logs`。
-- **MCP 2.0 服务网关**：提供 16 项工具、`tidegate://` 只读 Resources 与 4 项专家 Prompts 模板，同时支持 Streamable HTTP 直连与 `tidegate mcp` Stdio 桥接，可在 Web 控制台账号弹窗一键生成带最小 Scope 建议的接入配置。
-
-### 快速开始（Web 控制台）
-
-从源码构建前后端合一的可执行文件（需要 Go 1.26+ 与 Node.js 22+/24+）：
+需要 **Go 1.26+** 与 **Node.js 22+ / 24+**：
 
 ```bash
-npm --prefix web ci
-npm --prefix web run build
-CGO_ENABLED=0 go build -o tidegate ./cmd/tidegate
+npm --prefix web ci && npm --prefix web run build
+CGO_ENABLED=0 go build -trimpath -o tidegate ./cmd/tidegate
 ./tidegate
 ```
 
-首次启动会在终端输出管理地址（默认 `http://127.0.0.1:8080/`）与一次性初始化码，按页面引导创建管理员密码后即可使用。若忘记管理员密码，可通过命令行重置：
+### Docker Compose 一键启动（支持环境变量改密与反代）
 
 ```bash
-./tidegate reset-password --data ./data --user admin
-```
-
-### 命令行压测、功能回归与 CI 门禁
-
-无需界面时，可直接用 CLI 运行接口集合功能回归或 YAML / JSON 压测场景并接入持续集成检查：
-
-```bash
-./tidegate testserver                                                   # 启动内置的被测服务（HTTP/TLS/WS/gRPC 反射，默认 :18080）
-./tidegate test --data ./data --folder "用户认证" --junit junit.xml       # 运行目录功能回归测试并输出 JUnit XML 报告
-./tidegate run examples/ping.yaml --out result.json --csv result.csv --html report.html --jtl result.jtl
-```
-
-功能测试失败或场景中配置的 `thresholds` 违约时，`tidegate test` / `tidegate run` 将返回退出码 `3`，便于流水线直接作为质量与性能门禁拦截回归；更多场景写法见 [examples](examples) 目录。
-
-### 多机分布式压测（零信任 mTLS）
-
-在控制器节点启用集群监听端口，并在 Web 控制台「发压节点」页面签发加入令牌：
-
-```bash
-./tidegate serve --listen 0.0.0.0:8080 --cluster-listen 0.0.0.0:7443 --tls-self-signed
-```
-
-在其他发压机上携带加入令牌、CA 指纹与节点标签首次注册接入集群（后续重启凭 `--cert-dir` 内持久化证书即可免令牌重连）：
-
-```bash
-./tidegate agent --join <控制器IP:7443> --token <加入令牌> --cert-dir ./agent-certs --ca-fingerprint <CA_SHA256指纹> --labels zone=cn-east,tier=perf
-```
-
-### MCP 2.0 智能体安全接入（Model Context Protocol）
-
-先在控制台右上角「账号与安全」创建一枚 `tg_` 访问令牌（建议绑定细粒度 Scope：只读排查建议 `viewer` + `mcp` + `read`，编排与调试建议带有效期的 `member` + `mcp` + 对应读写 Scope 并可选限定访问项目），再按需选择 **Streamable HTTP** 或 **CLI Stdio** 模式配置客户端（如 Cursor / Claude Desktop `mcp_config.json`）：
-
-**方式一：Streamable HTTP 直连（推荐）**
-
-```json
-{
-  "mcpServers": {
-    "tidegate": {
-      "serverUrl": "https://127.0.0.1:8080/api/v1/mcp",
-      "headers": {
-        "Authorization": "Bearer tg_your_token_here"
-      }
-    }
-  }
-}
-```
-
-**方式二：CLI Stdio 桥接**
-
-```json
-{
-  "mcpServers": {
-    "tidegate": {
-      "command": "tidegate",
-      "args": ["mcp", "--url", "https://127.0.0.1:8080", "--token", "tg_your_token_here"]
-    }
-  }
-}
-```
-
-- **工具能力（共 16 个）**：
-  - 只读探查与分析（`viewer`+ / `read` Scope）：`list_projects`、`get_project_workspace`、`get_api_detail`、`get_scenario_detail`、`estimate_load_run`、`list_runs`、`get_run_report`、`compare_runs`、`get_cluster_status`
-  - 编排与导入（`member`+ / `write` Scope）：`save_api`、`import_api_spec`（`preview`/`apply`）、`save_scenario`
-  - 调试、回归测试与受控压测（`member`+ / `debug` & `run` Scope）：`debug_api`、`debug_scenario`、`run_collection_test`、`manage_load_run`（`start`/`set_target`/`graceful_stop`/`abort`）
-- **MCP Resources & Prompts**：
-  - 只读上下文资源（`read` Scope，强脱敏）：`tidegate://projects`、`tidegate://projects/{project_id}/workspace`、`tidegate://projects/{project_id}/environments`、`tidegate://runs/{run_id}/summary`
-  - 专家 Prompts 模板（4 项）：`diagnose_api_failure`、`generate_regression_suite`、`design_load_scenario`、`analyze_run_bottleneck`
-- **安全护栏**：支持项目级私有 ACL 与令牌 Scope / 项目白名单裁剪；`viewer` 或无对应 Scope 令牌无法触发写入/调试/压测工具；所有密文变量与认证请求头在返回前自动打码；调试与压测强制遵循目标白名单与 `scripts_disabled`；MCP 发起的压测默认限制为 **单次最高 200 VUs、最长 300 秒**，管理员可在「系统治理 -> 安全围栏与 MCP」中一键开关或调整上限，所有调用均记入 `audit_logs`。
-
-### Docker 部署
-
-仓库内置多阶段 [Dockerfile](deploy/Dockerfile) 与开箱即用的 [docker-compose.yml](deploy/docker-compose.yml)（非 root 运行并启用只读根文件系统）：
-
-```bash
+export TIDEGATE_ADMIN_PASSWORD="ChangeMe-StrongPassword!"
 docker compose -f deploy/docker-compose.yml up -d --build
-docker logs tidegate-controller   # 查看首次启动的一次性初始化码与自签名 TLS 证书指纹
 ```
 
-默认以自签名 HTTPS 监听 `https://localhost:8080/`（集群通信端口 `7443`，数据持久化卷挂载于 `/data`）。若置于 HTTPS 反向代理之后，可在 `docker-compose.yml` 中配置 `command: ["serve"]`、`TIDEGATE_ALLOW_INSECURE_REMOTE=true` 与 `TIDEGATE_ALLOWED_ORIGINS`；在 Windows 上作为远程发压机时推荐直接运行原生可执行文件 `./tidegate agent`。
+默认以自签名 HTTPS 监听 `https://localhost:8080/`（集群端口 `7443`，数据目录 `/data`）。若在 Docker / Kubernetes / 反代环境下部署，所有核心启动参数均支持 `TIDEGATE_*` 环境变量覆盖，并在重启时自动同步管理员密码：
+
+| 常用环境变量 | 用途 |
+|---|---|
+| `TIDEGATE_ADMIN_USER` / `TIDEGATE_ADMIN_PASSWORD` / `TIDEGATE_ADMIN_PASSWORD_FILE` | 启动时自动创建或幂等同步管理员密码（密码变更时自动吊销旧会话） |
+| `TIDEGATE_ADMIN_RESET_TOTP` | 设为 `true` 时启动清空目标管理员 2FA 绑定 |
+| `TIDEGATE_PUBLIC_URL` / `TIDEGATE_TRUSTED_PROXIES` | 配置反代外网域名、CORS 放行及可信代理网段（解析真实客户端 IP 与 HTTPS 协议头） |
+| `TIDEGATE_TLS_CERT` / `TIDEGATE_TLS_KEY` / `TIDEGATE_TLS_SELF_SIGNED` | 配置正式 PEM 证书或自签名证书 |
+| `TIDEGATE_MASTER_KEY` / `TIDEGATE_CLUSTER_PUBLIC_ADDR` | 显式注入 AES-256-GCM 保险箱主密钥与集群对外公告地址 |
+
+也随时支持通过命令行离线/单机重置密码（详见 [安装与环境变量文档](docs/install.md#4-管理员账号密码同步与-2fa-恢复)）：
+
+```bash
+./tidegate reset-password --data ./data --user admin --password "NewStrongPassword!"
+```
+
+### CLI 压测与功能回归（CI 门禁）
+
+```bash
+./tidegate testserver                                              # 启动内置多协议被测靶场（:18080）
+./tidegate test --data ./data --folder "订单链路" --junit junit.xml  # 目录批量功能回归（失败返回退出码 3）
+./tidegate run examples/ping.yaml --out res.json --html report.html # YAML 场景压测（违约返回退出码 3）
+```
+
+> 更多参数、Nginx/Caddy 反代模板、集群扩展与 MCP 客户端配置，请跳转：
+> **[安装、环境变量与反代指南](docs/install.md)** · **[完整功能使用教程](docs/user-guide.md)**
+
+---
 
 ## 许可
 

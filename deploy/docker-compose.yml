@@ -20,15 +20,24 @@ services:
       TIDEGATE_DATA: /data
       TIDEGATE_LISTEN: 0.0.0.0:8080
       TIDEGATE_CLUSTER_LISTEN: 0.0.0.0:7443
-      TIDEGATE_TLS_SELF_SIGNED: "true"
+      TIDEGATE_TLS_SELF_SIGNED: ${TIDEGATE_TLS_SELF_SIGNED:-true}
+      TIDEGATE_TLS_CERT: ${TIDEGATE_TLS_CERT:-}
+      TIDEGATE_TLS_KEY: ${TIDEGATE_TLS_KEY:-}
       TIDEGATE_NO_OPEN: "true"
-      # 集群认证令牌：默认留空表示拒绝未授权外部节点接入；启用分布式 --profile cluster 前请设置强随机令牌：
+      # 管理员初始化与重启声明式改密（密码与库不一致时自动同步；留空则在首次启动打印一次性初始化码）：
+      TIDEGATE_ADMIN_USER: ${TIDEGATE_ADMIN_USER:-admin}
+      TIDEGATE_ADMIN_PASSWORD: ${TIDEGATE_ADMIN_PASSWORD:-}
+      TIDEGATE_ADMIN_PASSWORD_FILE: ${TIDEGATE_ADMIN_PASSWORD_FILE:-}
+      TIDEGATE_ADMIN_RESET_TOTP: ${TIDEGATE_ADMIN_RESET_TOTP:-false}
+      # 反向代理与外部访问（若置于 Nginx/Caddy HTTPS 之后，设 TIDEGATE_TLS_SELF_SIGNED=false 并在 command 使用 serve）：
+      TIDEGATE_PUBLIC_URL: ${TIDEGATE_PUBLIC_URL:-}
+      TIDEGATE_TRUSTED_PROXIES: ${TIDEGATE_TRUSTED_PROXIES:-}
+      TIDEGATE_ALLOWED_ORIGINS: ${TIDEGATE_ALLOWED_ORIGINS:-}
+      TIDEGATE_ALLOW_INSECURE_REMOTE: ${TIDEGATE_ALLOW_INSECURE_REMOTE:-false}
+      # 分布式集群与 Vault 主密钥：
+      TIDEGATE_CLUSTER_PUBLIC_ADDR: ${TIDEGATE_CLUSTER_PUBLIC_ADDR:-}
       TIDEGATE_CLUSTER_TOKEN: ${TIDEGATE_CLUSTER_TOKEN:-}
-      # 如需通过挂载密码文件自动创建管理员（跳过终端一次性初始化码），可挂载秘密文件并指定路径：
-      # TIDEGATE_ADMIN_PASSWORD_FILE: /run/secrets/tidegate_admin_pw
-      # 若置于 HTTPS 反向代理后以明文 HTTP 桥接访问，可改为 command: ["serve"] 并取消注释：
-      # TIDEGATE_ALLOW_INSECURE_REMOTE: "true"
-      # TIDEGATE_ALLOWED_ORIGINS: https://tidegate.example.com
+      TIDEGATE_MASTER_KEY: ${TIDEGATE_MASTER_KEY:-}
     restart: unless-stopped
 
   tidegate-agent:

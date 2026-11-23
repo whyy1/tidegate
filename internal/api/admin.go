@@ -48,7 +48,7 @@ func (s *Server) auditAs(r *http.Request, u *auth.User, action, resource, resour
 		Action:     action,
 		Resource:   resource,
 		ResourceID: resourceID,
-		RemoteAddr: r.RemoteAddr,
+		RemoteAddr: s.guard.ClientAddr(r),
 		Detail:     raw,
 	}); err != nil {
 		s.log.Warn("写入审计日志失败", "action", action, "err", err)
@@ -395,7 +395,7 @@ func (s *Server) handleDisableTOTP(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	if err := s.auth.DisableTOTP(r.Context(), u.ID, body.Password, body.Code, r.RemoteAddr); err != nil {
+	if err := s.auth.DisableTOTP(r.Context(), u.ID, body.Password, body.Code, s.guard.ClientAddr(r)); err != nil {
 		writeError(w, err)
 		return
 	}

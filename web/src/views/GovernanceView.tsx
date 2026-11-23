@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Activity, Bot, FileSearch, Lock, Plus, RefreshCw, Save, ShieldCheck, Trash2, Users } from 'lucide-react'
+import { Activity, Bot, FileSearch, Lock, Plus, RefreshCw, Save, Trash2, Users } from 'lucide-react'
 import { api, APIError } from '../lib/api'
 import type { AuditEntry, MetricsSinkConfig, SecurityPolicy, User, UserRole } from '../lib/types'
 
@@ -178,15 +178,7 @@ export function GovernanceView({ currentUser, onToast }: Props) {
 
   return (
     <div className="flex-1 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-5 space-y-4 text-xs">
-      <div className="tg-telemetry-strip rounded-xl border border-slate-800 p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <h1 className="text-sm font-bold text-white flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4 text-[#38BDF8]" /> 系统治理、安全围栏与 MCP 管控
-          </h1>
-          <p className="text-[11px] text-sky-200/80 mt-0.5">
-            管理多角色权限、压测目标白名单、MCP 智能体规模上限、Prometheus/InfluxDB 外推及全链路审计日志
-          </p>
-        </div>
+      <div className="tg-telemetry-strip rounded-xl border border-slate-800 p-3 shadow-xs flex flex-wrap items-center justify-between gap-3">
         <div role="tablist" aria-label="系统治理页签" className="tg-tablist items-center gap-1 bg-white/10 p-1 rounded-lg">
           {isAdmin && (
             <button
@@ -399,110 +391,121 @@ export function GovernanceView({ currentUser, onToast }: Props) {
       {subTab === 'security' && (
         <form onSubmit={handleSavePolicy} className="bg-white rounded-xl border border-slate-200 p-4 shadow-xs space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div className="space-y-3">
-              <label className="flex items-center gap-2 font-semibold text-slate-800 cursor-pointer">
+            <fieldset className="space-y-3 border border-slate-200 rounded-lg p-3">
+              <legend className="text-xs font-semibold text-slate-800 px-1.5">出站目标白名单</legend>
+              <label className="flex items-center gap-2 font-medium text-slate-800 cursor-pointer">
                 <input
                   type="checkbox"
+                  name="allowlist_enabled"
                   disabled={!isAdmin}
                   checked={policy.allowlist_enabled}
                   onChange={(e) => setPolicy({ ...policy, allowlist_enabled: e.target.checked })}
                 />
-                <span>启用目标域名 / 网段出站白名单限制 (allowlist_enabled)</span>
+                <span>启用目标域名 / 网段白名单</span>
               </label>
               <textarea
                 rows={5}
+                name="allowed_targets"
                 disabled={!isAdmin}
                 value={allowedTargetsText}
                 onChange={(e) => setAllowedTargetsText(e.target.value)}
-                placeholder={'每行一条允许压测的目标模式，例如：\n*.staging.example.com\n10.20.0.0/16\napi.test.local:8443'}
+                placeholder={'*.staging.example.com\n10.20.0.0/16\napi.test.local:8443'}
                 className="w-full p-2.5 border border-slate-300 rounded font-mono bg-white disabled:bg-slate-50"
               />
-            </div>
+            </fieldset>
 
-            <div className="space-y-3">
+            <fieldset className="space-y-3 border border-slate-200 rounded-lg p-3">
+              <legend className="text-xs font-semibold text-slate-800 px-1.5">成员压测上限</legend>
               <div>
-                <label className="block font-medium text-slate-700 mb-1">普通成员 (member) 单次最高并发数 (member_max_vus, 0=不限)</label>
+                <label className="block font-medium text-slate-700 mb-1">普通成员最高并发 VUs（0 为不限）</label>
                 <input
                   type="number"
+                  name="member_max_vus"
                   min={0}
                   disabled={!isAdmin}
                   value={policy.member_max_vus ?? 0}
                   onChange={(e) => setPolicy({ ...policy, member_max_vus: Math.max(0, Number(e.target.value) || 0) })}
-                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono disabled:bg-slate-50"
+                  className="tg-tabular w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono disabled:bg-slate-50"
                 />
               </div>
               <div>
-                <label className="block font-medium text-slate-700 mb-1">普通成员 (member) 单次最高目标 RPS (member_max_rps, 0=不限)</label>
+                <label className="block font-medium text-slate-700 mb-1">普通成员最高目标 RPS（0 为不限）</label>
                 <input
                   type="number"
+                  name="member_max_rps"
                   min={0}
                   step="any"
                   disabled={!isAdmin}
                   value={policy.member_max_rps ?? 0}
                   onChange={(e) => setPolicy({ ...policy, member_max_rps: Math.max(0, Number(e.target.value) || 0) })}
-                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono disabled:bg-slate-50"
+                  className="tg-tabular w-full px-2.5 py-1.5 border border-slate-300 rounded font-mono disabled:bg-slate-50"
                 />
               </div>
               <label className="flex items-center gap-2 pt-2 text-slate-800 cursor-pointer">
                 <input
                   type="checkbox"
+                  name="scripts_disabled"
                   disabled={!isAdmin}
                   checked={Boolean(policy.scripts_disabled)}
                   onChange={(e) => setPolicy({ ...policy, scripts_disabled: e.target.checked })}
                 />
-                <span>全局禁止场景中的自定义脚本步骤 (scripts_disabled)</span>
+                <span>禁止场景自定义脚本步骤</span>
               </label>
-            </div>
+            </fieldset>
           </div>
 
-          <div className="pt-4 border-t border-slate-200 space-y-3">
-            <div className="font-semibold text-slate-900 flex items-center gap-1.5">
+          <fieldset className="border border-slate-200 rounded-lg p-3 space-y-3 bg-slate-50/70">
+            <legend className="font-semibold text-slate-900 px-1.5 inline-flex items-center gap-1.5">
               <Bot className="w-4 h-4 text-sky-600" />
-              <span>MCP 智能体协议安全护栏（POST /api/v1/mcp &amp; tidegate mcp）</span>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3 bg-slate-50 border border-slate-200 rounded-lg p-3">
+              <span>MCP 安全护栏</span>
+            </legend>
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-3">
               <label className="flex items-center gap-2 text-slate-800 cursor-pointer">
                 <input
                   type="checkbox"
+                  name="mcp_enabled"
                   disabled={!isAdmin}
                   checked={!policy.mcp_disabled}
                   onChange={(e) => setPolicy({ ...policy, mcp_disabled: !e.target.checked })}
                 />
-                <span>启用 MCP 服务入口</span>
+                <span>启用 MCP</span>
               </label>
               <label className="flex items-center gap-2 text-slate-800 cursor-pointer">
                 <input
                   type="checkbox"
+                  name="mcp_allow_load_runs"
                   disabled={!isAdmin}
                   checked={!policy.mcp_disable_load_runs}
                   onChange={(e) => setPolicy({ ...policy, mcp_disable_load_runs: !e.target.checked })}
                 />
-                <span>允许 AI 启动压测任务</span>
+                <span>允许 MCP 发起压测</span>
               </label>
               <div>
                 <label className="block text-[11px] font-medium text-slate-700 mb-1">
-                  MCP 单次最大并发 VUs（默认 200）
+                  MCP 最高并发 VUs
                 </label>
                 <input
                   type="number"
+                  name="mcp_max_vus"
                   min={0}
                   disabled={!isAdmin}
                   value={policy.mcp_max_vus ?? 0}
-                  placeholder="0 = 默认 200"
+                  placeholder="200"
                   onChange={(e) => setPolicy({ ...policy, mcp_max_vus: Math.max(0, Number(e.target.value) || 0) })}
                   className="tg-tabular w-full px-2.5 py-1 border border-slate-300 rounded font-mono bg-white disabled:bg-slate-100"
                 />
               </div>
               <div>
                 <label className="block text-[11px] font-medium text-slate-700 mb-1">
-                  MCP 单次最大压测时长 秒（默认 300s）
+                  MCP 最长压测秒数
                 </label>
                 <input
                   type="number"
+                  name="mcp_max_duration_sec"
                   min={0}
                   disabled={!isAdmin}
                   value={policy.mcp_max_duration_sec ?? 0}
-                  placeholder="0 = 默认 300s"
+                  placeholder="300"
                   onChange={(e) =>
                     setPolicy({ ...policy, mcp_max_duration_sec: Math.max(0, Number(e.target.value) || 0) })
                   }
@@ -510,7 +513,7 @@ export function GovernanceView({ currentUser, onToast }: Props) {
                 />
               </div>
             </div>
-          </div>
+          </fieldset>
 
           {isAdmin && (
             <div className="flex justify-end pt-2 border-t border-slate-100">
@@ -530,17 +533,14 @@ export function GovernanceView({ currentUser, onToast }: Props) {
         <div className="space-y-4">
           <div className="bg-white rounded-xl border border-slate-200 p-4 shadow-xs space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <div className="font-semibold text-slate-800">Prometheus 原生指标采集端点 (/api/v1/metrics/prometheus)</div>
-                <div className="text-[11px] text-slate-500">支持携带个人 `API 访问令牌 (Authorization: Bearer tg_...)` 配置 Prometheus 定时抓取</div>
-              </div>
+              <div className="font-semibold text-slate-800 font-mono text-xs">/api/v1/metrics/prometheus</div>
               <button
                 type="button"
                 disabled={loadingProm}
                 onClick={() => void handleLoadProm()}
                 className="inline-flex items-center gap-1 px-3 py-1.5 rounded border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-medium"
               >
-                <RefreshCw className={`w-3.5 h-3.5 ${loadingProm ? 'animate-spin' : ''}`} /> 拉取当前指标快照
+                <RefreshCw className={`w-3.5 h-3.5 ${loadingProm ? 'animate-spin' : ''}`} /> 拉取快照
               </button>
             </div>
             {promPreview && (

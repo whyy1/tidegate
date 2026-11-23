@@ -11,6 +11,7 @@ import {
   UserCheck,
   Workflow,
 } from 'lucide-react'
+import type { AccountModalTab } from './AccountModal'
 import type { NavTab } from './TopBar'
 import type { AgentView, User } from '../lib/types'
 
@@ -24,7 +25,7 @@ interface Props {
   onToggleCollapse: () => void
   onChangeTab: (tab: NavTab) => void
   onOpenCommandPalette: () => void
-  onOpenAccountModal: (initialTab?: 'sessions' | 'tokens' | 'mcp' | 'password') => void
+  onOpenAccountModal: (initialTab?: AccountModalTab) => void
 }
 
 export function SidebarRail({
@@ -66,12 +67,7 @@ export function SidebarRail({
         <div className="h-11 px-3 flex items-center justify-between border-b border-white/10 shrink-0">
           <div className="flex items-center gap-2.5 min-w-0">
             <img src="/favicon.svg" alt="Tidegate" className="w-7 h-7 rounded-md shrink-0 ring-1 ring-white/15" />
-            {!collapsed && (
-              <div className="min-w-0">
-                <div className="font-bold tracking-tight text-sm text-white leading-none">Tidegate</div>
-                <div className="text-[10px] text-sky-300/80 font-mono mt-0.5 truncate">测控台 · IDE</div>
-              </div>
-            )}
+            {!collapsed && <div className="font-bold tracking-tight text-sm text-white leading-none truncate">Tidegate</div>}
           </div>
           <button
             type="button"
@@ -142,32 +138,32 @@ export function SidebarRail({
         <button
           type="button"
           onClick={onOpenCommandPalette}
-          title="全局检索接口、场景与命令 (Ctrl+K)"
+          title="全局检索 (Ctrl+K)"
           className={`w-full flex items-center gap-2 rounded-lg border border-white/10 bg-white/5 hover:bg-white/12 text-xs text-slate-200 transition-colors ${
             collapsed ? 'justify-center px-2 py-2' : 'px-2.5 py-1.5'
           }`}
         >
           <Search className="w-3.5 h-3.5 text-sky-300 shrink-0" />
           {!collapsed && (
-            <>
-              <span className="flex-1 text-left truncate text-slate-300">快速检索</span>
-              <kbd className="px-1.5 py-0.5 rounded bg-slate-950/60 border border-white/15 font-mono text-[10px] text-slate-300">
+            <span className="min-w-0 flex items-center flex-1 gap-1.5">
+              <span className="flex-1 text-left truncate text-slate-300">检索</span>
+              <kbd className="px-1.5 py-0.5 rounded bg-slate-950/60 border border-white/15 font-mono text-[10px] text-slate-300 shrink-0">
                 Ctrl+K
               </kbd>
-            </>
+            </span>
           )}
         </button>
 
         <button
           type="button"
           onClick={() => onOpenAccountModal('mcp')}
-          title="查看 MCP 智能体接入配置与访问令牌"
+          title="MCP 接入"
           className={`w-full flex items-center gap-2 rounded-lg text-xs text-sky-200 hover:bg-white/10 transition-colors ${
             collapsed ? 'justify-center px-2 py-2' : 'px-2.5 py-1.5'
           }`}
         >
           <Bot className="w-3.5 h-3.5 text-cyan-300 shrink-0" />
-          {!collapsed && <span className="truncate text-left flex-1">MCP 智能体接入</span>}
+          {!collapsed && <span className="min-w-0 truncate text-left flex-1">MCP</span>}
         </button>
 
         <button

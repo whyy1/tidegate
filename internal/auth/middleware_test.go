@@ -423,3 +423,55 @@ func TestBearerTokenAndCSRFBypass(t *testing.T) {
 		t.Fatalf("bad bearer got %d cookie=%q", rec3.Code, rec3.Header().Get("Set-Cookie"))
 	}
 }
+
+func TestTrustedProxiesXFFAndForwardedProto(t *testing.T) {
+	g, err := NewGuard(nil, GuardConfig{
+		TrustedProxies: []string{"172.16.0.0/12", "loopback"},
+		AllowedOrigins: []string{"https://tg.example.com"},
+	})
+	if err != nil {
+		t.Fatalf("NewGuard: %v", err)
+	}
+
+	// 1. Untrusted peer spoofing forwarding headers must be ignored.
+	spoof := httptest.NewRequest(http.MethodPost, "http://tg.example.com/api/v1/auth/login", nil)
+	spoof.RemoteAddr = "198.51.100.44:9999"
+	spoof.Header.Set("X-Forwarded-Proto", "https")
+	spoof.Header.Set("X-Forwarded-For", "127.0.0.1")
+	if g.IsSecureRequest(spoof) {
+		t.Fatal("untrusted peer must not make request secure")
+	}
+	if err := g.CheckTransport(spoof); !errors.Is(err, ErrInsecureTransport) {
+		t.Fatalf("untrusted plain HTTP spoof = %v, want ErrInsecureTransport", err)
+	}
+	if got := g.ClientAddr(spoof); got != "198.51.100.44:9999" {
+		t.Fatalf("untrusted ClientAddr = %q, want peer addr", got)
+	}
+
+	// 2. Trusted Docker bridge proxy terminating TLS: honors X-Forwarded-Proto,
+	// walks XFF right-to-left skipping trusted hops, and accepts X-Forwarded-Host origin.
+	proxied := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:8080/api/v1/auth/login", nil)
+	proxied.Host = "127.0.0.1:8080"
+	proxied.RemoteAddr = "172.18.0.2:41234"
+	proxied.Header.Set("X-Forwarded-Proto", "https")
+	proxied.Header.Set("X-Forwarded-Host", "proxy.internal.local")
+	proxied.Header.Set("Origin", "https://proxy.internal.local")
+	proxied.Header.Set("X-Forwarded-For", "1.2.3.4, 203.0.113.88, 172.17.0.9")
+
+	if !g.IsSecureRequest(proxied) || !g.SecureCookies(proxied) {
+		t.Fatal("trusted proxy with X-Forwarded-Proto=https must be secure")
+	}
+	if err := g.CheckTransport(proxied); err != nil {
+		t.Fatalf("trusted proxy CheckTransport = %v, want nil", err)
+	}
+	if got := g.ClientAddr(proxied); got != "203.0.113.88" {
+		t.Fatalf("trusted ClientAddr = %q, want 203.0.113.88", got)
+	}
+	if err := g.CheckOrigin(proxied); err != nil {
+		t.Fatalf("trusted X-Forwarded-Host origin CheckOrigin = %v, want nil", err)
+	}
+
+	if _, err := NewGuard(nil, GuardConfig{TrustedProxies: []string{"not-an-ip"}}); err == nil {
+		t.Fatal("expected error for invalid trusted proxy entry")
+	}
+}

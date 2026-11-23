@@ -46,6 +46,16 @@ func NewSecretBox(key []byte) (*SecretBox, error) {
 	return &SecretBox{aead: aead}, nil
 }
 
+// NewSecretBoxFromString decodes a 32-byte AES-256 master key encoded as 64
+// hex characters, standard/URL base64, or raw 32 bytes.
+func NewSecretBoxFromString(raw string) (*SecretBox, error) {
+	key, err := decodeMasterKey([]byte(raw))
+	if err != nil {
+		return nil, err
+	}
+	return NewSecretBox(key)
+}
+
 // LoadOrCreateMasterKey reads a 32-byte AES-256 master key from path (accepting
 // 64 hex chars, base64, or raw 32 bytes), or creates a new 64-hex key file with
 // 0600 permissions when path does not exist.

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { AlertTriangle, Eye, EyeOff, KeyRound, Lock, Radio, Server, ShieldCheck } from 'lucide-react'
+import { AlertTriangle, Check, Copy, Eye, EyeOff, KeyRound, Lock, ShieldCheck } from 'lucide-react'
 import { api, APIError } from '../lib/api'
 import type { SetupStatus, User } from '../lib/types'
 
@@ -20,6 +20,7 @@ export function AuthGate({ status, onAuthenticated }: Props) {
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [insecureTransport, setInsecureTransport] = useState(false)
+  const [copiedReset, setCopiedReset] = useState(false)
   const totpInputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -76,84 +77,35 @@ export function AuthGate({ status, onAuthenticated }: Props) {
     }
   }
 
+  const resetCmd = 'docker exec -it tidegate-controller tidegate reset-password --data /data --user admin'
+
   return (
-    <div className="min-h-dvh grid lg:grid-cols-[1.08fr_1fr] bg-[#F3F6FA]">
-      {/* Left Architectural Tidal Control Column */}
-      <section className="tg-hero-grid text-white p-7 lg:p-12 flex flex-col justify-between relative overflow-hidden">
-        <div className="flex items-center gap-3 relative z-10">
-          <img src="/favicon.svg" alt="Tidegate" className="w-10 h-10 rounded-xl ring-1 ring-white/20 shadow-lg" />
-          <div>
-            <div className="text-lg font-bold tracking-tight">Tidegate</div>
-            <div className="text-xs font-mono text-sky-300/90">PRECISION API &amp; LOAD CONTROL ROOM</div>
-          </div>
-        </div>
-
-        <div className="my-8 lg:my-0 space-y-6 relative z-10 max-w-lg">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-white/8 border border-white/15 text-xs font-mono text-sky-200">
-            <Radio className="w-3.5 h-3.5 text-cyan-400" />
-            <span>单二进制零依赖 · 离线原生部署</span>
-          </div>
-          <h1 className="text-2xl lg:text-3xl font-bold tracking-tight leading-snug text-white">
-            接口调试、场景编排与
-            <br />
-            零信任分布式压测一体化控制台
-          </h1>
-          <p className="text-sm text-slate-300 leading-relaxed">
-            由 Go 确定性高性能引擎驱动，内置 mTLS 分布式节点 CA、AES-256-GCM 凭证金库、HDR 延迟直方图以及安全受控的 MCP 智能体协议接入。
-          </p>
-
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 pt-2">
-            <div className="p-3 rounded-lg bg-white/6 border border-white/10">
-              <div className="text-xs font-semibold text-sky-300">多协议工作台</div>
-              <div className="text-[11px] text-slate-300 mt-1">HTTP/2 · WS · gRPC · SSE 五段耗时透视</div>
-            </div>
-            <div className="p-3 rounded-lg bg-white/6 border border-white/10">
-              <div className="text-xs font-semibold text-emerald-300">分布式 mTLS 集群</div>
-              <div className="text-[11px] text-slate-300 mt-1">自动重分配与实时硬件遥测</div>
-            </div>
-            <div className="p-3 rounded-lg bg-white/6 border border-white/10">
-              <div className="text-xs font-semibold text-cyan-300">安全 MCP 网关</div>
-              <div className="text-[11px] text-slate-300 mt-1">RBAC · 密文脱敏 · 规模硬护栏</div>
+    <div className="tg-hero-grid min-h-dvh flex items-center justify-center p-4">
+      <main className="w-full max-w-[400px] bg-white border border-slate-200 rounded-2xl shadow-xl overflow-hidden">
+        <header className="tg-telemetry-strip px-6 py-4 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2.5 min-w-0">
+            <img src="/favicon.svg" alt="Tidegate" className="w-8 h-8 rounded-lg ring-1 ring-white/20 shrink-0" />
+            <div className="min-w-0">
+              <h1 className="text-base font-bold text-white leading-tight truncate">Tidegate</h1>
+              <div className="text-xs text-sky-200">{isSetup ? '初始化管理员' : '登录控制台'}</div>
             </div>
           </div>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-between gap-2 text-xs text-slate-400 border-t border-white/10 pt-4 relative z-10 font-mono">
-          <span>版本：{status.version || 'dev'}</span>
-          <span className="inline-flex items-center gap-1.5 text-slate-300">
-            <Server className="w-3.5 h-3.5 text-sky-400" />
-            {status.tls ? 'HTTPS TLS 传输已加密' : 'HTTP 本机安全回环通道'}
+          <span className="tg-tabular px-2 py-0.5 rounded bg-white/10 border border-white/15 font-mono text-[11px] text-sky-200 shrink-0">
+            {status.tls ? 'HTTPS' : 'HTTP'} · {status.version || 'dev'}
           </span>
-        </div>
-      </section>
+        </header>
 
-      {/* Right Authentication Form */}
-      <main className="flex items-center justify-center p-6 lg:p-10">
-        <div className="w-full max-w-md bg-white border border-slate-200 rounded-2xl shadow-sm p-6 sm:p-8 space-y-5">
-          <div>
-            <div className="text-xs font-mono uppercase tracking-wider text-sky-700 font-semibold">
-              {isSetup ? 'Initial Setup' : 'Operator Sign In'}
-            </div>
-            <h2 className="text-xl font-bold text-slate-900 mt-1">
-              {isSetup ? '初始化系统管理员账号' : '登录 Tidegate 控制台'}
-            </h2>
-            <p className="text-xs text-slate-500 mt-1">
-              {isSetup
-                ? '请输入服务启动终端打印的一次性初始化口令并设置强密码。'
-                : '使用管理员或团队成员账号登录以管理接口、场景与压测任务。'}
-            </p>
-          </div>
-
-          <form onSubmit={handleSubmit} className="space-y-4">
+        <div className="p-6 space-y-4">
+          <form onSubmit={handleSubmit} method="POST" className="space-y-4">
             {error && (
-              <div className="rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800 space-y-1">
+              <div role="alert" className="rounded-lg border border-rose-200 bg-rose-50 px-3.5 py-2.5 text-xs text-rose-800 space-y-1">
                 <div className="flex items-center gap-1.5 font-medium">
                   <AlertTriangle className="w-4 h-4 shrink-0 text-rose-600" />
                   <span>{error}</span>
                 </div>
                 {insecureTransport && (
-                  <p className="text-rose-700 leading-relaxed pl-5">
-                    非本机访问拒绝明文发送凭据：请启用 `--tls-self-signed` / `--tls-cert`，或仅在受信任内网使用 `--allow-insecure-remote`。
+                  <p className="text-rose-700 leading-relaxed pl-5 font-mono text-[11px]">
+                    启用 HTTPS、可信反代（TIDEGATE_TRUSTED_PROXIES）或 --allow-insecure-remote。
                   </p>
                 )}
               </div>
@@ -162,19 +114,22 @@ export function AuthGate({ status, onAuthenticated }: Props) {
             {isSetup && (
               <div>
                 <label htmlFor="tg-setup-code" className="block text-xs font-semibold text-slate-700 mb-1.5">
-                  终端输出的一次性初始化码
+                  初始化码
                 </label>
                 <div className="relative">
                   <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                   <input
                     id="tg-setup-code"
+                    name="setup_code"
                     type="text"
                     required
+                    autoCorrect="off"
+                    autoCapitalize="none"
                     spellCheck={false}
                     autoComplete="one-time-code"
                     value={code}
                     onChange={(e) => setCode(e.target.value)}
-                    placeholder="例如 XXXX-XXXX-XXXX-XXXX-XXXX-XXXX"
+                    placeholder="XXXX-XXXX-XXXX-XXXX-XXXX-XXXX"
                     className="w-full pl-9 pr-3 py-2 text-sm font-mono tracking-wider border border-slate-300 rounded-lg focus:border-sky-600 focus:ring-2 focus:ring-sky-500/20 focus:outline-none"
                   />
                 </div>
@@ -191,13 +146,16 @@ export function AuthGate({ status, onAuthenticated }: Props) {
                     <ShieldCheck className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                     <input
                       id="tg-auth-username"
+                      name="username"
                       type="text"
                       required
+                      autoCorrect="off"
+                      autoCapitalize="none"
                       spellCheck={false}
                       autoComplete="username"
                       value={username}
                       onChange={(e) => setUsername(e.target.value)}
-                      placeholder={isSetup ? '例如 admin' : '输入用户名'}
+                      placeholder={isSetup ? 'admin' : '用户名'}
                       className="w-full pl-9 pr-3 py-2 text-sm border border-slate-300 rounded-lg focus:border-sky-600 focus:ring-2 focus:ring-sky-500/20 focus:outline-none"
                     />
                   </div>
@@ -205,22 +163,24 @@ export function AuthGate({ status, onAuthenticated }: Props) {
 
                 <div>
                   <label htmlFor="tg-auth-password" className="block text-xs font-semibold text-slate-700 mb-1.5">
-                    密码{isSetup ? '（至少 10 个字符）' : ''}
+                    {isSetup ? '密码（至少 10 位）' : '密码'}
                   </label>
                   <div className="relative">
                     <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                     <input
                       id="tg-auth-password"
+                      name="password"
                       type={showPwd ? 'text' : 'password'}
                       required
                       autoComplete={isSetup ? 'new-password' : 'current-password'}
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      placeholder="输入密码"
+                      placeholder="密码"
                       className="w-full pl-9 pr-10 py-2 text-sm border border-slate-300 rounded-lg focus:border-sky-600 focus:ring-2 focus:ring-sky-500/20 focus:outline-none"
                     />
                     <button
                       type="button"
+                      aria-pressed={showPwd}
                       onClick={() => setShowPwd((v) => !v)}
                       aria-label={showPwd ? '隐藏密码' : '显示密码'}
                       className="absolute right-2.5 top-2 p-0.5 rounded text-slate-400 hover:text-slate-700"
@@ -233,9 +193,7 @@ export function AuthGate({ status, onAuthenticated }: Props) {
             ) : (
               <div className="space-y-3">
                 <div className="flex items-center justify-between rounded-lg bg-slate-50 border border-slate-200 px-3 py-2 text-xs">
-                  <span className="text-slate-600">
-                    正在验证账号 <strong className="font-mono text-slate-900">{username}</strong>
-                  </span>
+                  <span className="font-mono text-slate-900 font-semibold">{username}</span>
                   <button
                     type="button"
                     onClick={() => {
@@ -245,32 +203,32 @@ export function AuthGate({ status, onAuthenticated }: Props) {
                     }}
                     className="text-sky-700 hover:underline font-medium"
                   >
-                    返回账号密码登录
+                    切换账号
                   </button>
                 </div>
 
                 <div>
-                  <label htmlFor="tg-auth-totp" className="block text-xs font-semibold text-slate-700 mb-1">
-                    双因素动态验证码（2FA）
+                  <label htmlFor="tg-auth-totp" className="block text-xs font-semibold text-slate-700 mb-1.5">
+                    动态验证码（6 位数字）或恢复码
                   </label>
-                  <p className="text-[11px] text-slate-500 mb-1.5">
-                    请输入验证器 App 中显示的 6 位数字动态码，或输入一次性 8 位恢复码（如 XXXX-XXXX）。
-                  </p>
                   <div className="relative">
                     <KeyRound className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                     <input
                       ref={totpInputRef}
                       id="tg-auth-totp"
+                      name="totp_code"
                       type="text"
                       inputMode="numeric"
                       autoComplete="one-time-code"
                       pattern="[0-9A-Za-z-]*"
                       maxLength={12}
+                      autoCorrect="off"
+                      autoCapitalize="none"
                       spellCheck={false}
                       required
                       value={totpCode}
                       onChange={(e) => setTotpCode(e.target.value)}
-                      placeholder="6 位数字验证码或 XXXX-XXXX"
+                      placeholder="6 位数字或 XXXX-XXXX"
                       className="tg-tabular w-full pl-9 pr-3 py-2 text-sm font-mono tracking-widest border border-slate-300 rounded-lg focus:border-sky-600 focus:ring-2 focus:ring-sky-500/20 focus:outline-none"
                     />
                   </div>
@@ -287,6 +245,7 @@ export function AuthGate({ status, onAuthenticated }: Props) {
                   <Lock className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
                   <input
                     id="tg-auth-confirm"
+                    name="confirm_password"
                     type={showPwd ? 'text' : 'password'}
                     required
                     autoComplete="new-password"
@@ -304,15 +263,41 @@ export function AuthGate({ status, onAuthenticated }: Props) {
               disabled={submitting}
               className="w-full py-2.5 rounded-lg bg-[#0B2A4A] hover:bg-[#123862] text-white text-sm font-semibold shadow-xs transition-colors disabled:opacity-50"
             >
-              {submitting
-                ? '正在验证并进入系统...'
-                : isSetup
-                  ? '完成初始化并进入控制台'
-                  : totpStep
-                    ? '验证动态码并登录'
-                    : '登录控制台'}
+              {submitting ? '验证中...' : isSetup ? '完成初始化' : totpStep ? '验证并登录' : '登录'}
             </button>
           </form>
+
+          {!isSetup && (
+            <details className="border-t border-slate-100 pt-3 text-xs text-slate-500">
+              <summary className="cursor-pointer hover:text-slate-800 select-none font-medium">
+                忘记密码 / 命令行重置
+              </summary>
+              <div className="mt-2 space-y-1.5">
+                <div className="flex items-center gap-1.5 rounded bg-slate-900 px-2.5 py-2 text-[11px] font-mono text-sky-100">
+                  <code className="flex-1 overflow-x-auto whitespace-nowrap">{resetCmd}</code>
+                  <button
+                    type="button"
+                    aria-label="复制重置密码命令"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(resetCmd)
+                        setCopiedReset(true)
+                        window.setTimeout(() => setCopiedReset(false), 1500)
+                      } catch {
+                        // ignore
+                      }
+                    }}
+                    className="p-1 rounded bg-white/10 hover:bg-white/20 text-white shrink-0"
+                  >
+                    {copiedReset ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
+                  </button>
+                </div>
+                <div className="text-[11px] font-mono text-slate-500">
+                  ENV: TIDEGATE_ADMIN_PASSWORD
+                </div>
+              </div>
+            </details>
+          )}
         </div>
       </main>
     </div>

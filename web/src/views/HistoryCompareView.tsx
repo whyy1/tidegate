@@ -115,39 +115,35 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
   return (
     <div className="flex-1 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-5 space-y-5 text-xs">
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
-        <div className="tg-telemetry-strip px-4 py-3.5 flex flex-wrap items-center justify-between gap-2">
-          <div>
-            <h2 className="text-sm font-semibold text-white">历史压测记录与基线回归对比</h2>
-            <p className="text-[11px] text-sky-200/80">勾选 2～6 条压测记录可叠加对比吞吐量、延迟分位变化与各步骤回归情况</p>
-          </div>
+        <div className="tg-telemetry-strip px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+          <h2 className="text-sm font-semibold text-white">压测记录</h2>
           <div className="flex flex-wrap items-center gap-2">
             {selectedIds.length >= 2 && (
-              <>
-                <select
-                  aria-label="选择基线压测记录"
-                  value={baselineId}
-                  onChange={(e) => setBaselineId(e.target.value)}
-                  className="px-2.5 py-1.5 border border-white/20 rounded-md bg-white/10 text-white [&>option]:text-slate-900"
-                >
-                  {selectedIds.map((id) => {
-                    const r = runs.find((x) => x.id === id)
-                    return (
-                      <option key={id} value={id}>
-                        基线：{r?.scenario_name || id} ({id.slice(-5)})
-                      </option>
-                    )
-                  })}
-                </select>
-                <button
-                  type="button"
-                  disabled={comparing}
-                  onClick={() => void handleCompare()}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold disabled:opacity-50"
-                >
-                  <GitCompare className="w-3.5 h-3.5" /> {comparing ? '计算中...' : `对比选中 (${selectedIds.length})`}
-                </button>
-              </>
+              <select
+                name="baseline_run"
+                aria-label="选择基线压测记录"
+                value={baselineId}
+                onChange={(e) => setBaselineId(e.target.value)}
+                className="px-2.5 py-1.5 border border-white/20 rounded-md bg-white/10 text-white [&>option]:text-slate-900"
+              >
+                {selectedIds.map((id) => {
+                  const r = runs.find((x) => x.id === id)
+                  return (
+                    <option key={id} value={id}>
+                      基线：{r?.scenario_name || id} ({id.slice(-5)})
+                    </option>
+                  )
+                })}
+              </select>
             )}
+            <button
+              type="button"
+              disabled={comparing || selectedIds.length < 2}
+              onClick={() => void handleCompare()}
+              className="tg-tabular inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold disabled:opacity-45 disabled:hover:bg-sky-500"
+            >
+              <GitCompare className="w-3.5 h-3.5" /> {comparing ? '计算中...' : `对比 (${selectedIds.length}/6)`}
+            </button>
             <button
               type="button"
               onClick={() => void loadRuns()}

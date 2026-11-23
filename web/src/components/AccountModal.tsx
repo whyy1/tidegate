@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Bot, Check, Copy, Key, KeyRound, Laptop, LogOut, Plus, ShieldAlert, ShieldCheck, Trash2, X } from 'lucide-react'
+import { Bot, Check, Copy, Key, KeyRound, Laptop, LogOut, Plus, ShieldCheck, Trash2, X } from 'lucide-react'
 import { api, APIError } from '../lib/api'
 import type { APIToken, Project, SessionItem, TOTPEnrollment, User, UserRole } from '../lib/types'
 
@@ -105,7 +105,7 @@ export function AccountModal({
     user.role === 'admin' ? ['viewer', 'member', 'admin'] : user.role === 'member' ? ['viewer', 'member'] : ['viewer']
 
   const origin = typeof window !== 'undefined' ? window.location.origin : 'https://127.0.0.1:8080'
-  const tokenPlaceholder = newPlaintext || '<请先在「API 访问令牌」页签创建 tg_ 令牌>'
+  const tokenPlaceholder = newPlaintext || '<使用上方按钮生成或填入 tg_ 令牌>'
   const httpConfigSnippet = JSON.stringify(
     {
       mcpServers: {
@@ -184,6 +184,27 @@ export function AccountModal({
       onToast('success', '已生成新的 API 访问令牌，可直接用于 CLI 或 MCP 接入')
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '生成 API 令牌失败')
+    } finally {
+      setCreatingTok(false)
+    }
+  }
+
+  const handleQuickMCPToken = async (readonly: boolean) => {
+    setCreatingTok(true)
+    try {
+      const res = await api.createAPIToken({
+        name: readonly ? 'mcp-readonly' : 'mcp-readwrite',
+        role: readonly ? 'viewer' : 'member',
+        scopes: readonly ? ['mcp', 'read'] : ['mcp', 'read', 'write', 'debug', 'run'],
+        ttl_days: 30,
+      })
+      setNewPlaintext(res.plaintext)
+      setCopiedTok(false)
+      setCopiedMcp(false)
+      await loadTokens()
+      onToast('success', readonly ? '已生成只读 MCP 令牌并填入配置' : '已生成读写 MCP 令牌并填入配置')
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : '生成 MCP 令牌失败')
     } finally {
       setCreatingTok(false)
     }
@@ -298,12 +319,12 @@ export function AccountModal({
   return (
     <div className="fixed inset-0 z-40 bg-slate-950/50 backdrop-blur-[2px] flex items-center justify-center p-4">
       <div className="w-full max-w-2xl bg-white rounded-xl border border-slate-200 shadow-2xl overflow-hidden">
-        <div className="px-5 py-3.5 tg-telemetry-strip flex items-center justify-between">
-          <div>
-            <h2 className="text-sm font-semibold text-white">账号安全、API 令牌与 MCP 接入</h2>
-            <p className="text-xs text-sky-200/80 font-mono">
-              {user.username} · 角色 {user.role}
-            </p>
+        <div className="px-5 py-3 tg-telemetry-strip flex items-center justify-between">
+          <div className="flex items-center gap-3 min-w-0">
+            <h2 className="text-sm font-semibold text-white">账号与令牌</h2>
+            <span className="text-xs text-sky-200/80 font-mono truncate">
+              {user.username} · {user.role}
+            </span>
           </div>
           <button
             type="button"
@@ -429,10 +450,10 @@ export function AccountModal({
                   </button>
                 </div>
 
-                <div className="space-y-1.5 pt-1 border-t border-slate-200/80">
-                  <div className="text-[11px] font-medium text-slate-600">
-                    细粒度能力范围 Scope（全部不选 = 继承角色全部默认权限）：
-                  </div>
+                <fieldset className="space-y-1.5 pt-2 border-t border-slate-200/80">
+                  <legend className="text-[11px] font-medium text-slate-600 px-1">
+                    权限范围 Scope（不选则继承角色）
+                  </legend>
                   <div className="flex flex-wrap gap-2">
                     {availableTokenScopes.map((sc) => (
                       <label
@@ -448,13 +469,13 @@ export function AccountModal({
                       </label>
                     ))}
                   </div>
-                </div>
+                </fieldset>
 
                 {projects.length > 0 && (
-                  <div className="space-y-1.5 pt-1 border-t border-slate-200/80">
-                    <div className="text-[11px] font-medium text-slate-600">
-                      限定可访问项目（全部不选 = 允许访问当前用户有权限的所有项目）：
-                    </div>
+                  <fieldset className="space-y-1.5 pt-2 border-t border-slate-200/80">
+                    <legend className="text-[11px] font-medium text-slate-600 px-1">
+                      限定项目（不选则全部可访问）
+                    </legend>
                     <div className="flex flex-wrap gap-2">
                       {projects.map((p) => (
                         <label
@@ -470,7 +491,7 @@ export function AccountModal({
                         </label>
                       ))}
                     </div>
-                  </div>
+                  </fieldset>
                 )}
               </form>
 
@@ -563,12 +584,7 @@ export function AccountModal({
           {tab === 'totp' && (
             <div className="space-y-4 text-xs">
               <div className="flex items-center justify-between p-3 rounded-lg border border-slate-200 bg-slate-50">
-                <div>
-                  <div className="font-semibold text-slate-800">TOTP 双因素认证（2FA）</div>
-                  <p className="text-[11px] text-slate-500 mt-0.5">
-                    支持 Google Authenticator、1Password、Microsoft Authenticator 等 RFC 6238 验证器。
-                  </p>
-                </div>
+                <div className="font-semibold text-slate-800">TOTP 双因素认证（2FA）</div>
                 <span
                   className={`px-2.5 py-1 rounded-full font-semibold text-[11px] ${
                     user.totp_enabled
@@ -748,23 +764,8 @@ export function AccountModal({
           )}
 
           {tab === 'mcp' && (
-            <div className="space-y-3.5 text-xs">
-              <div className="p-3 rounded-lg border border-sky-200 bg-sky-50/70 space-y-1.5">
-                <div className="font-semibold text-sky-950 flex items-center gap-1.5">
-                  <ShieldAlert className="w-4 h-4 text-sky-700" />
-                  <span>MCP 2.0 能力与最小权限安全接入建议</span>
-                </div>
-                <p className="text-slate-700 leading-relaxed">
-                  Tidegate MCP 2.0 暴露 <strong>16 项工具</strong>、<strong>MCP Resources（tidegate:// 只读上下文资源）</strong>以及{' '}
-                  <strong>4 项专家 Prompts 诊断/压测模板</strong>。若仅用于让 AI 查阅接口结构与分析历史压测报告，建议创建{' '}
-                  <code className="px-1 rounded bg-white border border-sky-200 font-mono">viewer</code> 角色且仅勾选{' '}
-                  <code className="px-1 rounded bg-white border border-sky-200 font-mono">mcp</code> +{' '}
-                  <code className="px-1 rounded bg-white border border-sky-200 font-mono">read</code> Scope 的令牌；若需编排接口、调试或执行压测，请显式勾选对应{' '}
-                  <code className="px-1 rounded bg-white border border-sky-200 font-mono">write / debug / run</code> Scope 与允许访问的项目。所有 Vault 密文与凭据均自动脱敏。
-                </p>
-              </div>
-
-              <div className="flex items-center justify-between gap-2">
+            <div className="space-y-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="inline-flex rounded-lg border border-slate-200 bg-slate-100 p-0.5">
                   <button
                     type="button"
@@ -773,7 +774,7 @@ export function AccountModal({
                       mcpMode === 'http' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
                     }`}
                   >
-                    Streamable HTTP（推荐直连）
+                    Streamable HTTP
                   </button>
                   <button
                     type="button"
@@ -782,43 +783,50 @@ export function AccountModal({
                       mcpMode === 'stdio' ? 'bg-white text-slate-900 shadow-xs' : 'text-slate-600'
                     }`}
                   >
-                    CLI Stdio 桥接（tidegate mcp）
+                    CLI Stdio
                   </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={async () => {
-                    try {
-                      await navigator.clipboard.writeText(activeSnippet)
-                      setCopiedMcp(true)
-                      onToast('success', '已复制 mcp_config.json 配置片段')
-                    } catch {
-                      onToast('info', '请手动复制下方 JSON 配置')
-                    }
-                  }}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-[#0B2A4A] hover:bg-[#123862] text-white font-medium"
-                >
-                  {copiedMcp ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} 复制配置 JSON
-                </button>
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <button
+                    type="button"
+                    disabled={creatingTok}
+                    onClick={() => void handleQuickMCPToken(true)}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 font-medium disabled:opacity-50"
+                  >
+                    <Plus className="w-3.5 h-3.5 text-sky-600" /> 生成只读 MCP 令牌
+                  </button>
+                  {user.role !== 'viewer' && (
+                    <button
+                      type="button"
+                      disabled={creatingTok}
+                      onClick={() => void handleQuickMCPToken(false)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-md border border-sky-300 bg-sky-50 hover:bg-sky-100 text-sky-800 font-medium disabled:opacity-50"
+                    >
+                      <Plus className="w-3.5 h-3.5" /> 生成读写 MCP 令牌
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      try {
+                        await navigator.clipboard.writeText(activeSnippet)
+                        setCopiedMcp(true)
+                        onToast('success', '已复制 mcp_config.json 配置片段')
+                      } catch {
+                        onToast('info', '请手动复制下方 JSON 配置')
+                      }
+                    }}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md bg-[#0B2A4A] hover:bg-[#123862] text-white font-medium"
+                  >
+                    {copiedMcp ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />} 复制 JSON
+                  </button>
+                </div>
               </div>
 
               <pre className="p-3.5 rounded-lg bg-[#07192E] text-sky-100 font-mono text-[11px] overflow-x-auto tg-scroller-dark border border-slate-800">
                 {activeSnippet}
               </pre>
-
-              {!newPlaintext && (
-                <div className="flex items-center justify-between text-[11px] text-slate-500">
-                  <span>提示：如尚未生成令牌，请先切换到「API 访问令牌」创建一枚新令牌，此处会自动填入。</span>
-                  <button
-                    type="button"
-                    onClick={() => setTab('tokens')}
-                    className="text-sky-700 hover:underline font-semibold shrink-0"
-                  >
-                    去创建令牌 →
-                  </button>
-                </div>
-              )}
             </div>
           )}
 

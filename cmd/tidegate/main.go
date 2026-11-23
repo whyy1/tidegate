@@ -37,15 +37,32 @@ const usage = `Tidegate：API 管理与压测一体化工具
   tidegate testserver [--addr :18080]   启动内置的高性能被测服务
   tidegate version                      显示版本
 
-serve 常用选项（也可用 TIDEGATE_* 环境变量）：
+serve 常用选项（CLI 参数优先，均支持 TIDEGATE_* 环境变量）：
   --data <目录>                  数据目录，默认 ./data（TIDEGATE_DATA）
   --listen <地址>                HTTP 监听地址，默认 127.0.0.1:8080（TIDEGATE_LISTEN）
-  --cluster-listen <地址>        集群节点监听地址，默认 127.0.0.1:7443
-  --cluster-token <令牌>         允许外部节点接入的集群令牌
-  --tls-self-signed              自动生成自签名 HTTPS 证书
-  --tls-cert / --tls-key <文件>  指定 HTTPS 证书和私钥
-  --allow-insecure-remote        允许非本机通过明文 HTTP 登录（不推荐）
-  --no-local-agent               不自动启动本机发压节点子进程
+  --public-url <URL>             外部访问地址，自动注册 Origin/Host（TIDEGATE_PUBLIC_URL）
+  --trusted-proxies <CIDR列表>   可信反代 IP/CIDR，逗号分隔（TIDEGATE_TRUSTED_PROXIES）
+  --allowed-origins <Origin列表> 额外允许访问源，逗号分隔（TIDEGATE_ALLOWED_ORIGINS）
+  --cluster-listen <地址>        集群节点监听地址（TIDEGATE_CLUSTER_LISTEN）
+  --cluster-public-addr <地址>   对外公告的集群地址 host:port（TIDEGATE_CLUSTER_PUBLIC_ADDR）
+  --cluster-token <令牌>         允许外部节点接入的集群令牌（TIDEGATE_CLUSTER_TOKEN）
+  --tls-self-signed              自动生成自签名 HTTPS 证书（TIDEGATE_TLS_SELF_SIGNED）
+  --tls-cert / --tls-key <文件>  HTTPS 证书和私钥路径（TIDEGATE_TLS_CERT / TIDEGATE_TLS_KEY）
+  --allow-insecure-remote        允许非本机通过明文 HTTP 登录（TIDEGATE_ALLOW_INSECURE_REMOTE）
+  --admin-user <用户名>          初始化/同步管理员用户名（TIDEGATE_ADMIN_USER，默认 admin）
+  --admin-password <密码>        管理员初始/重启同步密码（TIDEGATE_ADMIN_PASSWORD）
+  --admin-password-file <文件>   管理员密码文件路径（TIDEGATE_ADMIN_PASSWORD_FILE）
+  --reset-totp                   启动时清空指定管理员 2FA 绑定（TIDEGATE_ADMIN_RESET_TOTP）
+  --master-key / --master-key-file  敏感变量 Vault 主密钥（TIDEGATE_MASTER_KEY / TIDEGATE_MASTER_KEY_FILE）
+  --no-local-agent / --no-open   禁用内置节点 / 不打开浏览器（TIDEGATE_NO_LOCAL_AGENT / TIDEGATE_NO_OPEN）
+  --client fast|std              HTTP 客户端实现，默认 fast（TIDEGATE_CLIENT）
+
+reset-password 常用选项：
+  --data <目录>                  数据目录，默认 ./data（TIDEGATE_DATA）
+  --user <用户名>                目标用户名（TIDEGATE_ADMIN_USER，默认 admin）
+  --password <密码>              直接传入新密码（TIDEGATE_ADMIN_PASSWORD）
+  --password-file <文件>         从密码文件读取（TIDEGATE_ADMIN_PASSWORD_FILE）
+  --reset-totp                   同时解除双因素认证绑定（TIDEGATE_ADMIN_RESET_TOTP）
 
 agent 常用选项：
   --join <host:port>             控制器集群地址（TIDEGATE_JOIN）

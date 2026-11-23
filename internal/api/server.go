@@ -16,17 +16,19 @@ import (
 
 // Options configure the Tidegate HTTP and WebSocket API server.
 type Options struct {
-	Controller     *controller.Controller
-	Store          *store.Store
-	Results        *store.ResultDB
-	Auth           *auth.Service
-	Guard          *auth.Guard
-	Version        string
-	TLS            bool
-	ListenLoopback bool
-	AllowedOrigins []string
-	WebHandler     http.Handler
-	Logger         *slog.Logger
+	Controller        *controller.Controller
+	Store             *store.Store
+	Results           *store.ResultDB
+	Auth              *auth.Service
+	Guard             *auth.Guard
+	Version           string
+	TLS               bool
+	ListenLoopback    bool
+	AllowedOrigins    []string
+	PublicURL         string
+	ClusterPublicAddr string
+	WebHandler        http.Handler
+	Logger            *slog.Logger
 }
 
 // Server serves the /api/v1 REST endpoints, /api/v1/ws WebSocket stream,
@@ -63,6 +65,11 @@ func NewServer(opts Options) (*Server, error) {
 	}
 	for _, o := range opts.AllowedOrigins {
 		if u, err := url.Parse(strings.TrimSpace(o)); err == nil && u.Hostname() != "" {
+			allowed[strings.ToLower(u.Hostname())] = true
+		}
+	}
+	if strings.TrimSpace(opts.PublicURL) != "" {
+		if u, err := url.Parse(strings.TrimSpace(opts.PublicURL)); err == nil && u.Hostname() != "" {
 			allowed[strings.ToLower(u.Hostname())] = true
 		}
 	}

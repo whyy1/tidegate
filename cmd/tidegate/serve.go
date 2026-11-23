@@ -9,11 +9,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"syscall"
@@ -31,13 +33,21 @@ type serveConfig struct {
 	DataDir             string
 	Listen              string
 	ClusterListen       string
+	ClusterPublicAddr   string
 	ClusterToken        string
+	MasterKey           string
 	MasterKeyFile       string
 	TLSCert             string
 	TLSKey              string
 	TLSSelfSigned       bool
 	AllowInsecureRemote bool
+	PublicURL           string
 	AllowedOrigins      []string
+	TrustedProxies      []string
+	AdminUser           string
+	AdminPassword       string
+	AdminPasswordFile   string
+	ResetTOTP           bool
 	NoLocalAgent        bool
 	NoOpen              bool
 	Client              string
@@ -81,13 +91,21 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 	dataDir := fs.String("data", envOr("TIDEGATE_DATA", "./data"), "数据目录")
 	listen := fs.String("listen", envOr("TIDEGATE_LISTEN", "127.0.0.1:8080"), "HTTP/WebSocket 监听地址")
 	clusterListen := fs.String("cluster-listen", envOr("TIDEGATE_CLUSTER_LISTEN", "127.0.0.1:7443"), "集群节点 gRPC 监听地址")
+	clusterPublicAddr := fs.String("cluster-public-addr", envOr("TIDEGATE_CLUSTER_PUBLIC_ADDR", ""), "对外公告的集群节点连接地址（host:port）")
 	clusterToken := fs.String("cluster-token", envOr("TIDEGATE_CLUSTER_TOKEN", ""), "远程发压节点认证令牌")
+	masterKey := fs.String("master-key", envOr("TIDEGATE_MASTER_KEY", ""), "敏感变量加密主密钥（64位十六进制或 Base64，优先于主密钥文件）")
 	masterKeyFile := fs.String("master-key-file", envOr("TIDEGATE_MASTER_KEY_FILE", ""), "敏感变量加密主密钥文件（默认 <data>/master.key）")
 	tlsCert := fs.String("tls-cert", envOr("TIDEGATE_TLS_CERT", ""), "TLS 证书文件（PEM）")
 	tlsKey := fs.String("tls-key", envOr("TIDEGATE_TLS_KEY", ""), "TLS 私钥文件（PEM）")
 	tlsSelfSigned := fs.Bool("tls-self-signed", envBool("TIDEGATE_TLS_SELF_SIGNED", false), "自动生成自签名 TLS 证书")
 	allowInsecureRemote := fs.Bool("allow-insecure-remote", envBool("TIDEGATE_ALLOW_INSECURE_REMOTE", false), "允许非本机通过明文 HTTP 登录（不推荐）")
+	publicURL := fs.String("public-url", envOr("TIDEGATE_PUBLIC_URL", ""), "外部访问 URL（如反代域名 https://tidegate.example.com）")
 	allowedOrigins := fs.String("allowed-origins", envOr("TIDEGATE_ALLOWED_ORIGINS", ""), "额外允许的访问源列表（逗号分隔）")
+	trustedProxies := fs.String("trusted-proxies", envOr("TIDEGATE_TRUSTED_PROXIES", ""), "可信反向代理 IP/CIDR 列表（逗号分隔）")
+	adminUser := fs.String("admin-user", envOr(auth.AdminUserEnv, auth.DefaultAdminUsername), "初始或同步管理员用户名")
+	adminPassword := fs.String("admin-password", os.Getenv(auth.AdminPasswordEnv), "管理员初始化或启动同步密码")
+	adminPasswordFile := fs.String("admin-password-file", envOr(auth.AdminPasswordFileEnv, ""), "管理员密码文件路径")
+	resetTOTP := fs.Bool("reset-totp", envBool(auth.AdminResetTOTPEnv, false), "启动时清空管理员 2FA 绑定")
 	noLocalAgent := fs.Bool("no-local-agent", envBool("TIDEGATE_NO_LOCAL_AGENT", false), "不自动启动本机发压节点子进程")
 	noOpen := fs.Bool("no-open", envBool("TIDEGATE_NO_OPEN", false), "启动后不自动打开浏览器")
 	client := fs.String("client", envOr("TIDEGATE_CLIENT", string(engine.ClientFast)), "HTTP 客户端实现：fast 或 std")
@@ -108,17 +126,74 @@ func cmdServe(args []string, stdout, stderr io.Writer) int {
 		DataDir:             *dataDir,
 		Listen:              *listen,
 		ClusterListen:       *clusterListen,
+		ClusterPublicAddr:   *clusterPublicAddr,
 		ClusterToken:        *clusterToken,
+		MasterKey:           *masterKey,
 		MasterKeyFile:       *masterKeyFile,
 		TLSCert:             *tlsCert,
 		TLSKey:              *tlsKey,
 		TLSSelfSigned:       *tlsSelfSigned,
 		AllowInsecureRemote: *allowInsecureRemote,
+		PublicURL:           *publicURL,
 		AllowedOrigins:      splitCSVList(*allowedOrigins),
+		TrustedProxies:      splitCSVList(*trustedProxies),
+		AdminUser:           *adminUser,
+		AdminPassword:       *adminPassword,
+		AdminPasswordFile:   *adminPasswordFile,
+		ResetTOTP:           *resetTOTP,
 		NoLocalAgent:        *noLocalAgent,
 		NoOpen:              *noOpen,
 		Client:              *client,
 	}, stdout, stderr, nil)
+}
+
+func fillServeConfigEnv(cfg serveConfig) serveConfig {
+	if strings.TrimSpace(cfg.ClusterPublicAddr) == "" {
+		cfg.ClusterPublicAddr = envOr("TIDEGATE_CLUSTER_PUBLIC_ADDR", "")
+	}
+	if strings.TrimSpace(cfg.ClusterToken) == "" {
+		cfg.ClusterToken = envOr("TIDEGATE_CLUSTER_TOKEN", "")
+	}
+	if strings.TrimSpace(cfg.MasterKey) == "" {
+		cfg.MasterKey = envOr("TIDEGATE_MASTER_KEY", "")
+	}
+	if strings.TrimSpace(cfg.MasterKeyFile) == "" {
+		cfg.MasterKeyFile = envOr("TIDEGATE_MASTER_KEY_FILE", "")
+	}
+	if strings.TrimSpace(cfg.TLSCert) == "" {
+		cfg.TLSCert = envOr("TIDEGATE_TLS_CERT", "")
+	}
+	if strings.TrimSpace(cfg.TLSKey) == "" {
+		cfg.TLSKey = envOr("TIDEGATE_TLS_KEY", "")
+	}
+	if !cfg.TLSSelfSigned {
+		cfg.TLSSelfSigned = envBool("TIDEGATE_TLS_SELF_SIGNED", false)
+	}
+	if !cfg.AllowInsecureRemote {
+		cfg.AllowInsecureRemote = envBool("TIDEGATE_ALLOW_INSECURE_REMOTE", false)
+	}
+	if strings.TrimSpace(cfg.PublicURL) == "" {
+		cfg.PublicURL = envOr("TIDEGATE_PUBLIC_URL", "")
+	}
+	if len(cfg.AllowedOrigins) == 0 {
+		cfg.AllowedOrigins = splitCSVList(envOr("TIDEGATE_ALLOWED_ORIGINS", ""))
+	}
+	if len(cfg.TrustedProxies) == 0 {
+		cfg.TrustedProxies = splitCSVList(envOr("TIDEGATE_TRUSTED_PROXIES", ""))
+	}
+	if strings.TrimSpace(cfg.AdminUser) == "" {
+		cfg.AdminUser = envOr(auth.AdminUserEnv, auth.DefaultAdminUsername)
+	}
+	if cfg.AdminPassword == "" {
+		cfg.AdminPassword = os.Getenv(auth.AdminPasswordEnv)
+	}
+	if strings.TrimSpace(cfg.AdminPasswordFile) == "" {
+		cfg.AdminPasswordFile = envOr(auth.AdminPasswordFileEnv, "")
+	}
+	if !cfg.ResetTOTP {
+		cfg.ResetTOTP = envBool(auth.AdminResetTOTPEnv, false)
+	}
+	return cfg
 }
 
 func serveWithContext(
@@ -127,6 +202,7 @@ func serveWithContext(
 	stdout, stderr io.Writer,
 	onReady func(httpURL, clusterAddr string),
 ) int {
+	cfg = fillServeConfigEnv(cfg)
 	if cfg.TLSSelfSigned && (cfg.TLSCert != "" || cfg.TLSKey != "") {
 		fmt.Fprintln(stderr, "--tls-self-signed 不能与 --tls-cert / --tls-key 同时使用。")
 		return 2
@@ -193,16 +269,36 @@ func serveWithContext(
 		return 1
 	}
 	rdb := store.NewResultDB(db)
-	masterKeyPath := strings.TrimSpace(cfg.MasterKeyFile)
-	if masterKeyPath == "" {
-		masterKeyPath = filepath.Join(cfg.DataDir, "master.key")
+	var box *store.SecretBox
+	if strings.TrimSpace(cfg.MasterKey) != "" {
+		box, err = store.NewSecretBoxFromString(cfg.MasterKey)
+	} else {
+		masterKeyPath := strings.TrimSpace(cfg.MasterKeyFile)
+		if masterKeyPath == "" {
+			masterKeyPath = filepath.Join(cfg.DataDir, "master.key")
+		}
+		box, err = store.LoadOrCreateMasterKey(masterKeyPath)
 	}
-	box, err := store.LoadOrCreateMasterKey(masterKeyPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "加载敏感变量主密钥失败：%v\n", err)
 		return 1
 	}
 	st.SetSecretVault(store.NewSecretVault(rdb, box))
+
+	allowedOrigins := append([]string(nil), cfg.AllowedOrigins...)
+	publicURL := strings.TrimSpace(cfg.PublicURL)
+	if publicURL != "" {
+		u, uerr := url.Parse(publicURL)
+		if uerr != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
+			fmt.Fprintf(stderr, "外部访问地址 %q 无效：应为 http(s)://host[:port]\n", cfg.PublicURL)
+			return 2
+		}
+		pubOrigin := strings.ToLower(u.Scheme) + "://" + u.Host
+		if !slices.Contains(allowedOrigins, pubOrigin) {
+			allowedOrigins = append(allowedOrigins, pubOrigin)
+		}
+		publicURL = strings.TrimRight(publicURL, "/")
+	}
 
 	log := slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
 	authSvc, err := auth.New(db, auth.Options{Logger: log})
@@ -213,21 +309,79 @@ func serveWithContext(
 	guard, err := auth.NewGuard(authSvc, auth.GuardConfig{
 		TLS:                 useTLS,
 		AllowInsecureRemote: cfg.AllowInsecureRemote,
-		AllowedOrigins:      cfg.AllowedOrigins,
+		AllowedOrigins:      allowedOrigins,
+		TrustedProxies:      cfg.TrustedProxies,
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "安全策略配置无效：%v\n", err)
 		return 2
 	}
 
-	if passFile := strings.TrimSpace(os.Getenv(auth.AdminPasswordFileEnv)); passFile != "" {
-		created, err := authSvc.SetupFromPasswordFile(ctx, passFile, "")
-		if err != nil {
-			fmt.Fprintf(stderr, "通过 %s 创建管理员失败：%v\n", auth.AdminPasswordFileEnv, err)
+	adminUser := strings.TrimSpace(cfg.AdminUser)
+	if adminUser == "" {
+		adminUser = auth.DefaultAdminUsername
+	}
+	switch {
+	case cfg.AdminPassword != "":
+		act, berr := authSvc.EnsureAdminAccount(ctx, auth.AdminBootstrapRequest{
+			Username:     adminUser,
+			Password:     cfg.AdminPassword,
+			SyncExisting: true,
+			ResetTOTP:    cfg.ResetTOTP,
+		})
+		if berr != nil {
+			fmt.Fprintf(stderr, "同步管理员账户失败：%v\n", berr)
 			return 1
 		}
-		if created {
-			fmt.Fprintf(stdout, "已从 %s 自动初始化管理员账户（%s）。\n", auth.AdminPasswordFileEnv, auth.DefaultAdminUsername)
+		switch act {
+		case "created":
+			fmt.Fprintf(stdout, "已通过环境变量自动创建管理员账户（%s）。\n", adminUser)
+		case "updated":
+			fmt.Fprintf(stdout, "已同步环境变量中的管理员凭据（%s）。\n", adminUser)
+		}
+	case strings.TrimSpace(cfg.AdminPasswordFile) != "":
+		passFile := strings.TrimSpace(cfg.AdminPasswordFile)
+		filePwd, rerr := auth.ReadPasswordFile(passFile)
+		if rerr == nil {
+			act, berr := authSvc.EnsureAdminAccount(ctx, auth.AdminBootstrapRequest{
+				Username:     adminUser,
+				Password:     filePwd,
+				SyncExisting: true,
+				ResetTOTP:    cfg.ResetTOTP,
+			})
+			if berr != nil {
+				fmt.Fprintf(stderr, "通过 %s 同步管理员失败：%v\n", auth.AdminPasswordFileEnv, berr)
+				return 1
+			}
+			switch act {
+			case "created":
+				fmt.Fprintf(stdout, "已从 %s 自动初始化管理员账户（%s）。\n", auth.AdminPasswordFileEnv, adminUser)
+			case "updated":
+				fmt.Fprintf(stdout, "已从 %s 同步更新管理员凭据（%s）。\n", auth.AdminPasswordFileEnv, adminUser)
+			}
+		} else if errors.Is(rerr, os.ErrNotExist) {
+			if pend, perr := authSvc.SetupPending(ctx); perr == nil && pend {
+				fmt.Fprintf(stderr, "通过 %s 创建管理员失败：%v\n", auth.AdminPasswordFileEnv, rerr)
+				return 1
+			}
+			if cfg.ResetTOTP {
+				if reset, terr := authSvc.AdminResetTOTPByName(ctx, adminUser); terr != nil && !errors.Is(terr, auth.ErrUserNotFound) {
+					fmt.Fprintf(stderr, "重置管理员 2FA 失败：%v\n", terr)
+					return 1
+				} else if reset {
+					fmt.Fprintf(stdout, "已根据环境变量解除管理员 %s 的 2FA 绑定。\n", adminUser)
+				}
+			}
+		} else {
+			fmt.Fprintf(stderr, "读取管理员密码文件失败：%v\n", rerr)
+			return 1
+		}
+	case cfg.ResetTOTP:
+		if reset, terr := authSvc.AdminResetTOTPByName(ctx, adminUser); terr != nil && !errors.Is(terr, auth.ErrUserNotFound) {
+			fmt.Fprintf(stderr, "重置管理员 2FA 失败：%v\n", terr)
+			return 1
+		} else if reset {
+			fmt.Fprintf(stdout, "已根据环境变量解除管理员 %s 的 2FA 绑定。\n", adminUser)
 		}
 	}
 
@@ -266,17 +420,19 @@ func serveWithContext(
 
 	webHandler := webui.Handler()
 	apiSrv, err := api.NewServer(api.Options{
-		Controller:     ctrl,
-		Store:          st,
-		Results:        rdb,
-		Auth:           authSvc,
-		Guard:          guard,
-		Version:        version,
-		TLS:            useTLS,
-		ListenLoopback: listenLoopback,
-		AllowedOrigins: cfg.AllowedOrigins,
-		WebHandler:     webHandler,
-		Logger:         log,
+		Controller:        ctrl,
+		Store:             st,
+		Results:           rdb,
+		Auth:              authSvc,
+		Guard:             guard,
+		Version:           version,
+		TLS:               useTLS,
+		ListenLoopback:    listenLoopback,
+		AllowedOrigins:    allowedOrigins,
+		PublicURL:         publicURL,
+		ClusterPublicAddr: strings.TrimSpace(cfg.ClusterPublicAddr),
+		WebHandler:        webHandler,
+		Logger:            log,
 	})
 	if err != nil {
 		_ = lis.Close()
@@ -321,7 +477,11 @@ func serveWithContext(
 		}
 	}
 
-	fmt.Fprintf(stdout, "Tidegate %s 已启动：访问地址 %s/（集群端口 %s）\n", version, baseURL, ctrl.ClusterAddr())
+	if publicURL != "" {
+		fmt.Fprintf(stdout, "Tidegate %s 已启动：本机地址 %s/，外部地址 %s/（集群端口 %s）\n", version, baseURL, publicURL, ctrl.ClusterAddr())
+	} else {
+		fmt.Fprintf(stdout, "Tidegate %s 已启动：访问地址 %s/（集群端口 %s）\n", version, baseURL, ctrl.ClusterAddr())
+	}
 	if !cfg.NoOpen && webHandler != nil {
 		go openBrowser(baseURL)
 	}

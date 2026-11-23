@@ -284,12 +284,9 @@ export function ProjectModal({
               </div>
 
               <div>
-                <div className="flex items-center justify-between mb-1">
-                  <span className="font-medium text-slate-700">项目级变量（低于环境变量与临时变量优先级）</span>
+                <div className="flex items-center justify-between mb-1.5">
+                  <span className="font-medium text-slate-700">项目变量（勾选「密」加密存储）</span>
                 </div>
-                <p className="text-[11px] text-slate-500 mb-1.5">
-                  勾选「密」的敏感变量将自动存入 AES-256-GCM 加密保险箱，导出与界面回显时会自动脱敏。
-                </p>
                 <KeyValueEditor
                   items={vars}
                   onChange={setVars}
@@ -299,7 +296,7 @@ export function ProjectModal({
               </div>
 
               <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 space-y-2">
-                <div className="font-medium text-slate-700">导出当前项目（已自动脱敏「密」标记变量及明文凭据）</div>
+                <div className="font-medium text-slate-700">导出项目（自动脱敏密文）</div>
                 <div className="flex flex-wrap gap-2">
                   {(
                     [
@@ -355,18 +352,15 @@ export function ProjectModal({
                 <p className="text-slate-500">正在加载项目成员访问控制...</p>
               ) : (
                 <>
-                  <div className="p-3 rounded-lg border border-slate-200 bg-slate-50 space-y-1.5">
+                  <div className="p-3 rounded-lg border border-slate-200 bg-slate-50">
                     <label className="flex items-center gap-2 font-semibold text-slate-800 cursor-pointer">
                       <input
                         type="checkbox"
                         checked={aclRestricted}
                         onChange={(e) => setAclRestricted(e.target.checked)}
                       />
-                      <span>开启私有隔离：仅显式授权成员可访问此项目（管理员始终可见）</span>
+                      <span>私有项目（仅授权成员可见）</span>
                     </label>
-                    <p className="text-[11px] text-slate-500 pl-6">
-                      未开启时，团队所有已登录用户均按全局角色访问该项目（下方成员配置仍可对单个用户授予额外权限，如将 viewer 在本项目提升为 member）。
-                    </p>
                   </div>
 
                   <div className="border border-slate-200 rounded-lg overflow-hidden">

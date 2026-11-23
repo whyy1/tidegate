@@ -1,6 +1,6 @@
 # Tidegate 产品架构与功能白皮书
 
-版本：v1.1 正式版　更新日期：2026-11-23
+版本：v1.2 正式版　更新日期：2026-11-23
 
 ## 1. 一句话定位
 
@@ -50,12 +50,12 @@ flowchart LR
 
 | 命令 | 角色 | 说明 |
 | :--- | :--- | :--- |
-| `tidegate serve`（默认） | 控制台 + 控制器 + 本机发压节点 + MCP HTTP 端点 | 启动完整控制台并自动监督本机 `agent` 子进程；支持 `--tls-self-signed` 与反代模式 |
-| `tidegate agent` | 分布式发压节点 | 通过一次性 Join Token 与 `--ca-fingerprint` 完成双向 mTLS 注册，并可凭 `--cert-dir` 免密续连 |
+| `tidegate serve`（默认） | 控制台 + 控制器 + 本机发压节点 + MCP HTTP 端点 | 启动完整控制台并自动监督本机 `agent` 子进程；全量支持 `TIDEGATE_*` 环境变量（TLS、反代可信代理、`PUBLIC_URL`、主密钥及重启管理员凭据同步） |
+| `tidegate agent` | 分布式发压节点 | 通过一次性 Join Token 与 `--ca-fingerprint` 完成双向 mTLS 注册，支持 `--cert-dir` 免密续连及 `TIDEGATE_*` 环境变量配置 |
 | `tidegate mcp` | 本地 CLI Stdio MCP 代理 | 将 `stdin`/`stdout` JSON-RPC 2.0 安全桥接至运行中的 Tidegate 服务 |
 | `tidegate test` | 无界面功能回归与 JUnit 报告 | 顺序执行目录/项目接口（含前后置脚本与断言），输出 JSON 与 `--junit` XML，失败返回退出码 `3` |
 | `tidegate run <场景文件>` | 无界面压测与 CI 门禁 | 支持导出 JSON/CSV/HTML/JTL，SLA 阈值违约时以退出码 `3` 中止流水线 |
-| `tidegate reset-password` | 管理员密码重置 | 离线运维命令，安全重置指定用户密码并轮换会话 |
+| `tidegate reset-password` | 管理员密码重置 | 运维重置命令，支持 `--password` / `--password-file` / `--reset-totp` 非交互或标准输入重置指定管理员密码并轮换会话 |
 | `tidegate testserver` | 内置高性能被测靶场 | 提供 HTTP / TLS / HTTP/2 / WS / gRPC（含 Server Reflection）/ SSE 基准与回归测试端点 |
 
 ---

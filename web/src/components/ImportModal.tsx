@@ -100,16 +100,22 @@ export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, on
   return (
     <div className="fixed inset-0 z-40 bg-slate-900/40 flex items-center justify-center p-4">
       <div className="w-full max-w-3xl bg-white rounded-xl border border-slate-200 shadow-xl overflow-hidden flex flex-col max-h-[86vh]">
-        <div className="px-5 py-3.5 border-b border-slate-200 flex items-center justify-between bg-slate-50">
-          <div>
-            <h2 className="text-sm font-semibold text-slate-900">两步安全导入接口 / 集合 / 测试计划</h2>
-            <p className="text-[11px] text-slate-500">
-              自动识别 OpenAPI 3.x、Swagger 2.0、Postman v2.1、Apifox、JMeter (.jmx)、HAR 1.2、cURL 与 .tidegate；先预览差异再写入，保留既有接口 ID
-            </p>
+        <div className="px-5 py-3 border-b border-slate-200 flex items-center justify-between gap-3 bg-slate-50">
+          <h2 className="text-sm font-semibold text-slate-900">导入</h2>
+          <div className="flex items-center gap-3">
+            <div className="hidden sm:flex items-center gap-1.5 text-[11px] font-medium">
+              <span className={`px-2 py-0.5 rounded-full border ${!preview ? 'bg-sky-50 border-sky-200 text-sky-800' : 'bg-white border-slate-200 text-slate-500'}`}>
+                1. 选择来源
+              </span>
+              <span className="text-slate-300">→</span>
+              <span className={`px-2 py-0.5 rounded-full border ${preview ? 'bg-sky-50 border-sky-200 text-sky-800' : 'bg-white border-slate-200 text-slate-400'}`}>
+                2. 差异确认
+              </span>
+            </div>
+            <button type="button" onClick={onClose} aria-label="关闭导入" className="p-1 text-slate-400 hover:text-slate-600 rounded">
+              <X className="w-4 h-4" />
+            </button>
           </div>
-          <button type="button" onClick={onClose} className="p-1 text-slate-400 hover:text-slate-600 rounded">
-            <X className="w-4 h-4" />
-          </button>
         </div>
 
         <div className="p-5 overflow-y-auto space-y-4 text-xs">
@@ -348,7 +354,7 @@ export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, on
                   onClick={() => void handleApply()}
                   className="inline-flex items-center gap-1.5 px-4 py-2 rounded-md bg-emerald-600 hover:bg-emerald-700 text-white font-medium disabled:opacity-50"
                 >
-                  <CheckCircle2 className="w-3.5 h-3.5" /> 第二步：确认写入当前项目
+                  <CheckCircle2 className="w-3.5 h-3.5" /> 确认导入
                 </button>
               </div>
             </div>

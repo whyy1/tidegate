@@ -921,3 +921,66 @@ func TestTokenScopesAndProjectACL(t *testing.T) {
 		t.Fatalf("token excluding proj_other = (%q, %v, %v), want denied", role, ok, err)
 	}
 }
+
+func TestEnsureAdminAccountIdempotentAndSync(t *testing.T) {
+	ctx := context.Background()
+	s := newTestService(t, openTestDB(t), newFakeClock(), nil)
+
+	// 1. Fresh DB -> creates first admin.
+	act, err := s.EnsureAdminAccount(ctx, AdminBootstrapRequest{
+		Username:     "admin",
+		Password:     "initial-pass-2026",
+		SyncExisting: true,
+	})
+	if err != nil || act != "created" {
+		t.Fatalf("first EnsureAdminAccount = (%q, %v), want (created, nil)", act, err)
+	}
+	loginRes, err := login(s, "admin", "initial-pass-2026", testAddr)
+	if err != nil {
+		t.Fatalf("login after create: %v", err)
+	}
+
+	// 2. Same password -> "unchanged" and active session survives.
+	act, err = s.EnsureAdminAccount(ctx, AdminBootstrapRequest{
+		Username:     "Admin",
+		Password:     "initial-pass-2026",
+		SyncExisting: true,
+	})
+	if err != nil || act != "unchanged" {
+		t.Fatalf("idempotent EnsureAdminAccount = (%q, %v), want (unchanged, nil)", act, err)
+	}
+	if u, _, err := s.Authenticate(ctx, loginRes.Token); err != nil || u.ID != loginRes.User.ID {
+		t.Fatalf("expected existing session to remain valid when password unchanged: u=%+v err=%v", u, err)
+	}
+
+	// Enable TOTP on admin to verify ResetTOTP clears it during sync.
+	clk := s.now
+	enroll, err := s.BeginTOTPEnrollment(ctx, loginRes.User.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	totpNow, err := GenerateTOTPCode(enroll.Secret, clk())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ConfirmTOTPEnrollment(ctx, loginRes.User.ID, totpNow); err != nil {
+		t.Fatal(err)
+	}
+
+	// 3. Different password + ResetTOTP -> updates password, revokes old session, clears TOTP.
+	act, err = s.EnsureAdminAccount(ctx, AdminBootstrapRequest{
+		Username:     "admin",
+		Password:     "rotated-pass-2026!",
+		SyncExisting: true,
+		ResetTOTP:    true,
+	})
+	if err != nil || act != "updated" {
+		t.Fatalf("sync update = (%q, %v), want (updated, nil)", act, err)
+	}
+	if _, _, err := s.Authenticate(ctx, loginRes.Token); !errors.Is(err, ErrUnauthenticated) {
+		t.Fatalf("expected old session revoked after password change, got %v", err)
+	}
+	if _, err := login(s, "admin", "rotated-pass-2026!", testAddr); err != nil {
+		t.Fatalf("login with rotated password (and cleared TOTP) failed: %v", err)
+	}
+}

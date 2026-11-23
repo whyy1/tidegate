@@ -93,6 +93,9 @@ func main() {
 
 	var cases []benchCase
 	for _, v := range strings.Split(*vusList, ",") {
+		if strings.TrimSpace(v) == "" {
+			continue
+		}
 		n, err := strconv.Atoi(strings.TrimSpace(v))
 		must(err)
 		for _, t := range strings.Split(*targets, ",") {
@@ -327,20 +330,60 @@ func runCase(c benchCase, exe, k6, base, outDir string, d time.Duration, srvWatc
 		must(os.WriteFile(scn, []byte(body), 0o644))
 		cmd = exec.Command(exe, "run", scn, "--quiet", "--out", resultPath, "--client", strings.TrimPrefix(c.Target, "tidegate-"))
 	case "k6":
-		if c.TLS || c.Mode == "rate" {
-			r.Note = "当前仅对比 closed/HTTP 模式"
-			return r
+		if c.Mode == "rate" {
+			k6RateScript := fmt.Sprintf(`import http from 'k6/http';
+
+export const options = {
+  discardResponseBodies: true,
+  insecureSkipTLSVerify: %t,
+  scenarios: {
+    rate: {
+      executor: 'ramping-arrival-rate',
+      startRate: 0,
+      timeUnit: '1s',
+      preAllocatedVUs: 200,
+      maxVUs: %d,
+      stages: [
+        { target: %.0f, duration: '2s' },
+        { target: %.0f, duration: '%s' },
+      ],
+    },
+  },
+};
+
+export default function () {
+  http.get(__ENV.URL);
+}
+`, c.TLS, max(c.VUs, 1000), c.RateTarget, c.RateTarget, d.String())
+			scriptPath := filepath.Join(outDir, fmt.Sprintf("k6-rate-%s.js", c.Name))
+			must(os.WriteFile(scriptPath, []byte(k6RateScript), 0o644))
+			k6Args := []string{"run", "--quiet", "--no-usage-report", "--no-color",
+				"--summary-export", resultPath,
+				"--summary-trend-stats", "avg,min,med,max,p(90),p(95),p(99)",
+				"-e", "URL=" + base + "/ping",
+			}
+			if c.TLS {
+				k6Args = append(k6Args, "--insecure-skip-tls-verify")
+			}
+			k6Args = append(k6Args, scriptPath)
+			cmd = exec.Command(k6, k6Args...)
+		} else {
+			script := "bench/k6/ping.js"
+			if c.Think > 0 {
+				script = "bench/k6/ping-think.js"
+			}
+			k6Args := []string{"run", "--quiet", "--no-usage-report", "--no-color",
+				"--stage", fmt.Sprintf("%s:%d", rampFor(c.VUs), c.VUs), "--stage", fmt.Sprintf("%s:%d", d, c.VUs),
+				"--summary-export", resultPath,
+				"--summary-trend-stats", "avg,min,med,max,p(90),p(95),p(99)",
+				"-e", "URL=" + base + "/ping", "-e", "THINK=" + strconv.FormatFloat(c.Think.Seconds(), 'f', -1, 64),
+			}
+			if c.TLS {
+				k6Args = append(k6Args, "--insecure-skip-tls-verify")
+			}
+			k6Args = append(k6Args, script)
+			cmd = exec.Command(k6, k6Args...)
 		}
-		script := "bench/k6/ping.js"
-		if c.Think > 0 {
-			script = "bench/k6/ping-think.js"
-		}
-		cmd = exec.Command(k6, "run", "--quiet", "--no-usage-report", "--no-color",
-			"--stage", fmt.Sprintf("%s:%d", rampFor(c.VUs), c.VUs), "--stage", fmt.Sprintf("%s:%d", d, c.VUs),
-			"--summary-export", resultPath,
-			"--summary-trend-stats", "avg,min,med,max,p(90),p(95),p(99)",
-			"-e", "URL="+base+"/ping", "-e", "THINK="+strconv.FormatFloat(c.Think.Seconds(), 'f', -1, 64),
-			script)
 	default:
 		r.Note = "未知的测试对象"
 		return r
@@ -397,7 +440,11 @@ func runCase(c benchCase, exe, k6, base, outDir string, d time.Duration, srvWatc
 	if c.Target == "k6" {
 		parseK6(data, &r)
 	} else {
-		parseTidegate(data, &r, rampFor(c.VUs))
+		ramp := rampFor(c.VUs)
+		if c.Mode == "rate" {
+			ramp = 2 * time.Second
+		}
+		parseTidegate(data, &r, ramp)
 	}
 	if r.Wall > 0 {
 		r.CPUCores = r.CPUSeconds / r.Wall

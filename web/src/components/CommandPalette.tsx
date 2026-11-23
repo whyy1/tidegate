@@ -125,9 +125,8 @@ export function CommandPalette({
       {
         id: 'act-new-api',
         category: 'action',
-        label: '新建临时调试接口请求',
-        hint: '打开空白草稿页签或粘贴 cURL',
-        badge: '快捷动作',
+        label: '新建临时请求',
+        hint: '',
         run: () => {
           onNewScratchAPI()
           onClose()
@@ -136,8 +135,8 @@ export function CommandPalette({
       {
         id: 'act-mcp',
         category: 'action',
-        label: '查看 MCP 智能体接入配置',
-        hint: '生成 Streamable HTTP 与 CLI Stdio 客户端配置',
+        label: 'MCP 接入配置',
+        hint: '',
         badge: 'MCP',
         run: () => {
           onOpenMCPConfig()
@@ -147,8 +146,8 @@ export function CommandPalette({
       {
         id: 'act-nav-workbench',
         category: 'action',
-        label: '切换到接口工作台',
-        hint: '多协议调试与接口定义管理',
+        label: '接口工作台',
+        hint: '',
         run: () => {
           onChangeTab('workbench')
           onClose()
@@ -157,8 +156,8 @@ export function CommandPalette({
       {
         id: 'act-nav-scenarios',
         category: 'action',
-        label: '切换到场景编排与数据',
-        hint: '多步控制流、脚本、CSV/JSONL 数据文件',
+        label: '场景编排',
+        hint: '',
         run: () => {
           onChangeTab('scenarios')
           onClose()
@@ -167,8 +166,8 @@ export function CommandPalette({
       {
         id: 'act-nav-run',
         category: 'action',
-        label: '切换到实时压测大盘',
-        hint: '启动分布式压测、调速与观测实时曲线',
+        label: '实时压测',
+        hint: '',
         run: () => {
           onChangeTab('run')
           onClose()
@@ -177,8 +176,8 @@ export function CommandPalette({
       {
         id: 'act-nav-agents',
         category: 'action',
-        label: '切换到发压集群节点',
-        hint: '签发 Join Token、查看节点硬件遥测与 mTLS 指纹',
+        label: '集群节点',
+        hint: '',
         run: () => {
           onChangeTab('agents')
           onClose()
@@ -187,8 +186,8 @@ export function CommandPalette({
       {
         id: 'act-nav-gov',
         category: 'action',
-        label: '切换到系统治理与审计日志',
-        hint: 'RBAC 用户、目标白名单、MCP 护栏、Prometheus/InfluxDB',
+        label: '系统治理',
+        hint: '',
         run: () => {
           onChangeTab('governance')
           onClose()
@@ -273,14 +272,18 @@ export function CommandPalette({
       aria-labelledby="tg-cmd-title"
       className="tg-dialog w-full max-w-xl overflow-hidden"
     >
-      <div className="px-4 py-3 border-b border-slate-200 flex items-center gap-2.5 bg-white">
+      <search className="px-4 py-3 border-b border-slate-200 flex items-center gap-2.5 bg-white">
         <Search className="w-4 h-4 text-sky-600 shrink-0" />
         <h2 id="tg-cmd-title" className="sr-only">
-          全局快捷命令与接口搜索面板
+          全局命令与接口搜索
         </h2>
         <input
           ref={inputRef}
           type="text"
+          name="command_search"
+          autoCorrect="off"
+          autoCapitalize="none"
+          spellCheck={false}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={(e) => {
@@ -295,8 +298,8 @@ export function CommandPalette({
               items[selectedIdx].run()
             }
           }}
-          placeholder="搜索接口名称/路径、压测场景、环境或快捷操作..."
-          className="flex-1 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none"
+          placeholder="搜索接口、场景、环境或命令..."
+          className="flex-1 min-w-0 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none"
         />
         <button
           type="button"
@@ -306,11 +309,11 @@ export function CommandPalette({
         >
           <X className="w-4 h-4" />
         </button>
-      </div>
+      </search>
 
       <div className="max-h-[55vh] overflow-y-auto tg-scroller divide-y divide-slate-100 bg-white">
         {items.length === 0 ? (
-          <div className="py-10 text-center text-xs text-slate-400">未找到匹配的接口、场景或命令</div>
+          <div className="py-10 text-center text-xs text-slate-400">无匹配结果</div>
         ) : (
           items.map((it, idx) => {
             const active = idx === selectedIdx
@@ -327,7 +330,7 @@ export function CommandPalette({
                 {iconFor(it)}
                 <div className="min-w-0 flex-1">
                   <div className="font-medium text-slate-900 truncate">{it.label}</div>
-                  <div className="text-[11px] text-slate-500 font-mono truncate">{it.hint}</div>
+                  {it.hint && <div className="text-[11px] text-slate-500 font-mono truncate">{it.hint}</div>}
                 </div>
                 {it.badge && (
                   <span className="px-2 py-0.5 rounded border border-slate-200 bg-slate-100 font-mono text-[10px] font-semibold text-slate-700 shrink-0">
@@ -341,9 +344,9 @@ export function CommandPalette({
         )}
       </div>
 
-      <div className="px-4 py-2 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500">
-        <span>支持按 ↑ ↓ 选择，Enter 确认跳转</span>
-        <span className="font-mono">Esc 关闭</span>
+      <div className="px-4 py-2 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500 font-mono">
+        <span>↑↓ 选择 · Enter 跳转</span>
+        <span>Esc</span>
       </div>
     </dialog>
   )

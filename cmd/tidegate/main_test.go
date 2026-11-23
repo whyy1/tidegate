@@ -770,3 +770,98 @@ func TestCLICollectionTestAndJUnit(t *testing.T) {
 		t.Fatalf("expected <failure> element in junit xml:\n%s", failXML)
 	}
 }
+
+func TestResetPasswordCLIAndServeAdminEnvSync(t *testing.T) {
+	dataDir := t.TempDir()
+	var out, errBuf bytes.Buffer
+	code := runMainWithIO([]string{
+		"reset-password",
+		"--data", dataDir,
+		"--user", "opsadmin",
+		"--password", "FirstPass-2026!",
+	}, strings.NewReader(""), &out, &errBuf)
+	if code != 0 {
+		t.Fatalf("reset-password create exit %d: stdout=%s stderr=%s", code, out.String(), errBuf.String())
+	}
+
+	// Start serve with TIDEGATE_ADMIN_PASSWORD set to a new value + PUBLIC_URL + MASTER_KEY,
+	// verifying declarative sync updates the existing user's password on boot.
+	t.Setenv("TIDEGATE_ADMIN_USER", "opsadmin")
+	t.Setenv("TIDEGATE_ADMIN_PASSWORD", "SecondPass-2026!")
+	t.Setenv("TIDEGATE_MASTER_KEY", "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+	t.Setenv("TIDEGATE_PUBLIC_URL", "https://tidegate.localtest.me")
+	t.Setenv("TIDEGATE_TRUSTED_PROXIES", "loopback")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	readyURL := make(chan string, 1)
+	done := make(chan int, 1)
+	var serveOut, serveErr bytes.Buffer
+	go func() {
+		done <- cmdServeWithEnv(ctx, dataDir, &serveOut, &serveErr, func(httpURL, _ string) {
+			readyURL <- httpURL
+		})
+	}()
+
+	var base string
+	select {
+	case base = <-readyURL:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("serve did not become ready; stdout=%s stderr=%s", serveOut.String(), serveErr.String())
+	}
+
+	jar, _ := cookiejar.New(nil)
+	cl := &http.Client{Jar: jar, Timeout: 5 * time.Second}
+
+	// Old password must fail; synced env password must succeed.
+	loginWith := func(pwd string) int {
+		req, _ := http.NewRequest("POST", base+"/api/v1/auth/login", strings.NewReader(`{"username":"opsadmin","password":`+strconv.Quote(pwd)+`}`))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-Tidegate-Request", "1")
+		resp, err := cl.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if st := loginWith("FirstPass-2026!"); st != 401 {
+		t.Fatalf("old password status = %d, want 401", st)
+	}
+	if st := loginWith("SecondPass-2026!"); st != 200 {
+		t.Fatalf("synced env password status = %d, want 200", st)
+	}
+
+	// system/info reflects public_url and resolved non-wildcard cluster_addr.
+	resp, err := cl.Get(base + "/api/v1/system/info")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var sysInfo map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&sysInfo)
+	resp.Body.Close()
+	if sysInfo["public_url"] != "https://tidegate.localtest.me" {
+		t.Fatalf("expected public_url in system/info, got %+v", sysInfo)
+	}
+
+	cancel()
+	if exitCode := <-done; exitCode != 0 {
+		t.Fatalf("serve exit = %d stderr=%s", exitCode, serveErr.String())
+	}
+}
+
+func cmdServeWithEnv(ctx context.Context, dataDir string, stdout, stderr io.Writer, onReady func(string, string)) int {
+	return serveWithContext(ctx, serveConfig{
+		DataDir:           dataDir,
+		Listen:            "127.0.0.1:0",
+		ClusterListen:     "127.0.0.1:0",
+		PublicURL:         os.Getenv("TIDEGATE_PUBLIC_URL"),
+		TrustedProxies:    splitCSVList(os.Getenv("TIDEGATE_TRUSTED_PROXIES")),
+		MasterKey:         os.Getenv("TIDEGATE_MASTER_KEY"),
+		AdminUser:         os.Getenv(auth.AdminUserEnv),
+		AdminPassword:     os.Getenv(auth.AdminPasswordEnv),
+		AdminPasswordFile: os.Getenv(auth.AdminPasswordFileEnv),
+		NoLocalAgent:      true,
+		NoOpen:            true,
+	}, stdout, stderr, onReady)
+}

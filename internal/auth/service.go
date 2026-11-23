@@ -95,10 +95,13 @@ const (
 	minAllowedPasswordLength = 8
 )
 
-// AdminPasswordFileEnv names the environment variable that points at a file
-// holding the initial admin password. The caller reads the variable and
-// passes the path to SetupFromPasswordFile.
-const AdminPasswordFileEnv = "TIDEGATE_ADMIN_PASSWORD_FILE"
+// Environment variable names recognized for administrator bootstrap & sync.
+const (
+	AdminUserEnv         = "TIDEGATE_ADMIN_USER"
+	AdminPasswordEnv     = "TIDEGATE_ADMIN_PASSWORD"
+	AdminPasswordFileEnv = "TIDEGATE_ADMIN_PASSWORD_FILE"
+	AdminResetTOTPEnv    = "TIDEGATE_ADMIN_RESET_TOTP"
+)
 
 // Options configures a Service. Zero values select the defaults.
 type Options struct {
@@ -407,7 +410,7 @@ func (s *Service) SetupFromPasswordFile(ctx context.Context, path, username stri
 	if err != nil || !pending {
 		return false, err
 	}
-	password, err := readPasswordFile(path)
+	password, err := ReadPasswordFile(path)
 	if err != nil {
 		return false, err
 	}
@@ -424,7 +427,150 @@ func (s *Service) SetupFromPasswordFile(ctx context.Context, path, username stri
 	return true, nil
 }
 
-func readPasswordFile(path string) (string, error) {
+// AdminBootstrapRequest configures EnsureAdminAccount for declarative admin setup/sync.
+type AdminBootstrapRequest struct {
+	Username     string
+	Password     string
+	SyncExisting bool
+	ResetTOTP    bool
+}
+
+// EnsureAdminAccount idempotently creates or updates an administrator account.
+// It returns one of: "created", "updated", "unchanged", or "skipped".
+func (s *Service) EnsureAdminAccount(ctx context.Context, req AdminBootstrapRequest) (string, error) {
+	username := strings.TrimSpace(req.Username)
+	if username == "" {
+		username = DefaultAdminUsername
+	}
+	var err error
+	username, err = normalizeUsername(username)
+	if err != nil {
+		return "", err
+	}
+	if err := checkPasswordPolicy(req.Password, username, s.minPassLen); err != nil {
+		return "", err
+	}
+
+	s.setupMu.Lock()
+	defer s.setupMu.Unlock()
+
+	pending, err := s.SetupPending(ctx)
+	if err != nil {
+		return "", err
+	}
+	if pending {
+		if _, err := s.createFirstAdmin(ctx, username, req.Password); err != nil {
+			return "", err
+		}
+		s.setup = setupCode{}
+		return "created", nil
+	}
+	if !req.SyncExisting {
+		if req.ResetTOTP {
+			if reset, rerr := s.AdminResetTOTPByName(ctx, username); rerr != nil {
+				return "", rerr
+			} else if reset {
+				return "updated", nil
+			}
+		}
+		return "skipped", nil
+	}
+
+	u, storedHash, err := s.userByName(ctx, username)
+	if err != nil {
+		return "", err
+	}
+	if u == nil {
+		if _, err := s.CreateUser(ctx, CreateUserRequest{
+			Username: username,
+			Password: req.Password,
+			Role:     RoleAdmin,
+		}); err != nil {
+			return "", err
+		}
+		return "created", nil
+	}
+
+	if err := s.acquireHash(ctx); err != nil {
+		return "", err
+	}
+	samePwd, vErr := verifyPassword(req.Password, storedHash)
+	s.releaseHash()
+	if vErr != nil {
+		return "", fmt.Errorf("auth: verify existing admin password: %w", vErr)
+	}
+
+	changed := false
+	if u.Role != RoleAdmin || !samePwd {
+		newHash := storedHash
+		if !samePwd {
+			newHash, err = s.hash(ctx, req.Password)
+			if err != nil {
+				return "", err
+			}
+		}
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return "", fmt.Errorf("auth: sync admin account: %w", err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		ms := s.clock().UnixMilli()
+		if !samePwd {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE auth_users SET password_hash = ?, role = ?, updated_at = ?, password_changed_at = ? WHERE id = ?`,
+				newHash, string(RoleAdmin), ms, ms, u.ID); err != nil {
+				return "", fmt.Errorf("auth: update admin password: %w", err)
+			}
+			if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE user_id = ?`, u.ID); err != nil {
+				return "", fmt.Errorf("auth: revoke sessions on admin sync: %w", err)
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE auth_users SET role = ?, updated_at = ? WHERE id = ?`,
+				string(RoleAdmin), ms, u.ID); err != nil {
+				return "", fmt.Errorf("auth: promote admin role: %w", err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return "", fmt.Errorf("auth: commit admin sync: %w", err)
+		}
+		s.loginByUser.reset(usernameKey(u.Username))
+		changed = true
+	}
+
+	if req.ResetTOTP && u.TOTPEnabled {
+		if err := s.AdminResetTOTP(ctx, u.ID); err != nil {
+			return "", err
+		}
+		changed = true
+	}
+	if changed {
+		return "updated", nil
+	}
+	return "unchanged", nil
+}
+
+// AdminResetTOTPByName clears TOTP 2FA state for the named account when enabled.
+func (s *Service) AdminResetTOTPByName(ctx context.Context, username string) (bool, error) {
+	u, _, err := s.userByName(ctx, strings.TrimSpace(username))
+	if err != nil {
+		return false, err
+	}
+	if u == nil {
+		return false, ErrUserNotFound
+	}
+	if !u.TOTPEnabled {
+		return false, nil
+	}
+	if err := s.AdminResetTOTP(ctx, u.ID); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// ReadPasswordFile reads a password file, stripping optional UTF-8 BOM and trailing newlines.
+func ReadPasswordFile(path string) (string, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return "", fmt.Errorf("auth: open admin password file: %w", err)

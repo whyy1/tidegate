@@ -125,14 +125,14 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
   return (
     <div className="flex-1 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-5 space-y-5 text-xs">
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
-        <div className="tg-telemetry-strip px-4 py-3.5 flex flex-wrap items-center justify-between gap-2">
+        <div className="tg-telemetry-strip px-4 py-3 flex flex-wrap items-center justify-between gap-2">
           <div className="flex items-center gap-2 font-semibold text-sm text-white">
-            <Terminal className="w-4 h-4 text-[#38BDF8]" /> mTLS 分布式节点注册与零信任接入
+            <Terminal className="w-4 h-4 text-[#38BDF8]" /> 节点接入
           </div>
           <div className="flex flex-wrap items-center gap-2">
             {sysInfo && (
               <span className="tg-tabular font-mono text-[11px] text-sky-200">
-                控制器 {sysInfo.version} · 集群端口 {sysInfo.cluster_addr}
+                {sysInfo.version} · {sysInfo.cluster_addr}
               </span>
             )}
             <a
@@ -140,75 +140,42 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
               download="tidegate-cluster-ca.pem"
               className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/20 bg-white/10 hover:bg-white/20 text-white font-medium"
             >
-              <Download className="w-3.5 h-3.5 text-[#38BDF8]" /> 下载 CA 证书 (.pem)
+              <Download className="w-3.5 h-3.5 text-[#38BDF8]" /> 下载 CA (.pem)
             </a>
           </div>
         </div>
         <div className="p-4 space-y-3">
-        {sysInfo?.cluster_ca_fingerprint && (
-          <div className="flex flex-wrap items-center gap-2 px-3 py-2 rounded-lg bg-sky-50/70 border border-sky-200 text-sky-950 font-mono text-[11px]">
-            <Shield className="w-3.5 h-3.5 text-sky-700 shrink-0" />
-            <span className="font-sans font-medium">集群 CA SHA-256 指纹：</span>
-            <span className="break-all select-all">{sysInfo.cluster_ca_fingerprint}</span>
-          </div>
-        )}
-        <p className="text-slate-600">
-          远端发压机首次使用下方一次性加入令牌完成 CSR 双向 mTLS 证书签发后，后续重启无需再次提供令牌（已持久化签名证书）：
-        </p>
-        <div className="flex items-center gap-2 bg-slate-900 text-sky-100 px-3 py-2 rounded-lg font-mono text-xs">
-          <code className="flex-1 overflow-x-auto">{joinCmd}</code>
-          <button
-            type="button"
-            onClick={async () => {
-              try {
-                await navigator.clipboard.writeText(joinCmd)
-                setCopiedCmd(true)
-                onToast('success', '已复制节点接入命令')
-                window.setTimeout(() => setCopiedCmd(false), 1500)
-              } catch {
-                onToast('info', '请手动选择复制命令')
-              }
-            }}
-            className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white/15 hover:bg-white/25 text-white shrink-0"
-          >
-            {copiedCmd ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-            复制
-          </button>
-        </div>
-
-        {isAdmin && (
-          <div className="pt-3 border-t border-slate-100 space-y-2.5">
-            <div className="flex items-center justify-between">
-              <span className="font-semibold text-slate-800 flex items-center gap-1.5">
-                <KeyRound className="w-3.5 h-3.5 text-sky-600" /> 节点加入令牌管理 (Join Tokens)
-              </span>
-            </div>
-            <form onSubmit={handleCreateJoinToken} className="flex flex-wrap items-center gap-2">
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-3 items-start">
+          {isAdmin && (
+            <form onSubmit={handleCreateJoinToken} className="xl:col-span-5 flex flex-wrap items-center gap-2 p-2.5 rounded-lg border border-slate-200 bg-slate-50">
               <input
+                name="token_name"
+                aria-label="加入令牌备注名"
                 type="text"
                 value={tokenName}
                 onChange={(e) => setTokenName(e.target.value)}
-                placeholder="节点标识备注（例如 perf-node-02）"
-                className="flex-1 min-w-[180px] px-2.5 py-1.5 border border-slate-300 rounded bg-white"
+                placeholder="节点标识（如 perf-node-02）"
+                className="flex-1 min-w-[140px] px-2.5 py-1.5 border border-slate-300 rounded bg-white"
               />
-              <label className="inline-flex items-center gap-1 text-slate-600">
-                <span>有效小时</span>
-                <input
-                  type="number"
-                  min={1}
-                  max={8760}
-                  value={tokenTTL}
-                  onChange={(e) => setTokenTTL(Math.max(1, Number(e.target.value) || 24))}
-                  className="w-16 px-2 py-1 border border-slate-300 rounded font-mono bg-white"
-                />
-              </label>
+              <input
+                name="ttl_hours"
+                aria-label="有效小时数"
+                type="number"
+                min={1}
+                max={8760}
+                value={tokenTTL}
+                onChange={(e) => setTokenTTL(Math.max(1, Number(e.target.value) || 24))}
+                title="有效小时"
+                className="tg-tabular w-16 px-2 py-1.5 border border-slate-300 rounded font-mono bg-white"
+              />
+              <span className="text-slate-500">h</span>
               <label className="inline-flex items-center gap-1 text-slate-700 cursor-pointer">
                 <input
                   type="checkbox"
                   checked={tokenSingleUse}
                   onChange={(e) => setTokenSingleUse(e.target.checked)}
                 />
-                <span>单次一次性使用</span>
+                <span>单次</span>
               </label>
               <button
                 type="submit"
@@ -218,18 +185,50 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
                 <Plus className="w-3.5 h-3.5" /> 签发令牌
               </button>
             </form>
+          )}
 
+          <div className={`${isAdmin ? 'xl:col-span-7' : 'xl:col-span-12'} space-y-2`}>
+            <div className="flex items-center gap-2 bg-slate-900 text-sky-100 px-3 py-2 rounded-lg font-mono text-xs">
+              <code className="flex-1 min-w-0 overflow-x-auto whitespace-nowrap">{joinCmd}</code>
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    await navigator.clipboard.writeText(joinCmd)
+                    setCopiedCmd(true)
+                    onToast('success', '已复制节点接入命令')
+                    window.setTimeout(() => setCopiedCmd(false), 1500)
+                  } catch {
+                    onToast('info', '请手动选择复制命令')
+                  }
+                }}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white/15 hover:bg-white/25 text-white shrink-0"
+              >
+                {copiedCmd ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                复制
+              </button>
+            </div>
+            {sysInfo?.cluster_ca_fingerprint && (
+              <div className="flex items-center gap-2 px-3 py-1.5 rounded border border-sky-200 bg-sky-50/70 text-sky-950 font-mono text-[11px]">
+                <Shield className="w-3.5 h-3.5 text-sky-700 shrink-0" />
+                <span className="font-sans font-medium shrink-0">CA 指纹</span>
+                <span className="truncate select-all">{sysInfo.cluster_ca_fingerprint}</span>
+              </div>
+            )}
+          </div>
+        </div>
+
+        {isAdmin && (createdTok || joinTokens.length > 0) && (
+          <div className="pt-2 border-t border-slate-100 space-y-2">
             {createdTok && (
-              <div className="p-2.5 rounded-lg border border-emerald-300 bg-emerald-50 text-emerald-950 font-mono text-[11px] space-y-1">
-                <div className="font-sans font-semibold">
-                  新签发令牌明文（已自动填充至上方命令，仅本次展示）：
-                </div>
-                <div className="break-all select-all">{createdTok.token}</div>
+              <div className="px-3 py-2 rounded-lg border border-emerald-300 bg-emerald-50 text-emerald-950 font-mono text-[11px] flex items-center gap-2">
+                <KeyRound className="w-3.5 h-3.5 text-emerald-700 shrink-0" />
+                <span className="break-all select-all">{createdTok.token}</span>
               </div>
             )}
 
             {joinTokens.length > 0 && (
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
                 {joinTokens.map((jt) => (
                   <div
                     key={jt.id}
@@ -239,11 +238,11 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
                       <div className="font-medium text-slate-800 truncate">
                         {jt.name || jt.id}{' '}
                         <span className="text-[10px] font-mono text-slate-500">
-                          · {jt.single_use ? '一次性' : '多次'} · 已用 {jt.used_count} 次
+                          · {jt.single_use ? '单次' : '多次'} · {jt.used_count} 次
                         </span>
                       </div>
                       <div className="text-[10px] text-slate-400">
-                        过期：{new Date(jt.expires_at).toLocaleString()}
+                        过期 {new Date(jt.expires_at).toLocaleString()}
                       </div>
                     </div>
                     <button

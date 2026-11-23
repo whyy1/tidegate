@@ -55,9 +55,9 @@ type junitSkipped struct {
 
 func cmdTest(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("test", stderr)
-	projectFlag := fs.String("project", "", "指定项目 ID 或名称（当数据目录包含多个项目时使用）")
+	projectFlag := fs.String("project", envOr("TIDEGATE_PROJECT", ""), "指定项目 ID 或名称（当数据目录包含多个项目时使用）")
 	folderFlag := fs.String("folder", "", "仅执行指定目录（支持目录 ID、名称或路径）")
-	envFlag := fs.String("env", "", "指定环境 ID 或名称")
+	envFlag := fs.String("env", envOr("TIDEGATE_ENV", ""), "指定环境 ID 或名称")
 	stopOnError := fs.Bool("stop-on-error", false, "遇到首个失败接口后立即终止后续接口")
 	outPath := fs.String("out", "", "写出完整 JSON 回归测试结果")
 	junitPath := fs.String("junit", "", "写出 JUnit XML 测试报告（适用于 CI/CD）")

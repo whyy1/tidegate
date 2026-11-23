@@ -142,14 +142,9 @@ export function CollectionRunnerModal({
       className="tg-dialog w-full max-w-4xl overflow-hidden"
     >
       <div className="px-4 py-3 border-b border-slate-200 flex items-center justify-between gap-2 bg-slate-50">
-        <div>
-          <h3 id="tg-collection-runner-title" className="text-sm font-semibold text-slate-900">
-            集合 / 目录批量功能回归测试
-          </h3>
-          <p className="text-[11px] text-slate-500">
-            按目录树深度优先顺序逐个调试执行接口，自动传递提取变量与前后置脚本状态，支持 CI JUnit 集成
-          </p>
-        </div>
+        <h3 id="tg-collection-runner-title" className="text-sm font-semibold text-slate-900">
+          批量测试
+        </h3>
         <button
           type="button"
           onClick={onClose}
@@ -200,7 +195,7 @@ export function CollectionRunnerModal({
                 onChange={(e) => setStopOnError(e.target.checked)}
                 className="rounded border-slate-300 text-sky-600"
               />
-              <span>遇到首个失败即终止</span>
+              <span>遇错即停</span>
             </label>
           </div>
           <div className="md:col-span-2 flex justify-end">
