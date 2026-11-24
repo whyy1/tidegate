@@ -104,22 +104,133 @@ func (s *Server) handlePatchUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Role auth.Role `json:"role"`
+		Role     *auth.Role `json:"role"`
+		Disabled *bool      `json:"disabled"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, err)
 		return
 	}
-	u, err := s.auth.UpdateUserRole(r.Context(), uid, body.Role)
+	if body.Role == nil && body.Disabled == nil {
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "未提供需要更新的用户字段"))
+		return
+	}
+	actor, _ := auth.UserFromContext(r.Context())
+	var actorID int64
+	if actor != nil {
+		actorID = actor.ID
+	}
+	var u *auth.User
+	if body.Role != nil {
+		u, err = s.auth.UpdateUserRole(r.Context(), uid, *body.Role)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		s.audit(r, "user.role_update", "user", strconv.FormatInt(uid, 10), map[string]any{
+			"username": u.Username,
+			"role":     u.Role,
+		})
+	}
+	if body.Disabled != nil {
+		u, err = s.auth.SetUserDisabled(r.Context(), actorID, uid, *body.Disabled)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		act := "user.enable"
+		if *body.Disabled {
+			act = "user.disable"
+		}
+		s.audit(r, act, "user", strconv.FormatInt(uid, 10), map[string]any{
+			"username": u.Username,
+			"disabled": u.Disabled,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": toUserDTO(u)})
+}
+
+func (s *Server) handleAdminRevokeUserSessions(w http.ResponseWriter, r *http.Request) {
+	uid, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || uid <= 0 {
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "用户 ID 无效"))
+		return
+	}
+	revoked, err := s.auth.RevokeAllUserSessions(r.Context(), uid)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	s.audit(r, "user.role_update", "user", strconv.FormatInt(uid, 10), map[string]any{
-		"username": u.Username,
-		"role":     u.Role,
+	s.audit(r, "user.sessions_revoke", "user", strconv.FormatInt(uid, 10), map[string]any{"revoked": revoked})
+	writeJSON(w, http.StatusOK, map[string]int64{"revoked": revoked})
+}
+
+func (s *Server) handleGetUserProjects(w http.ResponseWriter, r *http.Request) {
+	uid, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || uid <= 0 {
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "用户 ID 无效"))
+		return
+	}
+	target, err := s.auth.User(r.Context(), uid)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	projs, err := s.store.ListProjects()
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	restricted, overrides, err := s.auth.ListUserProjectOverrides(r.Context(), uid)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	type item struct {
+		ProjectID     string    `json:"project_id"`
+		ProjectName   string    `json:"project_name"`
+		Restricted    bool      `json:"restricted"`
+		MemberRole    auth.Role `json:"member_role"`
+		EffectiveRole auth.Role `json:"effective_role"`
+		Allowed       bool      `json:"allowed"`
+	}
+	out := make([]item, 0, len(projs))
+	for _, p := range projs {
+		effRole, allowed, _ := s.auth.ResolveProjectRole(r.Context(), target, nil, p.ID)
+		out = append(out, item{
+			ProjectID:     p.ID,
+			ProjectName:   p.Name,
+			Restricted:    restricted[p.ID],
+			MemberRole:    overrides[p.ID],
+			EffectiveRole: effRole,
+			Allowed:       allowed,
+		})
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":     toUserDTO(target),
+		"projects": out,
 	})
-	writeJSON(w, http.StatusOK, map[string]any{"user": toUserDTO(u)})
+}
+
+func (s *Server) handlePutUserProjects(w http.ResponseWriter, r *http.Request) {
+	uid, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || uid <= 0 {
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "用户 ID 无效"))
+		return
+	}
+	var body struct {
+		Overrides map[string]auth.Role `json:"overrides"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
+		writeError(w, err)
+		return
+	}
+	if err := s.auth.SetUserProjectOverrides(r.Context(), uid, body.Overrides); err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "user.projects_update", "user", strconv.FormatInt(uid, 10), map[string]any{"count": len(body.Overrides)})
+	s.handleGetUserProjects(w, r)
 }
 
 func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
@@ -186,6 +297,15 @@ func (s *Server) handleListAPITokens(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, list)
 }
 
+func (s *Server) handleAdminListAPITokens(w http.ResponseWriter, r *http.Request) {
+	list, err := s.auth.ListAllAPITokens(r.Context())
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
 func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 	u, ok := auth.UserFromContext(r.Context())
 	if !ok {
@@ -193,13 +313,16 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name       string    `json:"name"`
-		Role       auth.Role `json:"role"`
-		Scopes     []string  `json:"scopes"`
-		ProjectIDs []string  `json:"project_ids"`
-		MCPTools   []string  `json:"mcp_tools"`
-		ExpiresIn  string    `json:"expires_in"`
-		TTLDays    int       `json:"ttl_days"`
+		Name              string    `json:"name"`
+		Role              auth.Role `json:"role"`
+		Scopes            []string  `json:"scopes"`
+		ProjectIDs        []string  `json:"project_ids"`
+		MCPTools          []string  `json:"mcp_tools"`
+		MCPMaxVUs         int       `json:"mcp_max_vus"`
+		MCPMaxDurationSec int       `json:"mcp_max_duration_sec"`
+		RatePerMin        int       `json:"rate_per_min"`
+		ExpiresIn         string    `json:"expires_in"`
+		TTLDays           int       `json:"ttl_days"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, err)
@@ -217,14 +340,25 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		ttl = time.Duration(body.TTLDays) * 24 * time.Hour
 	}
 
+	if pol, perr := s.ctrl.GetSecurityPolicy(r.Context()); perr == nil && pol.TokenMaxTTLDays > 0 {
+		maxTTL := time.Duration(pol.TokenMaxTTLDays) * 24 * time.Hour
+		if ttl == 0 || ttl > maxTTL {
+			writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "安全策略限制了访问令牌最长有效期为 "+strconv.Itoa(pol.TokenMaxTTLDays)+" 天"))
+			return
+		}
+	}
+
 	tok, plaintext, err := s.auth.CreateAPIToken(r.Context(), auth.CreateTokenRequest{
-		UserID:     u.ID,
-		Name:       body.Name,
-		Role:       body.Role,
-		Scopes:     body.Scopes,
-		ProjectIDs: body.ProjectIDs,
-		MCPTools:   body.MCPTools,
-		TTL:        ttl,
+		UserID:            u.ID,
+		Name:              body.Name,
+		Role:              body.Role,
+		Scopes:            body.Scopes,
+		ProjectIDs:        body.ProjectIDs,
+		MCPTools:          body.MCPTools,
+		MCPMaxVUs:         body.MCPMaxVUs,
+		MCPMaxDurationSec: body.MCPMaxDurationSec,
+		RatePerMin:        body.RatePerMin,
+		TTL:               ttl,
 	})
 	if err != nil {
 		writeError(w, err)
@@ -236,6 +370,7 @@ func (s *Server) handleCreateAPIToken(w http.ResponseWriter, r *http.Request) {
 		"scopes":      tok.Scopes,
 		"project_ids": tok.ProjectIDs,
 		"mcp_tools":   tok.MCPTools,
+		"mcp_max_vus": tok.MCPMaxVUs,
 		"prefix":      tok.Prefix,
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -278,10 +413,38 @@ func (s *Server) handleMCPCatalog(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
+		"enabled":                    !pol.MCPDisabled,
+		"allow_load_runs":            !pol.MCPDisableLoadRuns,
+		"resources_enabled":          !pol.MCPDisabled && !pol.MCPDisableResources,
+		"prompts_enabled":            !pol.MCPDisabled && !pol.MCPDisablePrompts,
+		"rate_per_min":               pol.EffectiveMCPRatePerMin(),
 		"tools":                      s.mcp.Catalog(pol),
+		"resources":                  s.mcp.ResourcesCatalog(pol),
+		"prompts":                    s.mcp.PromptsCatalog(pol),
 		"effective_max_vus":          pol.EffectiveMCPMaxVUs(),
 		"effective_max_duration_sec": int(pol.EffectiveMCPMaxDuration().Seconds()),
 	})
+}
+
+func (s *Server) handleMCPActivity(w http.ResponseWriter, r *http.Request) {
+	u, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, auth.ErrUnauthenticated)
+		return
+	}
+	q := store.AuditQuery{
+		Limit:        20,
+		ActionPrefix: "mcp.",
+	}
+	if !u.Role.IsAdmin() {
+		q.UserID = u.ID
+	}
+	list, err := s.results.ListAuditLogs(r.Context(), q)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
 }
 
 func (s *Server) handlePutSecurityPolicy(w http.ResponseWriter, r *http.Request) {
@@ -301,8 +464,9 @@ func (s *Server) handlePutSecurityPolicy(w http.ResponseWriter, r *http.Request)
 
 func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	q := store.AuditQuery{
-		Action:   r.URL.Query().Get("action"),
-		Username: r.URL.Query().Get("username"),
+		Action:       r.URL.Query().Get("action"),
+		ActionPrefix: r.URL.Query().Get("action_prefix"),
+		Username:     r.URL.Query().Get("username"),
 	}
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil {

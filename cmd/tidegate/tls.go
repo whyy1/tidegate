@@ -9,9 +9,12 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/hex"
+	"encoding/pem"
 	"fmt"
 	"math/big"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -27,15 +30,69 @@ func loadTLSConfig(certFile, keyFile string) (*tls.Config, error) {
 	}, nil
 }
 
+func leafCoversHosts(leaf *x509.Certificate, hosts []string) bool {
+	if leaf == nil {
+		return false
+	}
+	for _, raw := range hosts {
+		h := strings.TrimSpace(strings.Trim(raw, "[]"))
+		if h == "" || h == "0.0.0.0" || h == "::" {
+			continue
+		}
+		if err := leaf.VerifyHostname(h); err != nil {
+			return false
+		}
+	}
+	return true
+}
+
+// loadOrCreateSelfSignedTLSConfig reuses a persisted valid self-signed ECDSA
+// certificate under certDir so browsers and MCP CLI clients keep trusting the
+// same certificate fingerprint across controller restarts.
+func loadOrCreateSelfSignedTLSConfig(certDir string, hosts []string) (*tls.Config, string, error) {
+	certPath := filepath.Join(certDir, "selfsigned.crt")
+	keyPath := filepath.Join(certDir, "selfsigned.key")
+
+	if pair, err := tls.LoadX509KeyPair(certPath, keyPath); err == nil && len(pair.Certificate) > 0 {
+		if leaf, perr := x509.ParseCertificate(pair.Certificate[0]); perr == nil {
+			now := time.Now()
+			if now.After(leaf.NotBefore) && now.Add(7*24*time.Hour).Before(leaf.NotAfter) && leafCoversHosts(leaf, hosts) {
+				sum := sha256.Sum256(pair.Certificate[0])
+				return &tls.Config{
+					Certificates: []tls.Certificate{pair},
+					MinVersion:   tls.VersionTLS12,
+				}, formatFingerprint(sum[:]), nil
+			}
+		}
+	}
+
+	cfg, fp, certPEM, keyPEM, err := buildSelfSignedCert(hosts)
+	if err != nil {
+		return nil, "", err
+	}
+	if certDir != "" {
+		if err := os.MkdirAll(certDir, 0o700); err == nil {
+			_ = os.WriteFile(certPath, certPEM, 0o644)
+			_ = os.WriteFile(keyPath, keyPEM, 0o600)
+		}
+	}
+	return cfg, fp, nil
+}
+
 func selfSignedTLSConfig(hosts []string) (*tls.Config, string, error) {
+	cfg, fp, _, _, err := buildSelfSignedCert(hosts)
+	return cfg, fp, err
+}
+
+func buildSelfSignedCert(hosts []string) (*tls.Config, string, []byte, []byte, error) {
 	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
-		return nil, "", fmt.Errorf("生成自签名证书密钥失败：%w", err)
+		return nil, "", nil, nil, fmt.Errorf("生成自签名证书密钥失败：%w", err)
 	}
 	serialLimit := new(big.Int).Lsh(big.NewInt(1), 128)
 	serial, err := rand.Int(rand.Reader, serialLimit)
 	if err != nil {
-		return nil, "", fmt.Errorf("生成证书序列号失败：%w", err)
+		return nil, "", nil, nil, fmt.Errorf("生成证书序列号失败：%w", err)
 	}
 
 	now := time.Now()
@@ -78,8 +135,15 @@ func selfSignedTLSConfig(hosts []string) (*tls.Config, string, error) {
 
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &priv.PublicKey, priv)
 	if err != nil {
-		return nil, "", fmt.Errorf("签发自签名证书失败：%w", err)
+		return nil, "", nil, nil, fmt.Errorf("签发自签名证书失败：%w", err)
 	}
+	keyDER, err := x509.MarshalECPrivateKey(priv)
+	if err != nil {
+		return nil, "", nil, nil, fmt.Errorf("编码自签名证书私钥失败：%w", err)
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+
 	cert := tls.Certificate{
 		Certificate: [][]byte{der},
 		PrivateKey:  priv,
@@ -91,7 +155,7 @@ func selfSignedTLSConfig(hosts []string) (*tls.Config, string, error) {
 		Certificates: []tls.Certificate{cert},
 		MinVersion:   tls.VersionTLS12,
 	}
-	return cfg, fp, nil
+	return cfg, fp, certPEM, keyPEM, nil
 }
 
 func formatFingerprint(b []byte) string {

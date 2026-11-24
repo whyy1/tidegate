@@ -237,7 +237,7 @@ func serveWithContext(
 			return 1
 		}
 	case cfg.TLSSelfSigned:
-		tlsCfg, selfFingerprint, err = selfSignedTLSConfig([]string{listenHost})
+		tlsCfg, selfFingerprint, err = loadOrCreateSelfSignedTLSConfig(filepath.Join(cfg.DataDir, "tls"), []string{listenHost})
 		if err != nil {
 			fmt.Fprintf(stderr, "%v\n", err)
 			return 1
@@ -456,6 +456,7 @@ func serveWithContext(
 	}
 	baseURL := scheme + "://" + displayHostPort(lis.Addr().String())
 
+	var setupCode string
 	if selfFingerprint != "" {
 		fmt.Fprintf(stdout, "已启用自签名 TLS 证书，SHA-256 指纹：%s\n", selfFingerprint)
 	}
@@ -466,6 +467,7 @@ func serveWithContext(
 			fmt.Fprintf(stderr, "生成初始化码失败：%v\n", err)
 			return 1
 		}
+		setupCode = code
 		fmt.Fprintln(stdout, "============================================================")
 		fmt.Fprintf(stdout, "首次启动，请访问管理地址完成管理员初始化：\n")
 		fmt.Fprintf(stdout, "  管理地址：%s/\n", baseURL)
@@ -483,7 +485,11 @@ func serveWithContext(
 		fmt.Fprintf(stdout, "Tidegate %s 已启动：访问地址 %s/（集群端口 %s）\n", version, baseURL, ctrl.ClusterAddr())
 	}
 	if !cfg.NoOpen && webHandler != nil {
-		go openBrowser(baseURL)
+		openTarget := baseURL
+		if setupCode != "" {
+			openTarget += "/#setup=" + url.QueryEscape(setupCode)
+		}
+		go openBrowser(openTarget)
 	}
 
 	if onReady != nil {

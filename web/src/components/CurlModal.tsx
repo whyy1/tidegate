@@ -139,13 +139,13 @@ export function CurlModal({
   return (
     <dialog
       ref={ref}
-      {...({ closedby: 'any' } as Record<string, string>)}
+      {...({ closedby: 'closerequest' } as Record<string, string>)}
       aria-labelledby="tg-curl-title"
       className="tg-dialog w-[min(44rem,calc(100vw-2rem))] max-h-[86dvh]"
     >
       {open && (
         <>
-          <div className="px-4 border-b border-line flex items-center justify-between gap-3 bg-surface-subtle shrink-0">
+          <header className="tg-dialog-header !py-0">
             <div className="flex items-center gap-3 min-w-0">
               <h2 id="tg-curl-title" className="flex items-center gap-1.5 text-sm font-semibold text-fg py-2.5 shrink-0">
                 <Terminal className="w-4 h-4 text-tidal" /> cURL
@@ -180,7 +180,7 @@ export function CurlModal({
             >
               <X className="w-4 h-4" />
             </button>
-          </div>
+          </header>
 
           {tab === 'export' ? (
             <>

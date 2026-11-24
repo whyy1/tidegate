@@ -9,8 +9,8 @@ const TILT_BLOCK_SELECTOR =
 
 /**
  * Tracks cursor position across all frosted cards inside `containerRef` so:
- * - Cursor spotlights illuminate hovered cards (`.tg-glass-card::before` / `.tg-dark-card::before`)
- * - Adjacent borders glow smoothly before entering (`.tg-glass-card::after` / `.tg-dark-card::after`)
+ * - Cursor spotlights illuminate hovered cards (`.tg-glass-card::before` / `.tg-accent-card::before`)
+ * - Adjacent borders glow smoothly before entering (`.tg-glass-card::after` / `.tg-accent-card::after`)
  * - Precision `.tg-tilt-card` surfaces tilt subtly only while directly hovered outside form/chart controls.
  */
 export function useGlassStagePhysics(containerRef: RefObject<HTMLElement | null>) {
@@ -22,12 +22,24 @@ export function useGlassStagePhysics(containerRef: RefObject<HTMLElement | null>
     let lastX = -9999
     let lastY = -9999
     let activeTarget: EventTarget | null = null
+    let cards: HTMLElement[] = Array.from(root.querySelectorAll<HTMLElement>('.tg-glass-card, .tg-accent-card'))
+    const litCards = new WeakSet<HTMLElement>()
+
+    const mo =
+      typeof MutationObserver !== 'undefined'
+        ? new MutationObserver(() => {
+            cards = Array.from(root.querySelectorAll<HTMLElement>('.tg-glass-card, .tg-accent-card'))
+          })
+        : null
+    mo?.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] })
 
     const clearCards = () => {
-      const els = root.querySelectorAll<HTMLElement>('.tg-glass-card, .tg-dark-card')
-      els.forEach((el) => {
-        el.style.setProperty('--mx', '-420px')
-        el.style.setProperty('--my', '-420px')
+      cards.forEach((el) => {
+        if (litCards.has(el)) {
+          el.style.setProperty('--mx', '-420px')
+          el.style.setProperty('--my', '-420px')
+          litCards.delete(el)
+        }
         if (el.classList.contains('tg-tilt-card') && el.style.transform) {
           el.style.transform = ''
         }
@@ -37,20 +49,21 @@ export function useGlassStagePhysics(containerRef: RefObject<HTMLElement | null>
     const flush = () => {
       rafId = 0
       const reduced = prefersReducedMotion()
-      const els = root.querySelectorAll<HTMLElement>('.tg-glass-card, .tg-dark-card')
       const blockTilt =
         activeTarget instanceof Element && Boolean(activeTarget.closest(TILT_BLOCK_SELECTOR))
 
-      els.forEach((el) => {
-        if (el.offsetParent === null) return
+      for (const el of cards) {
+        if (el.offsetParent === null) continue
         const r = el.getBoundingClientRect()
         const x = lastX - r.left
         const y = lastY - r.top
         const near = x >= -240 && x <= r.width + 240 && y >= -240 && y <= r.height + 240
         if (near) {
+          litCards.add(el)
           el.style.setProperty('--mx', `${x.toFixed(1)}px`)
           el.style.setProperty('--my', `${y.toFixed(1)}px`)
-        } else {
+        } else if (litCards.has(el)) {
+          litCards.delete(el)
           el.style.setProperty('--mx', '-420px')
           el.style.setProperty('--my', '-420px')
         }
@@ -68,11 +81,11 @@ export function useGlassStagePhysics(containerRef: RefObject<HTMLElement | null>
             el.style.transform = ''
           }
         }
-      })
+      }
     }
 
     const onMove = (e: PointerEvent) => {
-      if (e.pointerType === 'touch') return
+      if (e.pointerType === 'touch' || e.buttons !== 0) return
       lastX = e.clientX
       lastY = e.clientY
       activeTarget = e.target
@@ -90,6 +103,7 @@ export function useGlassStagePhysics(containerRef: RefObject<HTMLElement | null>
     root.addEventListener('pointermove', onMove, { passive: true })
     root.addEventListener('pointerleave', onLeave)
     return () => {
+      mo?.disconnect()
       if (rafId) window.cancelAnimationFrame(rafId)
       root.removeEventListener('pointermove', onMove)
       root.removeEventListener('pointerleave', onLeave)

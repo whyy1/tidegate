@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from 'react'
-import { CircleCheck, Copy, Plus, Save, Trash2, X } from 'lucide-react'
+import { CircleCheck, Copy, Layers, Plus, Save, Trash2, X } from 'lucide-react'
 import { api, APIError } from '../lib/api'
 import type { Environment, KeyValue } from '../lib/types'
 import { useNativeDialog } from '../lib/useNativeDialog'
@@ -152,21 +152,23 @@ export function EnvModal({
   return (
     <dialog
       ref={dialogRef}
-      closedby="any"
+      {...({ closedby: 'closerequest' } as Record<string, string>)}
       aria-labelledby="env-modal-title"
       className="tg-dialog w-[min(56rem,calc(100vw-2rem))] h-[min(40rem,86dvh)] max-h-[86dvh]"
     >
       {open && (
         <>
-          <header className="px-5 py-3 border-b border-line flex items-center justify-between bg-surface-subtle shrink-0">
-            <h2 id="env-modal-title" className="text-sm font-semibold text-fg">
-              环境
+          <header className="tg-dialog-header">
+            <h2 id="env-modal-title" className="text-sm font-semibold text-fg flex items-center gap-2">
+              <Layers className="w-4 h-4 text-tidal shrink-0" />
+              <span>环境</span>
+              {!isNew && name && <span className="font-normal text-fg-subtle">· {name}</span>}
             </h2>
             <button
               type="button"
               onClick={onClose}
               aria-label="关闭"
-              className="p-1 text-fg-subtle hover:text-fg rounded hover:bg-surface-hover"
+              className="p-1 text-fg-subtle hover:text-fg rounded-lg hover:bg-surface-hover"
             >
               <X className="w-4 h-4" />
             </button>
@@ -274,7 +276,7 @@ export function EnvModal({
                 </fieldset>
               </div>
 
-              <footer className="shrink-0 flex flex-wrap items-center justify-between gap-2 px-5 py-3 border-t border-line bg-surface-subtle">
+              <footer className="tg-dialog-footer justify-between">
                 <div className="flex items-center gap-2">
                   {!isNew && (
                     <>
@@ -283,11 +285,7 @@ export function EnvModal({
                         onClick={() => void handleDelete()}
                         onBlur={() => setConfirmDel(false)}
                         disabled={busy}
-                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border font-medium ${
-                          confirmDel
-                            ? 'bg-rose-600 border-rose-600 text-white hover:bg-rose-solid'
-                            : 'border-rose-200 text-rose-700 hover:bg-rose-50'
-                        }`}
+                        className={confirmDel ? 'tg-btn-primary !bg-rose-600' : 'tg-btn-danger'}
                       >
                         <Trash2 className="w-3.5 h-3.5" /> {confirmDel ? '确认删除？' : '删除'}
                       </button>
@@ -295,7 +293,7 @@ export function EnvModal({
                         type="button"
                         onClick={handleClone}
                         disabled={busy}
-                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted"
+                        className="tg-btn-secondary"
                       >
                         <Copy className="w-3.5 h-3.5" /> 克隆环境
                       </button>
@@ -307,15 +305,15 @@ export function EnvModal({
                     <button
                       type="button"
                       onClick={() => onSelectEnv(selectedId)}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted"
+                      className="tg-btn-secondary"
                     >
-                      <CircleCheck className="w-3.5 h-3.5" /> 设为当前
+                      <CircleCheck className="w-3.5 h-3.5 text-emerald-600" /> 设为当前
                     </button>
                   )}
                   <button
                     type="submit"
                     disabled={busy}
-                    className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-primary hover:bg-primary-hover text-white font-medium disabled:opacity-50"
+                    className="tg-btn-primary"
                   >
                     <Save className="w-3.5 h-3.5" /> {isNew ? '创建环境' : '保存'}
                   </button>

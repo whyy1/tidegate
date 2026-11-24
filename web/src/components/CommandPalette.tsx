@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Bot, CornerDownLeft, FilePlus, Globe, Layers, Play, Search, Server, ShieldCheck, Terminal, Workflow, X } from 'lucide-react'
+import { Bot, CornerDownLeft, FilePlus, FolderKanban, Globe, Layers, Play, Search, Server, ShieldCheck, Terminal, Workflow, X } from 'lucide-react'
 import { api } from '../lib/api'
 import type { Environment, Scenario, TreeNode } from '../lib/types'
+import { useNativeDialog } from '../lib/useNativeDialog'
 import type { NavTab } from './TopBar'
 
 interface CommandItem {
@@ -24,6 +25,8 @@ interface Props {
   onOpenAPI: (apiId: string) => void
   onNewScratchAPI: () => void
   onOpenMCPConfig: () => void
+  onOpenProjects?: () => void
+  onOpenEnvs?: () => void
 }
 
 function flattenAPINodes(nodes: TreeNode[], prefix = ''): Array<{ id: string; name: string; method: string; url: string; path: string }> {
@@ -89,59 +92,22 @@ export function CommandPalette({
   onOpenAPI,
   onNewScratchAPI,
   onOpenMCPConfig,
+  onOpenProjects,
+  onOpenEnvs,
 }: Props) {
-  const dialogRef = useRef<HTMLDialogElement | null>(null)
+  const dialogRef = useNativeDialog(open, onClose)
   const inputRef = useRef<HTMLInputElement | null>(null)
   const [query, setQuery] = useState('')
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [apis, setApis] = useState<Array<{ id: string; name: string; method: string; url: string; path: string }>>([])
   const [scenarios, setScenarios] = useState<Scenario[]>([])
 
-  // Native <dialog> open/close sync + Safari closedby fallback.
   useEffect(() => {
-    const dlg = dialogRef.current
-    if (!dlg) return
-    if (open) {
-      setQuery('')
-      setSelectedIdx(0)
-      if (!dlg.open) {
-        dlg.showModal()
-      }
-      window.requestAnimationFrame(() => inputRef.current?.focus())
-    } else if (dlg.open) {
-      dlg.close()
-    }
+    if (!open) return
+    setQuery('')
+    setSelectedIdx(0)
+    window.requestAnimationFrame(() => inputRef.current?.focus())
   }, [open])
-
-  useEffect(() => {
-    const dlg = dialogRef.current
-    if (!dlg) return
-    const onCloseEv = () => onClose()
-    dlg.addEventListener('close', onCloseEv)
-
-    // Mandatory fallback when browser lacks HTMLDialogElement closedby="any" (e.g. Safari).
-    let pressedOutside = false
-    const outside = (e: PointerEvent) => {
-      const r = dlg.getBoundingClientRect()
-      return e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom
-    }
-    const onPointerDown = (e: PointerEvent) => {
-      pressedOutside = outside(e)
-    }
-    const onPointerUp = (e: PointerEvent) => {
-      if (!('closedBy' in HTMLDialogElement.prototype) && pressedOutside && outside(e)) {
-        dlg.close()
-      }
-      pressedOutside = false
-    }
-    dlg.addEventListener('pointerdown', onPointerDown)
-    dlg.addEventListener('pointerup', onPointerUp)
-    return () => {
-      dlg.removeEventListener('close', onCloseEv)
-      dlg.removeEventListener('pointerdown', onPointerDown)
-      dlg.removeEventListener('pointerup', onPointerUp)
-    }
-  }, [onClose])
 
   useEffect(() => {
     if (!open || !projectId) return
@@ -219,13 +185,41 @@ export function CommandPalette({
       {
         id: 'act-nav-gov',
         category: 'action',
-        label: '系统治理',
+        label: '系统治理 · 账号与权限管控',
         hint: '',
         run: () => {
           onChangeTab('governance')
           onClose()
         },
       },
+      ...(onOpenProjects
+        ? [
+            {
+              id: 'act-modal-projects',
+              category: 'action' as const,
+              label: '项目管理与新建',
+              hint: '',
+              run: () => {
+                onClose()
+                onOpenProjects()
+              },
+            },
+          ]
+        : []),
+      ...(onOpenEnvs
+        ? [
+            {
+              id: 'act-modal-envs',
+              category: 'action' as const,
+              label: '环境配置与变量',
+              hint: '',
+              run: () => {
+                onClose()
+                onOpenEnvs()
+              },
+            },
+          ]
+        : []),
     ]
 
     for (const env of environments) {
@@ -280,7 +274,7 @@ export function CommandPalette({
           (it.badge || '').toLowerCase().includes(q)
       )
       .slice(0, 24)
-  }, [apis, scenarios, environments, activeEnvId, query, onChangeTab, onClose, onNewScratchAPI, onOpenAPI, onOpenMCPConfig, onSelectEnv])
+  }, [apis, scenarios, environments, activeEnvId, query, onChangeTab, onClose, onNewScratchAPI, onOpenAPI, onOpenMCPConfig, onOpenProjects, onOpenEnvs, onSelectEnv])
 
   useEffect(() => {
     setSelectedIdx(0)
@@ -289,6 +283,8 @@ export function CommandPalette({
   const iconFor = (it: CommandItem) => {
     if (it.id === 'act-new-api') return <FilePlus className="w-4 h-4 text-sky-600 shrink-0" />
     if (it.id === 'act-mcp') return <Bot className="w-4 h-4 text-cyan-600 shrink-0" />
+    if (it.id === 'act-modal-projects') return <FolderKanban className="w-4 h-4 text-sky-600 shrink-0" />
+    if (it.id === 'act-modal-envs') return <Layers className="w-4 h-4 text-emerald-600 shrink-0" />
     if (it.id === 'act-nav-run') return <Play className="w-4 h-4 text-emerald-600 shrink-0" />
     if (it.id === 'act-nav-agents') return <Server className="w-4 h-4 text-indigo-600 shrink-0" />
     if (it.id === 'act-nav-gov') return <ShieldCheck className="w-4 h-4 text-amber-600 shrink-0" />
@@ -301,7 +297,7 @@ export function CommandPalette({
   return (
     <dialog
       ref={dialogRef}
-      closedby="any"
+      {...({ closedby: 'any' } as Record<string, string>)}
       aria-labelledby="tg-cmd-title"
       className="tg-dialog w-[min(36rem,calc(100vw-2rem))] mt-[12vh] overflow-hidden"
     >

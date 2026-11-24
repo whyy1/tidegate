@@ -386,6 +386,7 @@ func buildTools() []toolDef {
 				if err != nil {
 					return nil, err
 				}
+				effVUs, effDurSec, effRate := effectiveMCPLimits(ctx, pol)
 				return map[string]any{
 					"active_run_id": s.ctrl.ActiveRunID(),
 					"online_agents": len(agents),
@@ -398,9 +399,12 @@ func buildTools() []toolDef {
 						"scripts_disabled":               pol.ScriptsDisabled,
 						"mcp_disabled":                   pol.MCPDisabled,
 						"mcp_allow_load_runs":            !pol.MCPDisableLoadRuns,
+						"mcp_resources_enabled":          !pol.MCPDisableResources,
+						"mcp_prompts_enabled":            !pol.MCPDisablePrompts,
 						"mcp_disabled_tools":             pol.MCPDisabledTools,
-						"effective_mcp_max_vus":          pol.EffectiveMCPMaxVUs(),
-						"effective_mcp_max_duration_sec": int(pol.EffectiveMCPMaxDuration().Seconds()),
+						"effective_mcp_max_vus":          effVUs,
+						"effective_mcp_max_duration_sec": effDurSec,
+						"effective_mcp_rate_per_min":     effRate,
 					},
 				}, nil
 			},
@@ -740,6 +744,7 @@ func buildTools() []toolDef {
 				if pol.MCPDisableLoadRuns {
 					return nil, errors.New("管理员已在安全策略中禁用通过 MCP 控制或启动压测任务")
 				}
+				effVUs, effDurSec, _ := effectiveMCPLimits(ctx, pol)
 				switch strings.ToLower(strings.TrimSpace(in.Action)) {
 				case "start":
 					pid := strings.TrimSpace(in.ProjectID)
@@ -751,15 +756,17 @@ func buildTools() []toolDef {
 						return nil, err
 					}
 					return s.ctrl.StartRun(ctx, pid, controller.StartRunRequest{
-						ScenarioID:        strings.TrimSpace(in.ScenarioID),
-						APIID:             strings.TrimSpace(in.APIID),
-						EnvironmentID:     strings.TrimSpace(in.EnvironmentID),
-						Variables:         in.Variables,
-						Load:              in.Load,
-						NodeSelector:      in.NodeSelector,
-						NodeFailurePolicy: strings.TrimSpace(in.NodeFailurePolicy),
-						ActorRole:         string(effRole),
-						MCPSource:         true,
+						ScenarioID:                strings.TrimSpace(in.ScenarioID),
+						APIID:                     strings.TrimSpace(in.APIID),
+						EnvironmentID:             strings.TrimSpace(in.EnvironmentID),
+						Variables:                 in.Variables,
+						Load:                      in.Load,
+						NodeSelector:              in.NodeSelector,
+						NodeFailurePolicy:         strings.TrimSpace(in.NodeFailurePolicy),
+						ActorRole:                 string(effRole),
+						MCPSource:                 true,
+						MCPMaxVUsOverride:         effVUs,
+						MCPMaxDurationSecOverride: effDurSec,
 					})
 				case "set_target":
 					rid := strings.TrimSpace(in.RunID)
@@ -771,8 +778,8 @@ func buildTools() []toolDef {
 						return nil, rerr
 					}
 					if def, derr := run.Definition(); derr == nil && def.Load.Mode != "rate" {
-						if in.Target > float64(pol.EffectiveMCPMaxVUs()) {
-							return nil, fmt.Errorf("MCP 调整的目标并发 %.0f 超出安全上限 %d VUs", in.Target, pol.EffectiveMCPMaxVUs())
+						if in.Target > float64(effVUs) {
+							return nil, fmt.Errorf("MCP 调整的目标并发 %.0f 超出安全上限 %d VUs", in.Target, effVUs)
 						}
 					}
 					if err := s.ctrl.SetRunTargetWithRole(ctx, rid, in.Target, string(effRole)); err != nil {

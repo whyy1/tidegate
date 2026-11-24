@@ -24,6 +24,7 @@ const securityPolicySettingKey = "security_policy"
 const (
 	DefaultMCPMaxVUs         = 200
 	DefaultMCPMaxDurationSec = 300
+	DefaultMCPRatePerMin     = 120
 )
 
 // ErrTargetNotAllowed indicates a request target fell outside the configured allowlist.
@@ -36,18 +37,31 @@ var ErrScaleLimitExceeded = errors.New("压测规模超出当前角色上限")
 var ErrScriptsDisabled = errors.New("管理员已全局禁用脚本步骤")
 
 // SecurityPolicy controls outbound target allowlisting, per-role scale limits,
-// and MCP server execution guardrails.
+// account/token guardrails, and MCP server execution constraints.
 type SecurityPolicy struct {
-	AllowlistEnabled   bool     `json:"allowlist_enabled"`
-	AllowedTargets     []string `json:"allowed_targets,omitempty"`
-	MemberMaxVUs       int      `json:"member_max_vus,omitempty"`
-	MemberMaxRPS       float64  `json:"member_max_rps,omitempty"`
-	ScriptsDisabled    bool     `json:"scripts_disabled,omitempty"`
-	MCPDisabled        bool     `json:"mcp_disabled,omitempty"`
-	MCPDisableLoadRuns bool     `json:"mcp_disable_load_runs,omitempty"`
-	MCPDisabledTools   []string `json:"mcp_disabled_tools,omitempty"`
-	MCPMaxVUs          int      `json:"mcp_max_vus,omitempty"`
-	MCPMaxDurationSec  int      `json:"mcp_max_duration_sec,omitempty"`
+	AllowlistEnabled    bool     `json:"allowlist_enabled"`
+	AllowedTargets      []string `json:"allowed_targets,omitempty"`
+	MemberMaxVUs        int      `json:"member_max_vus,omitempty"`
+	MemberMaxRPS        float64  `json:"member_max_rps,omitempty"`
+	ScriptsDisabled     bool     `json:"scripts_disabled,omitempty"`
+	RequireTOTP         string   `json:"require_totp,omitempty"` // "", "off", "admin", "all"
+	TokenMaxTTLDays     int      `json:"token_max_ttl_days,omitempty"`
+	MCPDisabled         bool     `json:"mcp_disabled,omitempty"`
+	MCPDisableLoadRuns  bool     `json:"mcp_disable_load_runs,omitempty"`
+	MCPDisableResources bool     `json:"mcp_disable_resources,omitempty"`
+	MCPDisablePrompts   bool     `json:"mcp_disable_prompts,omitempty"`
+	MCPDisabledTools    []string `json:"mcp_disabled_tools,omitempty"`
+	MCPMaxVUs           int      `json:"mcp_max_vus,omitempty"`
+	MCPMaxDurationSec   int      `json:"mcp_max_duration_sec,omitempty"`
+	MCPRatePerMin       int      `json:"mcp_rate_per_min,omitempty"`
+}
+
+// EffectiveMCPRatePerMin returns the configured MCP per-minute rate limit or DefaultMCPRatePerMin.
+func (p SecurityPolicy) EffectiveMCPRatePerMin() int {
+	if p.MCPRatePerMin > 0 {
+		return p.MCPRatePerMin
+	}
+	return DefaultMCPRatePerMin
 }
 
 // IsMCPToolDisabled reports whether the named MCP tool is globally blocked.
@@ -118,6 +132,20 @@ func (c *Controller) SetSecurityPolicy(ctx context.Context, pol SecurityPolicy) 
 	}
 	if pol.MCPMaxDurationSec < 0 {
 		return pol, userErr(ErrInvalidInput, "mcp_max_duration_sec 不能为负数", nil)
+	}
+	if pol.MCPRatePerMin < 0 {
+		return pol, userErr(ErrInvalidInput, "mcp_rate_per_min 不能为负数", nil)
+	}
+	if pol.TokenMaxTTLDays < 0 {
+		return pol, userErr(ErrInvalidInput, "token_max_ttl_days 不能为负数", nil)
+	}
+	switch strings.ToLower(strings.TrimSpace(pol.RequireTOTP)) {
+	case "", "off":
+		pol.RequireTOTP = ""
+	case "admin", "all":
+		pol.RequireTOTP = strings.ToLower(strings.TrimSpace(pol.RequireTOTP))
+	default:
+		return pol, userErr(ErrInvalidInput, "require_totp 仅支持 off、admin 或 all", nil)
 	}
 	cleaned := make([]string, 0, len(pol.AllowedTargets))
 	seen := make(map[string]bool, len(pol.AllowedTargets))

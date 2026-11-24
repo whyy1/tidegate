@@ -2,17 +2,38 @@ export interface SetupStatus {
   setup_required: boolean
   version: string
   tls: boolean
+  runtime?: 'docker' | 'binary' | string
 }
 
 export type UserRole = 'admin' | 'member' | 'viewer'
+export type ProjectAccessRole = '' | 'member' | 'viewer' | 'none'
 
 export interface User {
   id: number
   username: string
   role: UserRole
   totp_enabled?: boolean
+  totp_policy_required?: boolean
+  disabled?: boolean
+  disabled_at?: string
+  active_sessions?: number
+  last_seen_at?: string
   created_at: string
   password_changed_at: string
+}
+
+export interface UserProjectAccessItem {
+  project_id: string
+  project_name: string
+  restricted: boolean
+  member_role: ProjectAccessRole
+  effective_role: UserRole | ''
+  allowed: boolean
+}
+
+export interface UserProjectsResponse {
+  user: User
+  projects: UserProjectAccessItem[]
 }
 
 export interface TOTPEnrollment {
@@ -30,7 +51,7 @@ export interface TOTPConfirmResult {
 export interface ProjectMember {
   user_id: number
   username?: string
-  role: 'member' | 'viewer'
+  role: 'member' | 'viewer' | 'none'
 }
 
 export interface ProjectACL {
@@ -79,6 +100,7 @@ export interface Project {
   name: string
   description?: string
   variables?: KeyValue[]
+  effective_role?: UserRole
   version: string
 }
 
@@ -930,11 +952,13 @@ export interface SystemInfo {
   tls: boolean
   cluster_addr: string
   cluster_ca_fingerprint: string
+  exe_path?: string
 }
 
 export interface APIToken {
   id: string
   user_id: number
+  username?: string
   name: string
   prefix: string
   role: UserRole
@@ -942,8 +966,12 @@ export interface APIToken {
   project_ids?: string[]
   /** Empty = inherit every MCP tool unlocked by scopes; non-empty = only these MCP tools. */
   mcp_tools?: string[]
+  mcp_max_vus?: number
+  mcp_max_duration_sec?: number
+  rate_per_min?: number
   created_at: string
   last_used_at?: string
+  last_used_addr?: string
   expires_at?: string
 }
 
@@ -953,6 +981,9 @@ export interface CreateAPIToken {
   scopes?: string[]
   project_ids?: string[]
   mcp_tools?: string[]
+  mcp_max_vus?: number
+  mcp_max_duration_sec?: number
+  rate_per_min?: number
   ttl_days?: number
   expires_in?: string
 }
@@ -972,10 +1003,27 @@ export interface MCPToolCatalogItem {
   globally_enabled: boolean
 }
 
+export interface MCPResourceCatalogItem {
+  uri_template: string
+  name: string
+  description: string
+  globally_enabled: boolean
+}
+
+export interface MCPPromptCatalogItem {
+  name: string
+  title: string
+  description: string
+  globally_enabled: boolean
+}
+
 export interface MCPCatalog {
   tools: MCPToolCatalogItem[]
+  resources?: MCPResourceCatalogItem[]
+  prompts?: MCPPromptCatalogItem[]
   effective_max_vus: number
   effective_max_duration_sec: number
+  effective_rate_per_min?: number
 }
 
 export interface CreateAPITokenResult {
@@ -989,10 +1037,15 @@ export interface SecurityPolicy {
   member_max_vus?: number
   member_max_rps?: number
   scripts_disabled?: boolean
+  require_totp?: boolean
+  token_max_ttl_days?: number
   mcp_disabled?: boolean
   mcp_disable_load_runs?: boolean
+  mcp_disable_resources?: boolean
+  mcp_disable_prompts?: boolean
   mcp_max_vus?: number
   mcp_max_duration_sec?: number
+  mcp_rate_per_min?: number
   mcp_disabled_tools?: string[]
 }
 

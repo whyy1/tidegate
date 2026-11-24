@@ -95,16 +95,16 @@ export function TempVarsPopover({
         aria-expanded={open}
         aria-haspopup="dialog"
         title="临时变量"
-        className={`inline-flex h-7 items-center gap-1.5 rounded-md border px-2.5 text-xs font-medium transition-colors ${
+        className={`inline-flex h-7 items-center gap-1.5 rounded-full border px-2.5 text-xs font-medium transition-colors ${
           has
             ? 'border-amber-300 bg-amber-50 text-amber-800 hover:bg-amber-100'
-            : 'border-line bg-surface text-fg-muted hover:bg-surface-hover hover:text-fg'
+            : 'border-line bg-surface-subtle text-fg-muted hover:bg-surface-hover hover:text-fg'
         }`}
       >
         <Zap className={`h-3.5 w-3.5 ${has ? 'text-amber-500' : 'text-fg-subtle'}`} />
         <span className="hidden lg:inline">临时变量</span>
         <span
-          className={`tg-tabular min-w-4 rounded px-1 text-center font-mono text-[11px] ${
+          className={`tg-tabular min-w-4 rounded-full px-1 text-center font-mono text-[11px] ${
             has ? 'bg-amber-200/70 text-amber-900' : 'bg-surface-hover text-fg-subtle'
           }`}
         >
@@ -117,7 +117,7 @@ export function TempVarsPopover({
         <div
           role="dialog"
           aria-label="临时变量"
-          className="absolute left-0 top-full z-40 mt-2 w-[min(24rem,calc(100vw-1.5rem))] overflow-hidden rounded-xl border border-line bg-surface text-fg shadow-2xl"
+          className="tg-glass-popover absolute left-0 top-full z-40 mt-2 w-[min(24rem,calc(100vw-1.5rem))] overflow-hidden text-fg"
         >
           <div className="flex items-center justify-between gap-2 border-b border-line bg-surface-subtle px-3.5 py-2">
             <div className="flex items-center gap-2 text-xs font-semibold">

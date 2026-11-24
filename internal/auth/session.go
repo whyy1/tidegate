@@ -130,21 +130,26 @@ func (s *Service) Authenticate(ctx context.Context, token string) (*User, *Sessi
 		u                            User
 		role                         string
 		totpEnabled                  int
+		disabledAt                   int64
 		created, seen, expires       int64
 		userCreated, userPwChangedAt int64
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT s.id, s.user_id, s.created_at, s.last_seen_at, s.expires_at, s.remote_addr, s.user_agent,
-		        u.username, u.role, u.totp_enabled, u.created_at, u.password_changed_at
+		        u.username, u.role, u.totp_enabled, u.disabled_at, u.created_at, u.password_changed_at
 		   FROM auth_sessions s JOIN auth_users u ON u.id = s.user_id
 		  WHERE s.token_hash = ?`, hash).
 		Scan(&sess.ID, &sess.UserID, &created, &seen, &expires, &sess.RemoteAddr, &sess.UserAgent,
-			&u.Username, &role, &totpEnabled, &userCreated, &userPwChangedAt)
+			&u.Username, &role, &totpEnabled, &disabledAt, &userCreated, &userPwChangedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil, ErrUnauthenticated
 	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("auth: load session: %w", err)
+	}
+	if disabledAt > 0 {
+		_, _ = s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE id = ?`, sess.ID)
+		return nil, nil, ErrAccountDisabled
 	}
 	sess.CreatedAt = time.UnixMilli(created)
 	sess.LastSeenAt = time.UnixMilli(seen)
@@ -243,6 +248,15 @@ func (s *Service) RevokeOtherSessions(ctx context.Context, userID int64, keepID 
 	res, err := s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE user_id = ? AND id <> ?`, userID, keepID)
 	if err != nil {
 		return 0, fmt.Errorf("auth: revoke sessions: %w", err)
+	}
+	return res.RowsAffected()
+}
+
+// RevokeAllUserSessions deletes every active session belonging to userID (admin action).
+func (s *Service) RevokeAllUserSessions(ctx context.Context, userID int64) (int64, error) {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM auth_sessions WHERE user_id = ?`, userID)
+	if err != nil {
+		return 0, fmt.Errorf("auth: revoke all sessions: %w", err)
 	}
 	return res.RowsAffected()
 }

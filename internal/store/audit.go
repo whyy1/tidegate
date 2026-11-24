@@ -27,10 +27,12 @@ type AuditEntry struct {
 
 // AuditQuery filters audit log listings.
 type AuditQuery struct {
-	Limit    int
-	BeforeID int64
-	Action   string
-	Username string
+	Limit        int
+	BeforeID     int64
+	Action       string
+	ActionPrefix string
+	Username     string
+	UserID       int64
 }
 
 // RecordAudit writes one audit entry and prunes rows beyond MaxAuditLogEntries.
@@ -89,10 +91,18 @@ func (r *ResultDB) ListAuditLogs(ctx context.Context, q AuditQuery) ([]AuditEntr
 	if a := strings.TrimSpace(q.Action); a != "" {
 		conds = append(conds, "action = ?")
 		args = append(args, a)
+	} else if p := strings.TrimSpace(q.ActionPrefix); p != "" {
+		escaped := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(p)
+		conds = append(conds, `action LIKE ? ESCAPE '\'`)
+		args = append(args, escaped+"%")
 	}
 	if u := strings.TrimSpace(q.Username); u != "" {
 		conds = append(conds, "LOWER(username) = LOWER(?)")
 		args = append(args, u)
+	}
+	if q.UserID > 0 {
+		conds = append(conds, "user_id = ?")
+		args = append(args, q.UserID)
 	}
 
 	query := `SELECT id, created_at, user_id, username, role, action, resource, resource_id, remote_addr, detail_json FROM audit_logs`

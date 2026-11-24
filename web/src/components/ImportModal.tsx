@@ -28,7 +28,7 @@ function collectFolders(nodes: TreeNode[], prefix = ''): Array<{ id: string; lab
 }
 
 const FORM_ID = 'tg-import-form'
-const selectCls = 'px-2 py-1 border border-line-strong rounded bg-surface text-fg focus:border-sky-500 focus:outline-none'
+const selectCls = 'tg-select px-2.5 py-1 border border-line-strong bg-surface text-fg'
 
 export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, onToast }: Props) {
   const ref = useNativeDialog(open, onClose)
@@ -106,13 +106,13 @@ export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, on
   return (
     <dialog
       ref={ref}
-      {...({ closedby: 'any' } as Record<string, string>)}
+      {...({ closedby: 'closerequest' } as Record<string, string>)}
       aria-labelledby="tg-import-title"
       className="tg-dialog w-[min(48rem,calc(100vw-2rem))] max-h-[86dvh]"
     >
       {open && (
         <>
-          <header className="px-5 py-3 border-b border-line flex items-center justify-between gap-3 bg-surface-subtle shrink-0">
+          <header className="tg-dialog-header">
             <h2 id="tg-import-title" className="text-sm font-semibold text-fg">
               导入
             </h2>
@@ -367,23 +367,15 @@ export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, on
             )}
           </div>
 
-          <footer className="px-5 py-3 border-t border-line flex items-center justify-end gap-2 shrink-0 text-xs">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-3 py-1.5 rounded-md border border-line-strong bg-surface text-fg hover:bg-surface-hover"
-            >
+          <footer className="tg-dialog-footer text-xs">
+            <button type="button" onClick={onClose} className="tg-btn-secondary">
               取消
             </button>
             <button
               type="submit"
               form={FORM_ID}
               disabled={busy}
-              className={`inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md font-medium disabled:opacity-50 ${
-                preview
-                  ? 'border border-line-strong bg-surface text-fg hover:bg-surface-hover'
-                  : 'bg-primary hover:bg-primary-hover text-white'
-              }`}
+              className={preview ? 'tg-btn-secondary' : 'tg-btn-primary'}
             >
               <RefreshCw className={`w-3.5 h-3.5 ${busy ? 'animate-spin' : ''}`} /> {preview ? '重新解析' : '解析并预览差异'}
             </button>
@@ -392,7 +384,7 @@ export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, on
                 type="button"
                 disabled={busy}
                 onClick={() => void handleApply()}
-                className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-emerald-600 hover:bg-emerald-solid text-white font-medium disabled:opacity-50"
+                className="tg-btn-primary !bg-emerald-600 hover:!bg-emerald-solid"
               >
                 <CheckCircle2 className="w-3.5 h-3.5" /> 确认导入
               </button>

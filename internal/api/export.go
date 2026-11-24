@@ -147,27 +147,53 @@ func (s *Server) handleRunExport(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleExportScenario(w http.ResponseWriter, r *http.Request) {
 	pid := r.PathValue("pid")
 	sid := r.PathValue("id")
-	format := r.URL.Query().Get("format")
+	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
 	if format == "" {
-		format = "k6"
+		format = "yaml"
 	}
-	if format != "k6" {
-		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "场景导出格式只支持 k6"))
-		return
-	}
-	script, err := exporter.ExportScenarioK6(s.store, pid, sid, store.ResolveOptions{
+	opts := store.ResolveOptions{
 		EnvironmentID: r.URL.Query().Get("env_id"),
-	})
-	if err != nil {
-		writeError(w, err)
-		return
 	}
+	stem := sanitizeHeaderValue(sid)
 	h := w.Header()
-	h.Set("Content-Type", "application/javascript; charset=utf-8")
-	h.Set("Content-Disposition", `attachment; filename="tidegate-scenario-`+sanitizeHeaderValue(sid)+`-k6.js"`)
-	h.Set("Cache-Control", "no-store")
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write(script)
+
+	switch format {
+	case "yaml", "tidegate-yaml":
+		data, err := exporter.ExportScenarioNative(s.store, pid, sid, opts, true)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		h.Set("Content-Type", "application/yaml; charset=utf-8")
+		h.Set("Content-Disposition", `attachment; filename="tidegate-scenario-`+stem+`.yaml"`)
+		h.Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	case "json":
+		data, err := exporter.ExportScenarioNative(s.store, pid, sid, opts, false)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		h.Set("Content-Type", "application/json; charset=utf-8")
+		h.Set("Content-Disposition", `attachment; filename="tidegate-scenario-`+stem+`.json"`)
+		h.Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(data)
+	case "k6":
+		script, err := exporter.ExportScenarioK6(s.store, pid, sid, opts)
+		if err != nil {
+			writeError(w, err)
+			return
+		}
+		h.Set("Content-Type", "application/javascript; charset=utf-8")
+		h.Set("Content-Disposition", `attachment; filename="tidegate-scenario-`+stem+`-k6.js"`)
+		h.Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write(script)
+	default:
+		writeError(w, newHTTPError(http.StatusBadRequest, "invalid_input", "场景导出格式只支持 yaml、json 或 k6"))
+	}
 }
 
 func (s *Server) exportRunJTL(w http.ResponseWriter, r *http.Request, run *store.Run, snaps []store.SnapshotRecord) {

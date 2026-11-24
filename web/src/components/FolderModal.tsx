@@ -77,13 +77,13 @@ export function FolderModal({ open, projectId, folder, parentId, onClose, onSave
   return (
     <dialog
       ref={ref}
-      {...({ closedby: 'any' } as Record<string, string>)}
+      {...({ closedby: 'closerequest' } as Record<string, string>)}
       aria-labelledby="tg-folder-title"
       className="tg-dialog w-[min(42rem,calc(100vw-2rem))] max-h-[86dvh]"
     >
       {open && (
         <form onSubmit={handleSubmit} className="flex flex-col min-h-0 flex-1 text-xs">
-          <header className="px-5 py-3 border-b border-line flex items-center justify-between gap-3 bg-surface-subtle shrink-0">
+          <header className="tg-dialog-header">
             <h2 id="tg-folder-title" className="text-sm font-semibold text-fg truncate min-w-0">
               {folder ? `编辑目录「${folder.name}」` : '新建目录'}
             </h2>
@@ -91,7 +91,7 @@ export function FolderModal({ open, projectId, folder, parentId, onClose, onSave
               type="button"
               onClick={onClose}
               aria-label="关闭目录设置"
-              className="p-1 text-fg-subtle hover:text-fg rounded hover:bg-surface-hover shrink-0"
+              className="p-1 text-fg-subtle hover:text-fg rounded-lg hover:bg-surface-hover shrink-0"
             >
               <X className="w-4 h-4" />
             </button>

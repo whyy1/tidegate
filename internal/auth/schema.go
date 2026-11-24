@@ -80,6 +80,14 @@ var migrations = [][]string{
 	{
 		`ALTER TABLE auth_tokens ADD COLUMN mcp_tools TEXT NOT NULL DEFAULT ''`,
 	},
+	// Version 5: account disable flag & per-token MCP limits / audit metadata.
+	{
+		`ALTER TABLE auth_users ADD COLUMN disabled_at INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE auth_tokens ADD COLUMN mcp_max_vus INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE auth_tokens ADD COLUMN mcp_max_duration_sec INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE auth_tokens ADD COLUMN rate_per_min INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE auth_tokens ADD COLUMN last_used_addr TEXT NOT NULL DEFAULT ''`,
+	},
 }
 
 const schemaVersionKey = "schema_version"

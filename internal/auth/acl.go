@@ -84,8 +84,8 @@ func (s *Service) SetProjectACL(ctx context.Context, projectID string, restricte
 			continue
 		}
 		seen[m.UserID] = struct{}{}
-		if m.Role != RoleMember && m.Role != RoleViewer {
-			return nil, &Error{Code: CodeInvalidRole, Status: http.StatusBadRequest, Message: "项目成员权限只能设置为 member 或 viewer"}
+		if m.Role != RoleMember && m.Role != RoleViewer && m.Role != RoleNone {
+			return nil, &Error{Code: CodeInvalidRole, Status: http.StatusBadRequest, Message: "项目成员权限只能设置为 member、viewer 或 none"}
 		}
 		cleaned = append(cleaned, ProjectMember{UserID: m.UserID, Role: m.Role})
 	}
@@ -178,6 +178,9 @@ func (s *Service) ResolveProjectRole(ctx context.Context, u *User, tok *APIToken
 		if mErr != nil && !errors.Is(mErr, sql.ErrNoRows) {
 			return "", false, fmt.Errorf("auth: resolve project member: %w", mErr)
 		}
+		if memberRole == string(RoleNone) {
+			return "", false, nil
+		}
 		if memberRole != "" && Role(memberRole).Valid() {
 			baseRole = Role(memberRole)
 		} else if restricted != 0 {
@@ -191,4 +194,90 @@ func (s *Service) ResolveProjectRole(ctx context.Context, u *User, tok *APIToken
 		baseRole = EffectiveRole(baseRole, tok.Role)
 	}
 	return baseRole, true, nil
+}
+
+// ListUserProjectOverrides returns all project restriction flags and explicit
+// per-project member roles assigned to userID.
+func (s *Service) ListUserProjectOverrides(ctx context.Context, userID int64) (restricted map[string]bool, overrides map[string]Role, err error) {
+	restricted = make(map[string]bool)
+	overrides = make(map[string]Role)
+
+	rows, err := s.db.QueryContext(ctx, `SELECT project_id, restricted FROM auth_project_acl`)
+	if err != nil {
+		return nil, nil, fmt.Errorf("auth: list restricted projects: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid string
+		var r int
+		if err := rows.Scan(&pid, &r); err != nil {
+			return nil, nil, fmt.Errorf("auth: scan restricted project: %w", err)
+		}
+		if r != 0 {
+			restricted[pid] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("auth: list restricted projects: %w", err)
+	}
+
+	mrows, err := s.db.QueryContext(ctx, `SELECT project_id, role FROM auth_project_members WHERE user_id = ?`, userID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("auth: list user project memberships: %w", err)
+	}
+	defer mrows.Close()
+	for mrows.Next() {
+		var pid, role string
+		if err := mrows.Scan(&pid, &role); err != nil {
+			return nil, nil, fmt.Errorf("auth: scan user project membership: %w", err)
+		}
+		if Role(role) == RoleNone || Role(role).Valid() {
+			overrides[pid] = Role(role)
+		}
+	}
+	if err := mrows.Err(); err != nil {
+		return nil, nil, fmt.Errorf("auth: list user project memberships: %w", err)
+	}
+	return restricted, overrides, nil
+}
+
+// SetUserProjectOverrides replaces userID's explicit per-project roles (entries
+// with empty role clear that project override so the user falls back to their global role or restricted denial).
+func (s *Service) SetUserProjectOverrides(ctx context.Context, userID int64, roles map[string]Role) error {
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM auth_users WHERE id = ?`, userID).Scan(&exists); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ErrUserNotFound
+		}
+		return fmt.Errorf("auth: verify user: %w", err)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("auth: set user project overrides: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_project_members WHERE user_id = ?`, userID); err != nil {
+		return fmt.Errorf("auth: clear user project overrides: %w", err)
+	}
+	ms := s.clock().UnixMilli()
+	for rawPID, r := range roles {
+		pid := strings.TrimSpace(rawPID)
+		if pid == "" || r == "" {
+			continue
+		}
+		if r != RoleMember && r != RoleViewer && r != RoleNone {
+			return &Error{Code: CodeInvalidRole, Status: http.StatusBadRequest, Message: "项目成员权限只能设置为 member、viewer 或 none"}
+		}
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO auth_project_members (project_id, user_id, role, updated_at) VALUES (?, ?, ?, ?)`,
+			pid, userID, string(r), ms); err != nil {
+			return fmt.Errorf("auth: save user project override: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("auth: commit user project overrides: %w", err)
+	}
+	return nil
 }

@@ -32,6 +32,9 @@ const (
 	RoleAdmin  Role = "admin"
 	RoleMember Role = "member"
 	RoleViewer Role = "viewer"
+	// RoleNone explicitly denies access to a project even when project-wide ACL
+	// restriction is off; never valid as a global user or token role.
+	RoleNone Role = "none"
 )
 
 // Valid reports whether r is a recognized role.
@@ -77,6 +80,10 @@ type User struct {
 	Role              Role
 	RawRole           Role // underlying DB role before per-token/per-project narrowing
 	TOTPEnabled       bool
+	Disabled          bool
+	DisabledAt        *time.Time
+	ActiveSessions    int
+	LastSeenAt        *time.Time
 	CreatedAt         time.Time
 	PasswordChangedAt time.Time
 }
@@ -501,7 +508,7 @@ func (s *Service) EnsureAdminAccount(ctx context.Context, req AdminBootstrapRequ
 	}
 
 	changed := false
-	if u.Role != RoleAdmin || !samePwd {
+	if u.Role != RoleAdmin || u.Disabled || !samePwd {
 		newHash := storedHash
 		if !samePwd {
 			newHash, err = s.hash(ctx, req.Password)
@@ -518,7 +525,7 @@ func (s *Service) EnsureAdminAccount(ctx context.Context, req AdminBootstrapRequ
 		ms := s.clock().UnixMilli()
 		if !samePwd {
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE auth_users SET password_hash = ?, role = ?, updated_at = ?, password_changed_at = ? WHERE id = ?`,
+				`UPDATE auth_users SET password_hash = ?, role = ?, disabled_at = 0, updated_at = ?, password_changed_at = ? WHERE id = ?`,
 				newHash, string(RoleAdmin), ms, ms, u.ID); err != nil {
 				return "", fmt.Errorf("auth: update admin password: %w", err)
 			}
@@ -527,7 +534,7 @@ func (s *Service) EnsureAdminAccount(ctx context.Context, req AdminBootstrapRequ
 			}
 		} else {
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE auth_users SET role = ?, updated_at = ? WHERE id = ?`,
+				`UPDATE auth_users SET role = ?, disabled_at = 0, updated_at = ? WHERE id = ?`,
 				string(RoleAdmin), ms, u.ID); err != nil {
 				return "", fmt.Errorf("auth: promote admin role: %w", err)
 			}
@@ -693,6 +700,10 @@ func (s *Service) Login(ctx context.Context, req LoginRequest) (*LoginResult, er
 	if !ok {
 		s.loginFailed(userKey, addrKey)
 		return nil, ErrInvalidCredentials
+	}
+	if u.Disabled {
+		release()
+		return nil, ErrAccountDisabled
 	}
 	if needsRehash(stored, s.params) {
 		s.rehash(ctx, u.ID, stored, req.Password)
@@ -878,21 +889,27 @@ func (s *Service) userCount(ctx context.Context, q queryer) (int, error) {
 	return n, nil
 }
 
-const userColumns = `id, username, role, totp_enabled, created_at, password_changed_at, password_hash`
+const userColumns = `id, username, role, totp_enabled, disabled_at, created_at, password_changed_at, password_hash`
 
 func scanUser(row *sql.Row) (*User, string, error) {
 	var (
 		u                  User
 		role, hash         string
 		totpEnabled        int
+		disabledAt         int64
 		created, pwChanged int64
 	)
-	if err := row.Scan(&u.ID, &u.Username, &role, &totpEnabled, &created, &pwChanged, &hash); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &role, &totpEnabled, &disabledAt, &created, &pwChanged, &hash); err != nil {
 		return nil, "", err
 	}
 	u.Role = Role(role)
 	u.RawRole = u.Role
 	u.TOTPEnabled = totpEnabled != 0
+	if disabledAt > 0 {
+		t := time.UnixMilli(disabledAt)
+		u.Disabled = true
+		u.DisabledAt = &t
+	}
 	u.CreatedAt = time.UnixMilli(created)
 	u.PasswordChangedAt = time.UnixMilli(pwChanged)
 	return &u, hash, nil
@@ -939,10 +956,19 @@ type CreateUserRequest struct {
 	Role     Role
 }
 
-// ListUsers returns all accounts sorted by creation order.
+// ListUsers returns all accounts sorted by creation order, including live session metrics.
 func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
+	now := s.clock()
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, username, role, totp_enabled, created_at, password_changed_at FROM auth_users ORDER BY id ASC`)
+		`SELECT u.id, u.username, u.role, u.totp_enabled, u.disabled_at, u.created_at, u.password_changed_at,
+		        (SELECT COUNT(*) FROM auth_sessions s
+		          WHERE s.user_id = u.id AND s.expires_at > ? AND s.created_at > ? AND s.last_seen_at > ?) AS active_sessions,
+		        (SELECT MAX(s.last_seen_at) FROM auth_sessions s
+		          WHERE s.user_id = u.id AND s.expires_at > ? AND s.created_at > ? AND s.last_seen_at > ?) AS last_seen_at
+		   FROM auth_users u
+		  ORDER BY u.id ASC`,
+		now.UnixMilli(), now.Add(-s.absolute).UnixMilli(), now.Add(-s.idle).UnixMilli(),
+		now.UnixMilli(), now.Add(-s.absolute).UnixMilli(), now.Add(-s.idle).UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("auth: list users: %w", err)
 	}
@@ -953,14 +979,25 @@ func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
 			u                  User
 			role               string
 			totpEnabled        int
+			disabledAt         int64
 			created, pwChanged int64
+			lastSeen           sql.NullInt64
 		)
-		if err := rows.Scan(&u.ID, &u.Username, &role, &totpEnabled, &created, &pwChanged); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &role, &totpEnabled, &disabledAt, &created, &pwChanged, &u.ActiveSessions, &lastSeen); err != nil {
 			return nil, fmt.Errorf("auth: scan user: %w", err)
 		}
 		u.Role = Role(role)
 		u.RawRole = u.Role
 		u.TOTPEnabled = totpEnabled != 0
+		if disabledAt > 0 {
+			t := time.UnixMilli(disabledAt)
+			u.Disabled = true
+			u.DisabledAt = &t
+		}
+		if lastSeen.Valid && lastSeen.Int64 > 0 {
+			t := time.UnixMilli(lastSeen.Int64)
+			u.LastSeenAt = &t
+		}
 		u.CreatedAt = time.UnixMilli(created)
 		u.PasswordChangedAt = time.UnixMilli(pwChanged)
 		out = append(out, u)
@@ -1040,20 +1077,21 @@ func (s *Service) UpdateUserRole(ctx context.Context, userID int64, role Role) (
 		u                  User
 		curRole            string
 		totpEnabled        int
+		disabledAt         int64
 		created, pwChanged int64
 	)
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, username, role, totp_enabled, created_at, password_changed_at FROM auth_users WHERE id = ?`, userID).
-		Scan(&u.ID, &u.Username, &curRole, &totpEnabled, &created, &pwChanged)
+		`SELECT id, username, role, totp_enabled, disabled_at, created_at, password_changed_at FROM auth_users WHERE id = ?`, userID).
+		Scan(&u.ID, &u.Username, &curRole, &totpEnabled, &disabledAt, &created, &pwChanged)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
 	if err != nil {
 		return nil, fmt.Errorf("auth: load user: %w", err)
 	}
-	if Role(curRole) == RoleAdmin && role != RoleAdmin {
+	if Role(curRole) == RoleAdmin && role != RoleAdmin && disabledAt == 0 {
 		var admins int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM auth_users WHERE role = ?`, string(RoleAdmin)).Scan(&admins); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM auth_users WHERE role = ? AND disabled_at = 0`, string(RoleAdmin)).Scan(&admins); err != nil {
 			return nil, fmt.Errorf("auth: count admins: %w", err)
 		}
 		if admins <= 1 {
@@ -1071,6 +1109,78 @@ func (s *Service) UpdateUserRole(ctx context.Context, userID int64, role Role) (
 	u.Role = role
 	u.RawRole = role
 	u.TOTPEnabled = totpEnabled != 0
+	if disabledAt > 0 {
+		t := time.UnixMilli(disabledAt)
+		u.Disabled = true
+		u.DisabledAt = &t
+	}
+	u.CreatedAt = time.UnixMilli(created)
+	u.PasswordChangedAt = time.UnixMilli(pwChanged)
+	return &u, nil
+}
+
+// SetUserDisabled enables or disables targetUserID. Disabling immediately terminates
+// active web sessions and blocks Bearer tokens while preserving API token records.
+func (s *Service) SetUserDisabled(ctx context.Context, actorUserID, targetUserID int64, disabled bool) (*User, error) {
+	if actorUserID != 0 && actorUserID == targetUserID && disabled {
+		return nil, &Error{Code: CodeForbidden, Status: httpStatusForbidden(), Message: "不能停用当前正在使用的管理员账户"}
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("auth: set user disabled: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	var (
+		u                  User
+		role               string
+		totpEnabled        int
+		curDisabledAt      int64
+		created, pwChanged int64
+	)
+	err = tx.QueryRowContext(ctx,
+		`SELECT id, username, role, totp_enabled, disabled_at, created_at, password_changed_at FROM auth_users WHERE id = ?`, targetUserID).
+		Scan(&u.ID, &u.Username, &role, &totpEnabled, &curDisabledAt, &created, &pwChanged)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, ErrUserNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("auth: load user: %w", err)
+	}
+	if disabled && Role(role) == RoleAdmin && curDisabledAt == 0 {
+		var admins int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM auth_users WHERE role = ? AND disabled_at = 0`, string(RoleAdmin)).Scan(&admins); err != nil {
+			return nil, fmt.Errorf("auth: count admins: %w", err)
+		}
+		if admins <= 1 {
+			return nil, ErrLastAdmin
+		}
+	}
+	now := s.clock()
+	var nextDisabledAt int64
+	if disabled {
+		nextDisabledAt = now.UnixMilli()
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE auth_users SET disabled_at = ?, updated_at = ? WHERE id = ?`,
+		nextDisabledAt, now.UnixMilli(), targetUserID); err != nil {
+		return nil, fmt.Errorf("auth: update user disabled status: %w", err)
+	}
+	if disabled {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE user_id = ?`, targetUserID); err != nil {
+			return nil, fmt.Errorf("auth: clear disabled user sessions: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("auth: commit user disabled status: %w", err)
+	}
+	u.Role = Role(role)
+	u.RawRole = u.Role
+	u.TOTPEnabled = totpEnabled != 0
+	if nextDisabledAt > 0 {
+		t := time.UnixMilli(nextDisabledAt)
+		u.Disabled = true
+		u.DisabledAt = &t
+	}
 	u.CreatedAt = time.UnixMilli(created)
 	u.PasswordChangedAt = time.UnixMilli(pwChanged)
 	return &u, nil
@@ -1089,16 +1199,17 @@ func (s *Service) DeleteUser(ctx context.Context, actorUserID, targetUserID int6
 	defer func() { _ = tx.Rollback() }()
 
 	var curRole string
-	err = tx.QueryRowContext(ctx, `SELECT role FROM auth_users WHERE id = ?`, targetUserID).Scan(&curRole)
+	var disabledAt int64
+	err = tx.QueryRowContext(ctx, `SELECT role, disabled_at FROM auth_users WHERE id = ?`, targetUserID).Scan(&curRole, &disabledAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrUserNotFound
 	}
 	if err != nil {
 		return fmt.Errorf("auth: load user: %w", err)
 	}
-	if Role(curRole) == RoleAdmin {
+	if Role(curRole) == RoleAdmin && disabledAt == 0 {
 		var admins int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM auth_users WHERE role = ?`, string(RoleAdmin)).Scan(&admins); err != nil {
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM auth_users WHERE role = ? AND disabled_at = 0`, string(RoleAdmin)).Scan(&admins); err != nil {
 			return fmt.Errorf("auth: count admins: %w", err)
 		}
 		if admins <= 1 {

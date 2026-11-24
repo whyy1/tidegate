@@ -159,10 +159,12 @@ type StartRunRequest struct {
 	Variables         map[string]scenario.Scalar `json:"variables,omitempty"`
 	Load              *scenario.Load             `json:"load,omitempty"`
 	HTTP              *scenario.HTTPOptions      `json:"http,omitempty"`
-	NodeSelector      map[string]string          `json:"node_selector,omitempty"`
-	NodeFailurePolicy string                     `json:"node_failure_policy,omitempty"`
-	ActorRole         string                     `json:"-"`
-	MCPSource         bool                       `json:"-"`
+	NodeSelector              map[string]string          `json:"node_selector,omitempty"`
+	NodeFailurePolicy         string                     `json:"node_failure_policy,omitempty"`
+	ActorRole                 string                     `json:"-"`
+	MCPSource                 bool                       `json:"-"`
+	MCPMaxVUsOverride         int                        `json:"-"`
+	MCPMaxDurationSecOverride int                        `json:"-"`
 }
 
 // New starts the cluster listener, cleans up interrupted runs, optionally starts
@@ -747,7 +749,14 @@ func (c *Controller) StartRun(ctx context.Context, projectID string, req StartRu
 		if pol.MCPDisableLoadRuns {
 			return nil, userErr(ErrScaleLimitExceeded, "管理员已禁止通过 MCP 启动压测任务", nil)
 		}
-		if err := ValidateMCPRunScale(plan, pol); err != nil {
+		effPol := pol
+		if req.MCPMaxVUsOverride > 0 && req.MCPMaxVUsOverride < pol.EffectiveMCPMaxVUs() {
+			effPol.MCPMaxVUs = req.MCPMaxVUsOverride
+		}
+		if req.MCPMaxDurationSecOverride > 0 && req.MCPMaxDurationSecOverride < int(pol.EffectiveMCPMaxDuration().Seconds()) {
+			effPol.MCPMaxDurationSec = req.MCPMaxDurationSecOverride
+		}
+		if err := ValidateMCPRunScale(plan, effPol); err != nil {
 			return nil, err
 		}
 	}

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type FormEvent } from 'react'
 import {
+  Activity,
   ArrowRight,
   Ban,
   Bot,
@@ -18,6 +19,7 @@ import {
   Plus,
   ShieldCheck,
   SlidersHorizontal,
+  Sparkles,
   Sun,
   Trash2,
   X,
@@ -29,6 +31,9 @@ import { setPreference, useColorScheme, type ResolvedScheme, type SchemePreferen
 import { useNativeDialog } from '../lib/useNativeDialog'
 import type {
   APIToken,
+  AuditEntry,
+  MCPPromptCatalogItem,
+  MCPResourceCatalogItem,
   MCPToolCatalogItem,
   MCPToolCategory,
   Project,
@@ -37,6 +42,7 @@ import type {
   User,
   UserRole,
 } from '../lib/types'
+import { LiquidCapsule } from './LiquidCapsule'
 
 export type AccountModalTab = 'sessions' | 'tokens' | 'totp' | 'mcp' | 'password' | 'appearance'
 
@@ -46,6 +52,7 @@ interface Props {
   user: User
   projects?: Project[]
   onUserUpdated?: (user: User) => void
+  onOpenGovernance?: () => void
   onClose: () => void
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
   onLoggedOut: () => void
@@ -165,6 +172,24 @@ function CopyIcon({ done, className = 'w-3.5 h-3.5' }: { done: boolean; classNam
   return done ? <Check className={`${className} text-emerald-600`} /> : <Copy className={className} />
 }
 
+function summarizeUA(ua: string): string {
+  const s = ua || ''
+  let os = '未知系统'
+  if (/Windows NT/i.test(s)) os = 'Windows'
+  else if (/Mac OS X|Macintosh/i.test(s)) os = 'macOS'
+  else if (/Android/i.test(s)) os = 'Android'
+  else if (/iPhone|iPad/i.test(s)) os = 'iOS'
+  else if (/Linux/i.test(s)) os = 'Linux'
+
+  let browser = '浏览器 / 客户端'
+  if (/Edg\//i.test(s)) browser = 'Microsoft Edge'
+  else if (/Chrome\//i.test(s) && !/Edg\//i.test(s)) browser = 'Chrome / Chromium'
+  else if (/Firefox\//i.test(s)) browser = 'Firefox'
+  else if (/Safari\//i.test(s) && !/Chrome\//i.test(s)) browser = 'Safari'
+  else if (/curl/i.test(s)) browser = 'cURL'
+  return `${os} · ${browser}`
+}
+
 // ---------------------------------------------------------------------------
 
 export function AccountModal({
@@ -173,23 +198,35 @@ export function AccountModal({
   user,
   projects = [],
   onUserUpdated,
+  onOpenGovernance,
   onClose,
   onToast,
   onLoggedOut,
 }: Props) {
   const dialogRef = useNativeDialog(open, onClose)
   const [tab, setTab] = useState<AccountModalTab>(initialTab)
+  const tabsRef = useRef<HTMLDivElement | null>(null)
 
   const [sessions, setSessions] = useState<SessionItem[]>([])
   const [loading, setLoading] = useState(false)
+  const [revokingOthers, setRevokingOthers] = useState(false)
 
   const [tokens, setTokens] = useState<APIToken[]>([])
   const [loadingTokens, setLoadingTokens] = useState(false)
   const [catalog, setCatalog] = useState<MCPToolCatalogItem[] | null>(null)
+  const [resources, setResources] = useState<MCPResourceCatalogItem[]>([])
+  const [prompts, setPrompts] = useState<MCPPromptCatalogItem[]>([])
+  const [effectiveMaxVUs, setEffectiveMaxVUs] = useState(0)
+  const [effectiveMaxDurSec, setEffectiveMaxDurSec] = useState(0)
+  const [effectiveRatePerMin, setEffectiveRatePerMin] = useState(0)
   const [catalogError, setCatalogError] = useState(false)
   const [tokName, setTokName] = useState('')
   const [tokRole, setTokRole] = useState<UserRole>(user.role)
   const [tokTTLDays, setTokTTLDays] = useState<number>(30)
+  const [tokCustomDays, setTokCustomDays] = useState<string>('')
+  const [tokMcpMaxVUs, setTokMcpMaxVUs] = useState<string>('')
+  const [tokMcpMaxDur, setTokMcpMaxDur] = useState<string>('')
+  const [tokRatePerMin, setTokRatePerMin] = useState<string>('')
   const [tokScopes, setTokScopes] = useState<string[]>([])
   const [tokProjectIDs, setTokProjectIDs] = useState<string[]>([])
   const [restrictTools, setRestrictTools] = useState(false)
@@ -199,9 +236,18 @@ export function AccountModal({
   /** Plaintexts minted while this dialog is open; never persisted. */
   const [plaintexts, setPlaintexts] = useState<Record<string, string>>({})
 
-  const [mcpMode, setMcpMode] = useState<'http' | 'stdio'>('http')
+  const [mcpClient, setMcpClient] = useState<'standard' | 'cursor' | 'stdio'>('standard')
   const [mcpTokenId, setMcpTokenId] = useState('')
   const [mcpQuickRW, setMcpQuickRW] = useState(false)
+  const [probingMcp, setProbingMcp] = useState(false)
+  const [mcpProbeRes, setMcpProbeRes] = useState<{
+    ok: boolean
+    latencyMs: number
+    serverName?: string
+    toolCount?: number
+    error?: string
+  } | null>(null)
+  const [mcpActivity, setMcpActivity] = useState<AuditEntry[]>([])
 
   const [enrollment, setEnrollment] = useState<TOTPEnrollment | null>(null)
   const [totpConfirmCode, setTotpConfirmCode] = useState('')
@@ -232,6 +278,7 @@ export function AccountModal({
     setNewToken(null)
     setPlaintexts({})
     setMcpTokenId('')
+    setMcpProbeRes(null)
     setCatalog(null)
     setCatalogError(false)
     setRestrictTools(false)
@@ -269,15 +316,26 @@ export function AccountModal({
     if (!open) return
     disarm()
     if (tab === 'sessions') void loadSessions()
-    if (tab === 'tokens' || tab === 'mcp') void loadTokens()
+    if (tab === 'tokens' || tab === 'mcp') {
+      void loadTokens()
+      void api.mcpActivity(12).then(setMcpActivity).catch(() => undefined)
+    }
   }, [open, tab])
 
   useEffect(() => {
-    if (!open || tab !== 'tokens' || catalog || catalogError) return
+    if (!open || (tab !== 'tokens' && tab !== 'mcp') || catalog || catalogError) return
     let cancelled = false
     api
       .getMCPCatalog()
-      .then((c) => !cancelled && setCatalog(c.tools || []))
+      .then((c) => {
+        if (cancelled) return
+        setCatalog(c.tools || [])
+        setResources(c.resources || [])
+        setPrompts(c.prompts || [])
+        setEffectiveMaxVUs(c.effective_max_vus || 0)
+        setEffectiveMaxDurSec(c.effective_max_duration_sec || 0)
+        setEffectiveRatePerMin(c.effective_rate_per_min || 0)
+      })
       .catch(() => !cancelled && setCatalogError(true))
     return () => {
       cancelled = true
@@ -326,18 +384,27 @@ export function AccountModal({
   const origin = typeof window !== 'undefined' ? window.location.origin : ''
   const mcpPlaintext = selectedMcpToken ? plaintexts[selectedMcpToken.id] : undefined
   const tokenValue = mcpPlaintext || (selectedMcpToken ? `<${selectedMcpToken.prefix}… 令牌明文>` : '<tg_ 令牌明文>')
+  const mcpEndpoint = `${origin}/api/v1/mcp`
   const mcpSnippet = JSON.stringify(
     {
       mcpServers: {
         tidegate:
-          mcpMode === 'http'
-            ? { serverUrl: `${origin}/api/v1/mcp`, headers: { Authorization: `Bearer ${tokenValue}` } }
-            : { command: 'tidegate', args: ['mcp', '--url', origin, '--token', tokenValue] },
+          mcpClient === 'standard'
+            ? { url: mcpEndpoint, headers: { Authorization: `Bearer ${tokenValue}` } }
+            : mcpClient === 'cursor'
+              ? { serverUrl: mcpEndpoint, headers: { Authorization: `Bearer ${tokenValue}` } }
+              : {
+                  command: 'tidegate',
+                  args: ['mcp', '--url', origin],
+                  env: { TIDEGATE_TOKEN: tokenValue },
+                },
       },
     },
     null,
     2
   )
+  const enabledToolCount = (catalog || []).filter((t) => t.globally_enabled).length
+  const projectNameMap = useMemo(() => new Map(projects.map((p) => [p.id, p.name])), [projects])
 
   const uniqueTokenName = (base: string) => {
     const taken = new Set(tokens.map((t) => t.name))
@@ -380,6 +447,10 @@ export function AccountModal({
       if (whitelist.length < scopeUnlocked.length) mcpTools = whitelist
     }
     setCreatingTok(true)
+    const ttlDaysResolved = tokTTLDays === -1 ? Math.max(1, Number(tokCustomDays) || 30) : tokTTLDays
+    const maxVUs = Number(tokMcpMaxVUs) > 0 ? Number(tokMcpMaxVUs) : undefined
+    const maxDur = Number(tokMcpMaxDur) > 0 ? Number(tokMcpMaxDur) : undefined
+    const rateMin = Number(tokRatePerMin) > 0 ? Number(tokRatePerMin) : undefined
     try {
       const res = await api.createAPIToken({
         name,
@@ -387,7 +458,10 @@ export function AccountModal({
         scopes: tokScopes.length > 0 ? tokScopes : undefined,
         project_ids: tokProjectIDs.length > 0 ? tokProjectIDs : undefined,
         mcp_tools: mcpTools,
-        ttl_days: tokTTLDays > 0 ? tokTTLDays : undefined,
+        mcp_max_vus: maxVUs,
+        mcp_max_duration_sec: maxDur,
+        rate_per_min: rateMin,
+        ttl_days: ttlDaysResolved > 0 ? ttlDaysResolved : undefined,
       })
       setNewToken(res)
       rememberMinted(res.token, res.plaintext)
@@ -396,12 +470,49 @@ export function AccountModal({
       setTokProjectIDs([])
       setRestrictTools(false)
       setToolPick([])
+      setTokCustomDays('')
+      setTokMcpMaxVUs('')
+      setTokMcpMaxDur('')
+      setTokRatePerMin('')
       await loadTokens()
       onToast('success', `已生成令牌「${res.token.name}」`)
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '生成 API 令牌失败')
     } finally {
       setCreatingTok(false)
+    }
+  }
+
+  const handleProbeMCP = async () => {
+    setProbingMcp(true)
+    try {
+      const res = await api.mcpProbe(mcpPlaintext)
+      setMcpProbeRes({
+        ok: res.ok,
+        latencyMs: res.latencyMs,
+        serverName: res.serverName,
+        toolCount: res.toolCount,
+      })
+      onToast('success', `MCP 握手成功：发现 ${res.toolCount} 个可用工具（${res.latencyMs} ms）`)
+    } catch (err) {
+      const msg = err instanceof APIError ? err.message : 'MCP 自检连接失败'
+      setMcpProbeRes({ ok: false, latencyMs: 0, error: msg })
+      onToast('error', msg)
+    } finally {
+      setProbingMcp(false)
+    }
+  }
+
+  const handleRevokeOtherSessions = async () => {
+    setRevokingOthers(true)
+    try {
+      const res = await api.revokeOtherSessions()
+      onToast('success', `已注销其他设备会话 ${res.revoked} 个`)
+      await loadSessions()
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : '注销其他设备失败')
+    } finally {
+      setRevokingOthers(false)
     }
   }
 
@@ -580,50 +691,70 @@ export function AccountModal({
   return (
     <dialog
       ref={dialogRef}
-      closedby="any"
+      {...({ closedby: 'closerequest' } as Record<string, string>)}
       aria-label="账号与令牌"
-      className="tg-dialog w-[min(50rem,calc(100vw-2rem))] h-[min(42rem,86dvh)]"
+      className="tg-dialog w-[min(52rem,calc(100vw-2rem))] h-[min(44rem,88dvh)]"
     >
       {open && (
         <>
-          <header className="px-5 py-3 tg-telemetry-strip flex items-center justify-between gap-3">
-            <div className="flex items-center gap-3 min-w-0">
-              <h2 className="text-sm font-semibold text-white">账号与令牌</h2>
-              <span className="text-xs text-sky-200/80 font-mono truncate">{user.username}</span>
-              <span className="px-1.5 py-0.5 rounded bg-white/10 text-sky-100 font-mono text-[11px]">{user.role}</span>
+          <header className="tg-dialog-header">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <h2 className="text-sm font-semibold text-fg shrink-0">账号与令牌</h2>
+              <span className="text-xs font-mono text-fg-muted truncate">{user.username}</span>
+              <span className="px-2 py-0.5 rounded-full bg-sky-500/12 text-tidal font-mono text-[11px] font-medium">
+                {user.role}
+              </span>
               {user.totp_enabled && (
-                <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-emerald-400/15 text-emerald-200 text-[11px]">
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/12 text-emerald-700 text-[11px] font-medium">
                   <ShieldCheck className="w-3 h-3" /> 2FA
                 </span>
               )}
             </div>
-            <button
-              type="button"
-              onClick={onClose}
-              aria-label="关闭"
-              className="p-1 text-slate-300 hover:text-white rounded hover:bg-white/10"
-            >
-              <X className="w-4 h-4" />
-            </button>
+            <div className="flex items-center gap-2 shrink-0">
+              {user.role === 'admin' && onOpenGovernance && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onClose()
+                    onOpenGovernance()
+                  }}
+                  className="tg-btn-secondary !py-1 !px-2.5 !text-[11px]"
+                >
+                  <span>团队账号与项目权限</span>
+                  <ArrowRight className="w-3 h-3 text-tidal" />
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="关闭"
+                className="p-1 text-fg-subtle hover:text-fg rounded-lg hover:bg-surface-hover"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
           </header>
 
           <div
+            ref={tabsRef}
             role="tablist"
             aria-label="账号与安全"
-            className="tg-tablist px-5 border-b border-line bg-surface-subtle gap-5 text-xs font-medium"
+            className="relative tg-tablist px-5 border-b border-line bg-surface-subtle/60 gap-2 py-1.5 text-xs font-medium shrink-0"
           >
+            <LiquidCapsule containerRef={tabsRef} activeId={tab} orientation="horizontal" className="rounded-lg" />
             {tabs.map((t) => {
               const Icon = t.icon
               const selected = tab === t.id
               return (
                 <button
                   key={t.id}
+                  data-liq-id={t.id}
                   type="button"
                   role="tab"
                   aria-selected={selected}
                   onClick={() => setTab(t.id)}
-                  className={`tg-tab inline-flex items-center gap-1.5 py-2.5 transition-colors ${
-                    selected ? 'text-tidal' : 'text-fg-muted hover:text-fg'
+                  className={`relative z-10 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
+                    selected ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <Icon className="w-3.5 h-3.5" />
@@ -641,33 +772,53 @@ export function AccountModal({
               ) : sessions.length === 0 ? (
                 <p className="text-fg-subtle">暂无活动会话</p>
               ) : (
-                <ul className="rounded-lg border border-line divide-y divide-line">
-                  {sessions.map((s) => (
-                    <li key={s.id} className="flex items-center justify-between gap-3 px-3 py-2.5">
-                      <div className="min-w-0">
-                        <div className="flex items-center gap-2 font-medium text-fg">
-                          <span className="font-mono">{s.remote_addr || '本机'}</span>
-                          {s.current && (
-                            <span className={`${badge} bg-emerald-50 text-emerald-700 border-emerald-200`}>当前</span>
-                          )}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-fg-muted">
+                      共 <strong className="text-fg tg-tabular">{sessions.length}</strong> 台已登录设备
+                    </span>
+                    {sessions.length > 1 && (
+                      <button
+                        type="button"
+                        disabled={revokingOthers}
+                        onClick={() => void handleRevokeOtherSessions()}
+                        className="tg-btn-danger !py-1 !px-2.5"
+                      >
+                        <LogOut className="w-3 h-3" /> {revokingOthers ? '处理中…' : '注销其他设备'}
+                      </button>
+                    )}
+                  </div>
+                  <ul className="rounded-xl border border-line bg-surface divide-y divide-line overflow-hidden">
+                    {sessions.map((s) => (
+                      <li key={s.id} className="flex items-center justify-between gap-3 px-3.5 py-2.5">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-2 font-medium text-fg">
+                            <span>{summarizeUA(s.user_agent)}</span>
+                            <span className="font-mono text-[11px] text-fg-muted">· {s.remote_addr || '本机'}</span>
+                            {s.current && (
+                              <span className={`${badge} bg-emerald-50 text-emerald-700 border-emerald-200`}>当前设备</span>
+                            )}
+                          </div>
+                          <p className="text-[11px] text-fg-subtle truncate mt-0.5" title={s.user_agent}>
+                            {s.user_agent || '未知 User-Agent'}
+                          </p>
+                          <p className="tg-tabular text-[11px] text-fg-subtle mt-0.5">
+                            活跃 {new Date(s.last_seen_at).toLocaleString()} · 过期 {new Date(s.expires_at).toLocaleString()}
+                          </p>
                         </div>
-                        <p className="text-fg-muted truncate mt-0.5">{s.user_agent || '未知终端'}</p>
-                        <p className="tg-tabular text-[11px] text-fg-subtle mt-0.5">
-                          活跃 {new Date(s.last_seen_at).toLocaleString()} · 过期 {new Date(s.expires_at).toLocaleString()}
-                        </p>
-                      </div>
-                      {dangerBtn(`session:${s.id}`, s.current ? '退出' : '注销', s.current ? '确认退出？' : '确认注销？', () =>
-                        void handleRevokeSession(s)
-                      )}
-                    </li>
-                  ))}
-                </ul>
+                        {dangerBtn(`session:${s.id}`, s.current ? '退出' : '注销', s.current ? '确认退出？' : '确认注销？', () =>
+                          void handleRevokeSession(s)
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
               ))}
 
             {/* ================= API tokens ================= */}
             {tab === 'tokens' && (
               <div className="space-y-4">
-                <form onSubmit={handleCreateToken} className="rounded-lg border border-line bg-surface-subtle">
+                <form onSubmit={handleCreateToken} className="rounded-xl border border-line bg-surface-subtle">
                   <div className="flex flex-wrap items-center gap-2 p-3">
                     <input
                       type="text"
@@ -686,7 +837,7 @@ export function AccountModal({
                       aria-label="角色"
                       value={tokRole}
                       onChange={(e) => setTokRole(e.target.value as UserRole)}
-                      className={`${inputCls} font-mono`}
+                      className={`tg-select ${inputCls} font-mono`}
                     >
                       {allowedTokenRoles.map((r) => (
                         <option key={r} value={r}>
@@ -698,17 +849,66 @@ export function AccountModal({
                       aria-label="有效期"
                       value={tokTTLDays}
                       onChange={(e) => setTokTTLDays(Number(e.target.value))}
-                      className={`${inputCls} tg-tabular`}
+                      className={`tg-select ${inputCls} tg-tabular`}
                     >
                       <option value={7}>7 天</option>
                       <option value={30}>30 天</option>
                       <option value={90}>90 天</option>
                       <option value={365}>365 天</option>
+                      <option value={-1}>自定义天数</option>
                       <option value={0}>长期有效</option>
                     </select>
+                    {tokTTLDays === -1 && (
+                      <input
+                        type="number"
+                        min={1}
+                        max={3650}
+                        aria-label="自定义有效天数"
+                        value={tokCustomDays}
+                        onChange={(e) => setTokCustomDays(e.target.value)}
+                        placeholder="天数"
+                        className={`${inputCls} w-20 font-mono tg-tabular`}
+                      />
+                    )}
                     <button type="submit" disabled={creatingTok} className={btnPrimary}>
                       <Plus className="w-3.5 h-3.5" /> 创建
                     </button>
+                  </div>
+
+                  <div className="px-3 pb-3 grid grid-cols-1 sm:grid-cols-3 gap-2">
+                    <label className="block">
+                      <span className="block text-[11px] text-fg-muted mb-1">单令牌 MCP 最大 VU</span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={tokMcpMaxVUs}
+                        onChange={(e) => setTokMcpMaxVUs(e.target.value)}
+                        placeholder={effectiveMaxVUs > 0 ? `全局上限 ${effectiveMaxVUs}` : '继承全局'}
+                        className={`${inputCls} w-full font-mono tg-tabular`}
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="block text-[11px] text-fg-muted mb-1">单令牌 MCP 最长时长(秒)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={tokMcpMaxDur}
+                        onChange={(e) => setTokMcpMaxDur(e.target.value)}
+                        placeholder={effectiveMaxDurSec > 0 ? `全局上限 ${effectiveMaxDurSec}s` : '继承全局'}
+                        className={`${inputCls} w-full font-mono tg-tabular`}
+                      />
+                    </label>
+                    <label className="block">
+                      <span className="block text-[11px] text-fg-muted mb-1">单令牌调用速率(次/分)</span>
+                      <input
+                        type="number"
+                        min={0}
+                        value={tokRatePerMin}
+                        onChange={(e) => setTokRatePerMin(e.target.value)}
+                        placeholder={effectiveRatePerMin > 0 ? `全局上限 ${effectiveRatePerMin}` : '继承全局'}
+                        className={`${inputCls} w-full font-mono tg-tabular`}
+                      />
+                    </label>
                   </div>
 
                   <fieldset className="px-3 pb-3 pt-2.5 border-t border-line">
@@ -938,8 +1138,22 @@ export function AccountModal({
                                 </span>
                               )}
                               {t.project_ids && t.project_ids.length > 0 && (
-                                <span className={`${badge} bg-amber-50 text-amber-800 border-amber-200`}>
-                                  项目 <span className="tg-tabular">{t.project_ids.length}</span>
+                                <span
+                                  title={t.project_ids.map((pid) => projectNameMap.get(pid) || pid).join('、')}
+                                  className={`${badge} bg-amber-50 text-amber-800 border-amber-200`}
+                                >
+                                  项目：
+                                  {t.project_ids
+                                    .slice(0, 2)
+                                    .map((pid) => projectNameMap.get(pid) || pid)
+                                    .join('、')}
+                                  {t.project_ids.length > 2 ? ` +${t.project_ids.length - 2}` : ''}
+                                </span>
+                              )}
+                              {((t.mcp_max_vus || 0) > 0 || (t.rate_per_min || 0) > 0) && (
+                                <span className={`${badge} bg-cyan-50 text-cyan-800 border-cyan-200 font-mono`}>
+                                  {t.mcp_max_vus ? `≤${t.mcp_max_vus} VU ` : ''}
+                                  {t.rate_per_min ? `${t.rate_per_min}/m` : ''}
                                 </span>
                               )}
                               {expired && <span className={`${badge} bg-rose-50 text-rose-700 border-rose-200`}>已过期</span>}
@@ -948,6 +1162,7 @@ export function AccountModal({
                               创建 {new Date(t.created_at).toLocaleString()}
                               {t.expires_at ? ` · 过期 ${new Date(t.expires_at).toLocaleDateString()}` : ' · 长期有效'}
                               {t.last_used_at ? ` · 最近使用 ${new Date(t.last_used_at).toLocaleString()}` : ''}
+                              {t.last_used_addr ? ` (${t.last_used_addr})` : ''}
                             </div>
                           </div>
                           {dangerBtn(`token:${t.id}`, '吊销', '确认吊销？', () => void handleRevokeToken(t))}
@@ -961,23 +1176,63 @@ export function AccountModal({
 
             {/* ================= MCP ================= */}
             {tab === 'mcp' && (
-              <div className="space-y-3">
+              <div className="space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-2 p-3 rounded-xl border border-line bg-surface-subtle">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="inline-flex items-center gap-1.5 font-semibold text-fg">
+                      <Bot className="w-4 h-4 text-tidal" />
+                      MCP 状态：
+                    </span>
+                    <span className="px-2 py-0.5 rounded-full bg-sky-500/15 text-tidal text-[11px] font-mono tg-tabular">
+                      可用工具 {enabledToolCount}/{catalog?.length ?? 16}
+                    </span>
+                    <span className="px-2 py-0.5 rounded-full bg-surface border border-line text-fg-muted text-[11px] font-mono tg-tabular">
+                      {effectiveMaxVUs > 0 ? `并发上限 ${effectiveMaxVUs} VU` : 'VU 不限'}
+                      {effectiveMaxDurSec > 0 ? ` · 时长 ≤${effectiveMaxDurSec}s` : ''}
+                      {effectiveRatePerMin > 0 ? ` · ${effectiveRatePerMin} 次/分` : ''}
+                    </span>
+                    {mcpProbeRes && (
+                      <span
+                        className={`px-2 py-0.5 rounded-full text-[11px] font-medium ${
+                          mcpProbeRes.ok
+                            ? 'bg-emerald-500/15 text-emerald-700'
+                            : 'bg-rose-500/15 text-rose-700'
+                        }`}
+                      >
+                        {mcpProbeRes.ok
+                          ? `握手正常 · ${mcpProbeRes.toolCount} 工具 · ${mcpProbeRes.latencyMs}ms`
+                          : mcpProbeRes.error || '握手失败'}
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    type="button"
+                    disabled={probingMcp}
+                    onClick={() => void handleProbeMCP()}
+                    className="tg-btn-secondary !py-1"
+                  >
+                    <Sparkles className="w-3.5 h-3.5 text-tidal" />
+                    {probingMcp ? '检测中…' : '自检连接'}
+                  </button>
+                </div>
+
                 <div className="flex flex-wrap items-center gap-2">
-                  <div role="radiogroup" aria-label="传输方式" className="inline-flex rounded-lg border border-line bg-surface-subtle p-0.5">
+                  <div role="radiogroup" aria-label="接入客户端格式" className="inline-flex rounded-xl border border-line bg-surface-subtle p-0.5">
                     {(
                       [
-                        ['http', 'Streamable HTTP'],
-                        ['stdio', 'CLI Stdio'],
+                        ['standard', 'Streamable HTTP (url)'],
+                        ['cursor', 'Cursor / Antigravity (serverUrl)'],
+                        ['stdio', 'CLI Stdio (env)'],
                       ] as const
                     ).map(([id, label]) => (
                       <button
                         key={id}
                         type="button"
                         role="radio"
-                        aria-checked={mcpMode === id}
-                        onClick={() => setMcpMode(id)}
-                        className={`px-3 py-1 rounded-md font-medium ${
-                          mcpMode === id ? 'bg-surface text-fg shadow-xs' : 'text-fg-muted hover:text-fg'
+                        aria-checked={mcpClient === id}
+                        onClick={() => setMcpClient(id)}
+                        className={`px-2.5 py-1 rounded-lg font-medium ${
+                          mcpClient === id ? 'bg-surface text-tidal shadow-xs' : 'text-fg-muted hover:text-fg'
                         }`}
                       >
                         {label}
@@ -990,7 +1245,7 @@ export function AccountModal({
                       value={selectedMcpToken?.id || ''}
                       onChange={(e) => setMcpTokenId(e.target.value)}
                       disabled={mcpTokens.length === 0}
-                      className={`${inputCls} flex-1 min-w-0 font-mono disabled:opacity-60`}
+                      className={`tg-select ${inputCls} flex-1 min-w-0 font-mono disabled:opacity-60`}
                     >
                       {mcpTokens.length === 0 && <option value="">{loadingTokens ? '加载中…' : '无可用 MCP 令牌'}</option>}
                       {mcpTokens.map((t) => (
@@ -1003,8 +1258,8 @@ export function AccountModal({
                   </label>
                 </div>
 
-                <div className="flex flex-wrap items-center gap-2 rounded-lg border border-line bg-surface-subtle px-3 py-2">
-                  <span className="text-fg-muted">新建令牌</span>
+                <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface-subtle px-3 py-2">
+                  <span className="text-fg-muted">快捷签发令牌</span>
                   {user.role !== 'viewer' && (
                     <div role="radiogroup" aria-label="权限" className="inline-flex rounded-md border border-line bg-surface p-0.5">
                       {(
@@ -1034,11 +1289,11 @@ export function AccountModal({
                     onClick={() => void handleQuickMCPToken()}
                     className={`ml-auto ${mcpTokens.length === 0 ? btnPrimary : btnSecondary}`}
                   >
-                    <Plus className="w-3.5 h-3.5" /> {creatingTok ? '生成中…' : '生成'}
+                    <Plus className="w-3.5 h-3.5" /> {creatingTok ? '生成中…' : '一键生成并填入'}
                   </button>
                 </div>
 
-                <div className="rounded-lg border tg-code-surface overflow-hidden">
+                <div className="rounded-xl border tg-code-surface overflow-hidden">
                   <div className="flex items-center justify-between gap-2 px-3 py-1.5 border-b border-white/10">
                     <div className="flex items-center gap-2 min-w-0">
                       <span className="font-mono text-[11px] text-slate-400 truncate">mcp_config.json</span>
@@ -1065,6 +1320,76 @@ export function AccountModal({
                     {mcpSnippet}
                   </pre>
                 </div>
+
+                {(resources.length > 0 || prompts.length > 0) && (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                    <div className="rounded-xl border border-line bg-surface-subtle p-3 space-y-2">
+                      <div className="font-semibold text-fg flex items-center justify-between">
+                        <span>MCP Resources ({resources.length})</span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {resources.map((r) => (
+                          <div key={r.uri_template} className="flex items-center justify-between gap-2 rounded-lg bg-surface border border-line px-2 py-1.5">
+                            <div className="min-w-0">
+                              <div className="font-mono text-[11px] text-tidal truncate">{r.uri_template}</div>
+                              <div className="text-[10px] text-fg-subtle truncate">{r.name} · {r.description}</div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void copy(`res:${r.uri_template}`, r.uri_template)}
+                              className="p-1 text-fg-subtle hover:text-fg shrink-0"
+                              title="复制 URI 模板"
+                            >
+                              <CopyIcon done={copied === `res:${r.uri_template}`} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="rounded-xl border border-line bg-surface-subtle p-3 space-y-2">
+                      <div className="font-semibold text-fg flex items-center justify-between">
+                        <span>MCP Prompts ({prompts.length})</span>
+                      </div>
+                      <div className="space-y-1.5">
+                        {prompts.map((p) => (
+                          <div key={p.name} className="flex items-center justify-between gap-2 rounded-lg bg-surface border border-line px-2 py-1.5">
+                            <div className="min-w-0">
+                              <div className="font-mono text-[11px] text-fg font-semibold truncate">/{p.name}</div>
+                              <div className="text-[10px] text-fg-subtle truncate">{p.title} · {p.description}</div>
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => void copy(`prm:${p.name}`, p.name)}
+                              className="p-1 text-fg-subtle hover:text-fg shrink-0"
+                              title="复制 Prompt 名称"
+                            >
+                              <CopyIcon done={copied === `prm:${p.name}`} />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                )}
+
+                {mcpActivity.length > 0 && (
+                  <div className="rounded-xl border border-line bg-surface-subtle p-3 space-y-2">
+                    <div className="font-semibold text-fg flex items-center gap-1.5">
+                      <Activity className="w-3.5 h-3.5 text-tidal" /> 最近 MCP 调用记录
+                    </div>
+                    <div className="max-h-36 overflow-y-auto tg-scroller space-y-1">
+                      {mcpActivity.slice(0, 8).map((a) => (
+                        <div key={a.id} className="flex items-center justify-between gap-2 px-2 py-1 rounded bg-surface border border-line text-[11px] font-mono">
+                          <span className="truncate text-fg">{a.action} {a.resource_id || ''}</span>
+                          <span className="text-fg-subtle shrink-0 tg-tabular">
+                            {new Date(a.created_at).toLocaleTimeString()}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
             )}
 

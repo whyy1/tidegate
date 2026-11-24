@@ -63,13 +63,13 @@ export function SaveAPIModal({ open, initialName, initialFolderId, treeNodes, on
   return (
     <dialog
       ref={ref}
-      {...({ closedby: 'any' } as Record<string, string>)}
+      {...({ closedby: 'closerequest' } as Record<string, string>)}
       aria-labelledby="tg-save-api-title"
       className="tg-dialog w-[min(28rem,calc(100vw-2rem))] max-h-[86dvh]"
     >
       {open && (
         <form onSubmit={submit} className="flex flex-col min-h-0 flex-1 text-xs">
-          <header className="px-5 py-3 border-b border-line flex items-center justify-between gap-3 bg-surface-subtle shrink-0">
+          <header className="tg-dialog-header">
             <h2 id="tg-save-api-title" className="text-sm font-semibold text-fg">
               保存接口
             </h2>
@@ -77,7 +77,7 @@ export function SaveAPIModal({ open, initialName, initialFolderId, treeNodes, on
               type="button"
               onClick={onClose}
               aria-label="关闭保存接口"
-              className="p-1 text-fg-subtle hover:text-fg rounded hover:bg-surface-hover"
+              className="p-1 text-fg-subtle hover:text-fg rounded-lg hover:bg-surface-hover"
             >
               <X className="w-4 h-4" />
             </button>

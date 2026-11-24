@@ -44,6 +44,7 @@ import {
 } from 'lucide-react'
 import { CodeEditor, type CodeSnippet } from '../components/CodeEditor'
 import { RollingNumber } from '../components/DropletFilter'
+import { GlassSelect } from '../components/GlassSelect'
 import { KeyValueEditor } from '../components/KeyValueEditor'
 import { LoadConfigEditor } from '../components/LoadConfigEditor'
 import { BottomModuleStrip, ModuleZoomButton } from '../components/ModuleStage'
@@ -493,9 +494,9 @@ function AddStepMenu({
           role="menu"
           aria-label={label}
           onKeyDown={onMenuKey}
-          className={`absolute z-30 top-full mt-1 ${align === 'right' ? 'right-0' : 'left-0'} ${
-            view === 'api' ? 'w-80' : 'w-40'
-          } rounded-lg border border-line-strong bg-surface shadow-lg p-1 text-xs`}
+          className={`tg-glass-popover absolute z-30 top-full mt-1.5 ${align === 'right' ? 'right-0' : 'left-0'} ${
+            view === 'api' ? 'w-80' : 'w-44'
+          } p-1.5 text-xs`}
         >
           {view === 'root' ? (
             STEP_KINDS.map(({ kind, label: itemLabel, Icon }) => {
@@ -663,7 +664,7 @@ function ColumnPeek({
           id={panelId}
           role="dialog"
           aria-label={`${file} 字段`}
-          className="absolute z-30 right-0 top-full mt-1 w-72 rounded-lg border border-line-strong bg-surface shadow-lg p-2 space-y-2"
+          className="tg-glass-popover absolute z-30 right-0 top-full mt-1.5 w-72 p-2.5 space-y-2"
         >
           <div className="flex items-center gap-2 min-w-0">
             <span className="font-mono text-fg truncate min-w-0 flex-1">{file}</span>
@@ -728,9 +729,12 @@ export function ScenariosView({
   const [previewModal, setPreviewModal] = useState<FilePreview | null>(null)
   const previewRef = useNativeDialog(previewModal !== null, () => setPreviewModal(null))
   const [zoomedMod, setZoomedMod] = useState<'' | 'list' | 'steps' | 'load'>('')
+  const [exportMenuOpen, setExportMenuOpen] = useState(false)
+  const exportWrapRef = useRef<HTMLDivElement>(null)
   const listPaneRef = useRef<HTMLElement>(null)
   const stepsPaneRef = useRef<HTMLElement>(null)
   const loadPaneRef = useRef<HTMLElement>(null)
+  useDismiss(exportMenuOpen, exportWrapRef, () => setExportMenuOpen(false))
 
   const paneRefFor = (id: 'list' | 'steps' | 'load') => {
     if (id === 'list') return listPaneRef.current
@@ -1147,19 +1151,21 @@ export function ScenariosView({
                 placeholder="场景名称"
                 className="px-3 py-1.5 border border-line-strong rounded-lg font-semibold text-sm text-fg placeholder:text-fg-subtle bg-surface focus:border-sky-500 focus:outline-none min-w-[220px]"
               />
-              <select
-                aria-label="场景默认环境"
-                value={draft.environment_id || ''}
-                onChange={(e) => updateDraft({ environment_id: e.target.value })}
-                className="px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg text-xs [&>option]:bg-surface [&>option]:text-fg"
-              >
-                <option value="">跟随顶部环境</option>
-                {environments.map((env) => (
-                  <option key={env.id} value={env.id}>
-                    {env.name}
-                  </option>
-                ))}
-              </select>
+              <div className="min-w-[170px]">
+                <GlassSelect
+                  ariaLabel="场景默认环境"
+                  value={draft.environment_id || ''}
+                  onChange={(val) => updateDraft({ environment_id: val })}
+                  options={[
+                    { value: '', label: '跟随顶部环境' },
+                    ...environments.map((env) => ({
+                      value: env.id,
+                      label: env.name,
+                      description: env.base_url || undefined,
+                    })),
+                  ]}
+                />
+              </div>
               {dirty && (
                 <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-800 text-[11px] font-medium">
                   <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
@@ -1170,14 +1176,72 @@ export function ScenariosView({
 
             <div className="flex flex-wrap items-center gap-2">
               {draft.id && selectedId !== 'new' && (
-                <a
-                  href={api.exportScenarioURL(projectId, draft.id, 'k6', draft.environment_id || activeEnvId || '')}
-                  download
-                  className={stripBtn}
-                  title="导出 k6 脚本"
-                >
-                  <Download className="w-3.5 h-3.5 text-tidal" /> k6
-                </a>
+                <div ref={exportWrapRef} className="relative">
+                  <button
+                    type="button"
+                    aria-expanded={exportMenuOpen}
+                    aria-haspopup="listbox"
+                    onClick={() => setExportMenuOpen((v) => !v)}
+                    className={stripBtn}
+                    title="导出场景定义（Tidegate 原生 YAML/JSON 或 k6 脚本）"
+                  >
+                    <Download className="w-3.5 h-3.5 text-tidal" />
+                    <span>导出场景</span>
+                    <ChevronDown className={`w-3 h-3 text-fg-subtle transition-transform ${exportMenuOpen ? 'rotate-180' : ''}`} />
+                  </button>
+                  {exportMenuOpen && (
+                    <div
+                      role="listbox"
+                      aria-label="选择场景导出格式"
+                      className="tg-glass-popover absolute right-0 top-full mt-1.5 z-40 w-64 p-1.5 space-y-0.5 text-xs"
+                    >
+                      {(
+                        [
+                          {
+                            fmt: 'yaml' as const,
+                            title: 'Tidegate 原生场景 (.yaml)',
+                            desc: '可直接 tidegate run 运行',
+                            badge: '推荐',
+                          },
+                          {
+                            fmt: 'json' as const,
+                            title: 'Tidegate 原生 JSON (.json)',
+                            desc: '标准 JSON 场景定义',
+                          },
+                          {
+                            fmt: 'k6' as const,
+                            title: 'k6 脚本 (.js)',
+                            desc: '跨工具迁移 / 对比',
+                          },
+                        ] as const
+                      ).map((opt) => (
+                        <a
+                          key={opt.fmt}
+                          role="option"
+                          href={api.exportScenarioURL(
+                            projectId,
+                            draft.id!,
+                            opt.fmt,
+                            draft.environment_id || activeEnvId || ''
+                          )}
+                          download
+                          onClick={() => setExportMenuOpen(false)}
+                          className="flex items-start justify-between gap-2 px-2.5 py-2 rounded-xl hover:bg-surface-hover text-fg transition-colors"
+                        >
+                          <div className="min-w-0">
+                            <div className="font-semibold text-fg">{opt.title}</div>
+                            <div className="text-[11px] text-fg-subtle">{opt.desc}</div>
+                          </div>
+                          {'badge' in opt && opt.badge && (
+                            <span className="shrink-0 px-1.5 py-0.5 rounded-full bg-sky-500/15 text-tidal text-[10px] font-semibold">
+                              {opt.badge}
+                            </span>
+                          )}
+                        </a>
+                      ))}
+                    </div>
+                  )}
+                </div>
               )}
               <div className="inline-flex items-stretch rounded-lg border border-line-strong bg-surface overflow-hidden">
                 <button
@@ -1409,11 +1473,16 @@ export function ScenariosView({
         </main>
 
         {/* File Preview Dialog */}
-        <dialog ref={previewRef} closedby="any" className="tg-dialog w-[min(48rem,calc(100vw-2rem))] max-h-[86dvh]">
+        <dialog
+          ref={previewRef}
+          {...({ closedby: 'closerequest' } as Record<string, string>)}
+          aria-labelledby="tg-file-preview-title"
+          className="tg-dialog w-[min(48rem,calc(100vw-2rem))] max-h-[86dvh]"
+        >
           {previewModal && (
             <>
-              <div className="px-5 py-3 border-b border-line flex items-center justify-between gap-3 bg-surface-subtle">
-                <div className="flex items-center gap-2 min-w-0 text-sm font-semibold text-fg">
+              <header className="tg-dialog-header">
+                <div id="tg-file-preview-title" className="flex items-center gap-2 min-w-0 text-sm font-semibold text-fg">
                   <span className="font-mono truncate min-w-0">{previewModal.name}</span>
                   {previewModal.is_csv && (
                     <span className="shrink-0 px-1.5 py-0.5 rounded-full bg-sky-50 border border-sky-200 text-sky-700 text-[10px] font-mono font-normal tg-tabular">
@@ -1434,7 +1503,7 @@ export function ScenariosView({
                 >
                   <X className="w-4 h-4" />
                 </button>
-              </div>
+              </header>
               <div className="flex-1 min-h-0 overflow-auto tg-scroller p-4 text-xs">
                 {previewModal.is_csv ? (
                   <table className="w-full text-left border-collapse border border-line font-mono tg-tabular">

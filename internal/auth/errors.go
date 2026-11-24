@@ -43,6 +43,7 @@ const (
 	CodeTOTPAlreadyEnabled Code = "totp_already_enabled"
 	CodeTOTPNotEnabled     Code = "totp_not_enabled"
 	CodeScopeForbidden     Code = "insufficient_scope"
+	CodeAccountDisabled    Code = "account_disabled"
 	CodeInternal           Code = "internal_error"
 )
 
@@ -96,6 +97,7 @@ var (
 	ErrTOTPAlreadyEnabled = &Error{Code: CodeTOTPAlreadyEnabled, Status: http.StatusConflict, Message: "当前账号已启用双因素认证"}
 	ErrTOTPNotEnabled     = &Error{Code: CodeTOTPNotEnabled, Status: http.StatusBadRequest, Message: "当前账号尚未启用或未完成双因素认证初始化"}
 	ErrScopeForbidden     = &Error{Code: CodeScopeForbidden, Status: http.StatusForbidden, Message: "当前访问令牌缺少执行该操作所需的 Scope 权限范围"}
+	ErrAccountDisabled    = &Error{Code: CodeAccountDisabled, Status: http.StatusForbidden, Message: "该账号已被管理员停用"}
 
 	errInternal = &Error{Code: CodeInternal, Status: http.StatusInternalServerError, Message: "服务器内部错误"}
 )

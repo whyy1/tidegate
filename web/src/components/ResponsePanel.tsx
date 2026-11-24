@@ -328,7 +328,7 @@ export function ResponsePanel({
       )}
 
       {/* Scrollable Inspector Content */}
-      <div className="relative z-10 flex-1 min-h-0 overflow-y-auto tg-scroller p-3 text-xs">
+      <div className="relative z-10 flex-1 min-h-0 overflow-y-auto tg-scroller p-3 text-xs flex flex-col">
         {loadingDebug ? (
           <div className="py-12 text-center">
             <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-sky-50 border border-sky-200 text-sky-800 font-medium">
@@ -441,8 +441,8 @@ export function ResponsePanel({
             )}
 
             {subTab === 'body' && (
-              <div className="space-y-2">
-                <div className="flex flex-wrap items-center justify-between gap-2">
+              <div className="flex-1 min-h-0 flex flex-col gap-2">
+                <div className="flex flex-wrap items-center justify-between gap-2 shrink-0">
                   <div className="flex items-center gap-2 text-fg-subtle min-w-0">
                     <span className="font-mono text-[11px] truncate">{step.content_type || 'unknown'}</span>
                     {step.body_truncated && (
@@ -507,7 +507,7 @@ export function ResponsePanel({
                     )}
                   </div>
                 ) : rawMode ? (
-                  <pre className="p-3.5 rounded-lg border tg-code-surface tg-scroller-dark font-mono text-xs overflow-auto max-h-[64dvh] whitespace-pre-wrap break-all">
+                  <pre className="flex-1 min-h-[180px] p-3.5 rounded-lg border tg-code-surface tg-scroller-dark font-mono text-xs overflow-auto whitespace-pre-wrap break-all">
                     {step.body || '(空响应体)'}
                   </pre>
                 ) : (

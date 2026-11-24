@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Check, CheckCircle2, ChevronDown, ChevronRight, Copy, Play, SkipForward, Terminal, X, XCircle } from 'lucide-react'
+import { Check, CheckCircle2, ChevronDown, ChevronRight, Copy, Download, ExternalLink, Play, SkipForward, Terminal, X, XCircle } from 'lucide-react'
 import { api, APIError } from '../lib/api'
-import { copyText } from '../lib/download'
+import { copyText, downloadText, fileStamp } from '../lib/download'
 import type { CollectionTestResult, Environment, TreeNode } from '../lib/types'
 import { useNativeDialog } from '../lib/useNativeDialog'
 
@@ -15,6 +15,7 @@ interface Props {
   tempVars: Record<string, string>
   canWrite: boolean
   onClose: () => void
+  onOpenAPI?: (apiId: string) => void
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
 }
 
@@ -36,6 +37,29 @@ function collectFolderChoices(nodes: TreeNode[], prefix = ''): FolderChoice[] {
   return out
 }
 
+function escapeXML(s: string): string {
+  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&apos;')
+}
+
+function toJUnitXML(res: CollectionTestResult): string {
+  const sec = (res.duration_ms / 1000).toFixed(3)
+  const cases = res.items
+    .map((it) => {
+      const name = escapeXML((it.folder_path ? `${it.folder_path} / ` : '') + it.api_name)
+      const time = (it.duration_ms / 1000).toFixed(3)
+      if (it.skipped) {
+        return `    <testcase classname="${escapeXML(res.scope_name)}" name="${name}" time="${time}"><skipped/></testcase>`
+      }
+      if (!it.passed) {
+        const msg = escapeXML(it.error || `HTTP ${it.status || 0}`)
+        return `    <testcase classname="${escapeXML(res.scope_name)}" name="${name}" time="${time}"><failure message="${msg}">${msg}</failure></testcase>`
+      }
+      return `    <testcase classname="${escapeXML(res.scope_name)}" name="${name}" time="${time}"/>`
+    })
+    .join('\n')
+  return `<?xml version="1.0" encoding="UTF-8"?>\n<testsuite name="${escapeXML(res.scope_name)}" tests="${res.total}" failures="${res.failed_count}" skipped="${res.skipped_count}" time="${sec}">\n${cases}\n</testsuite>\n`
+}
+
 export function CollectionRunnerModal({
   open,
   projectId,
@@ -46,6 +70,7 @@ export function CollectionRunnerModal({
   tempVars,
   canWrite,
   onClose,
+  onOpenAPI,
   onToast,
 }: Props) {
   const dialogRef = useNativeDialog(open, onClose)
@@ -118,11 +143,11 @@ export function CollectionRunnerModal({
   return (
     <dialog
       ref={dialogRef}
-      {...({ closedby: 'any' } as Record<string, string>)}
+      {...({ closedby: 'closerequest' } as Record<string, string>)}
       aria-labelledby="tg-collection-runner-title"
       className="tg-dialog w-[min(56rem,calc(100vw-2rem))] max-h-[86dvh]"
     >
-      <header className="px-4 py-3 border-b border-line flex items-center justify-between gap-2 bg-surface-subtle shrink-0">
+      <header className="tg-dialog-header">
         <h2 id="tg-collection-runner-title" className="text-sm font-semibold text-fg">
           批量测试
         </h2>
@@ -130,7 +155,7 @@ export function CollectionRunnerModal({
           type="button"
           onClick={onClose}
           aria-label="关闭批量测试"
-          className="p-1 text-fg-subtle hover:text-fg rounded hover:bg-surface-hover"
+          className="p-1 text-fg-subtle hover:text-fg rounded-lg hover:bg-surface-hover"
         >
           <X className="w-4 h-4" />
         </button>
@@ -311,8 +336,20 @@ export function CollectionRunnerModal({
                           {item.step.actual_request?.method} {item.step.actual_request?.url || '-'}
                         </div>
                         {item.error && (
-                          <div className="px-2.5 py-1.5 rounded bg-rose-50 border border-rose-200 text-rose-800">
-                            错误：{item.error}
+                          <div className="px-2.5 py-1.5 rounded bg-rose-50 border border-rose-200 text-rose-800 flex items-center justify-between gap-2">
+                            <span>错误：{item.error}</span>
+                            {onOpenAPI && item.api_id && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  onClose()
+                                  onOpenAPI(item.api_id)
+                                }}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-surface border border-rose-300 text-rose-800 hover:bg-rose-100 shrink-0 font-medium"
+                              >
+                                <ExternalLink className="w-3 h-3" /> 前往调试
+                              </button>
+                            )}
                           </div>
                         )}
                         {item.step.asserts && item.step.asserts.length > 0 && (
@@ -349,6 +386,25 @@ export function CollectionRunnerModal({
           </div>
         )}
       </div>
+
+      <footer className="tg-dialog-footer justify-between text-xs">
+        <div>
+          {result && (
+            <button
+              type="button"
+              onClick={() =>
+                downloadText(`tidegate-junit-${fileStamp()}.xml`, toJUnitXML(result), 'application/xml')
+              }
+              className="tg-btn-secondary"
+            >
+              <Download className="w-3.5 h-3.5 text-tidal" /> 导出 JUnit XML
+            </button>
+          )}
+        </div>
+        <button type="button" onClick={onClose} className="tg-btn-secondary">
+          关闭
+        </button>
+      </footer>
     </dialog>
   )
 }

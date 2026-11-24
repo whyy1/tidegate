@@ -104,8 +104,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	_, _, rateCap := effectiveMCPLimits(r.Context(), pol)
 	actorKey := fmt.Sprintf("u:%d:%s", u.ID, hostOnly(r.RemoteAddr))
-	if !s.limiter.allow(actorKey, time.Now()) {
+	if tok, hasTok := auth.TokenFromContext(r.Context()); hasTok {
+		actorKey = "tok:" + tok.ID
+	}
+	if !s.limiter.allowLimit(actorKey, rateCap, time.Now()) {
 		w.Header().Set("Retry-After", "10")
 		writeHTTPJSONError(w, http.StatusTooManyRequests, "rate_limited", "MCP 请求过于频繁，请稍后再试")
 		return
@@ -168,13 +172,18 @@ func (s *Server) dispatch(r *http.Request, u *auth.User, pol controller.Security
 			_ = json.Unmarshal(req.Params, &p)
 		}
 		proto := negotiateProtocol(p.ProtocolVersion)
+		caps := ServerCapabilities{
+			Tools: &ToolsCapability{ListChanged: false},
+		}
+		if !pol.MCPDisableResources {
+			caps.Resources = &ResourcesCapability{ListChanged: false}
+		}
+		if !pol.MCPDisablePrompts {
+			caps.Prompts = &PromptsCapability{ListChanged: false}
+		}
 		return InitializeResult{
 			ProtocolVersion: proto,
-			Capabilities: ServerCapabilities{
-				Tools:     &ToolsCapability{ListChanged: false},
-				Resources: &ResourcesCapability{ListChanged: false},
-				Prompts:   &PromptsCapability{ListChanged: false},
-			},
+			Capabilities:    caps,
 			ServerInfo: EntityInfo{
 				Name:    "tidegate",
 				Version: s.version,
@@ -236,6 +245,18 @@ func (s *Server) dispatch(r *http.Request, u *auth.User, pol controller.Security
 				"is_error":    res.IsError,
 				"duration_ms": durMs,
 			}
+			var ids struct {
+				ProjectID string `json:"project_id"`
+				RunID     string `json:"run_id"`
+			}
+			if json.Unmarshal(args, &ids) == nil {
+				if pid := strings.TrimSpace(ids.ProjectID); pid != "" {
+					detail["project_id"] = pid
+				}
+				if rid := strings.TrimSpace(ids.RunID); rid != "" {
+					detail["run_id"] = rid
+				}
+			}
 			if tok, hasTok := auth.TokenFromContext(r.Context()); hasTok {
 				detail["token_prefix"] = tok.Prefix
 			}
@@ -244,6 +265,9 @@ func (s *Server) dispatch(r *http.Request, u *auth.User, pol controller.Security
 		return res, nil
 
 	case "resources/list":
+		if pol.MCPDisableResources {
+			return nil, &rpcError{Code: CodeInvalidRequest, Message: "管理员已在安全策略中禁用 MCP 只读资源"}
+		}
 		items, rpcErr := s.listMCPResources(r.Context(), u)
 		if rpcErr != nil {
 			return nil, rpcErr
@@ -251,23 +275,63 @@ func (s *Server) dispatch(r *http.Request, u *auth.User, pol controller.Security
 		return map[string]any{"resources": items}, nil
 
 	case "resources/templates/list":
+		if pol.MCPDisableResources {
+			return nil, &rpcError{Code: CodeInvalidRequest, Message: "管理员已在安全策略中禁用 MCP 只读资源"}
+		}
 		if err := auth.CheckScope(r.Context(), "read"); err != nil {
 			return nil, &rpcError{Code: CodeInvalidRequest, Message: err.Error()}
 		}
 		return map[string]any{"resourceTemplates": s.listMCPResourceTemplates()}, nil
 
 	case "resources/read":
+		if pol.MCPDisableResources {
+			return nil, &rpcError{Code: CodeInvalidRequest, Message: "管理员已在安全策略中禁用 MCP 只读资源"}
+		}
+		start := time.Now()
 		out, rpcErr := s.readMCPResource(r.Context(), u, req.Params)
+		if s.audit != nil {
+			in, _ := decodeArgs[ReadResourceParams](req.Params)
+			uri := strings.TrimSpace(in.URI)
+			detail := map[string]any{
+				"uri":         uri,
+				"is_error":    rpcErr != nil,
+				"duration_ms": time.Since(start).Milliseconds(),
+			}
+			if tok, hasTok := auth.TokenFromContext(r.Context()); hasTok {
+				detail["token_prefix"] = tok.Prefix
+			}
+			s.audit(r, "mcp.resource.read", "mcp_resource", uri, detail)
+		}
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
 		return out, nil
 
 	case "prompts/list":
+		if pol.MCPDisablePrompts {
+			return nil, &rpcError{Code: CodeInvalidRequest, Message: "管理员已在安全策略中禁用 MCP 提示词模板"}
+		}
 		return map[string]any{"prompts": s.listMCPPrompts()}, nil
 
 	case "prompts/get":
+		if pol.MCPDisablePrompts {
+			return nil, &rpcError{Code: CodeInvalidRequest, Message: "管理员已在安全策略中禁用 MCP 提示词模板"}
+		}
+		start := time.Now()
 		out, rpcErr := s.getMCPPrompt(req.Params)
+		if s.audit != nil {
+			in, _ := decodeArgs[GetPromptParams](req.Params)
+			name := strings.TrimSpace(in.Name)
+			detail := map[string]any{
+				"prompt":      name,
+				"is_error":    rpcErr != nil,
+				"duration_ms": time.Since(start).Milliseconds(),
+			}
+			if tok, hasTok := auth.TokenFromContext(r.Context()); hasTok {
+				detail["token_prefix"] = tok.Prefix
+			}
+			s.audit(r, "mcp.prompt.get", "mcp_prompt", name, detail)
+		}
 		if rpcErr != nil {
 			return nil, rpcErr
 		}
@@ -353,6 +417,81 @@ type ToolCatalogItem struct {
 	Destructive     bool   `json:"destructive"`
 	OpenWorld       bool   `json:"open_world"`
 	GloballyEnabled bool   `json:"globally_enabled"`
+}
+
+// ResourceCatalogItem summarizes an MCP Resource or Resource Template for console inspection.
+type ResourceCatalogItem struct {
+	URI             string `json:"uri"`
+	Name            string `json:"name"`
+	Description     string `json:"description"`
+	Scope           string `json:"scope"`
+	GloballyEnabled bool   `json:"globally_enabled"`
+}
+
+// PromptCatalogItem summarizes a registered MCP Prompt template and its arguments.
+type PromptCatalogItem struct {
+	Name            string           `json:"name"`
+	Description     string           `json:"description"`
+	Arguments       []PromptArgument `json:"arguments,omitempty"`
+	GloballyEnabled bool             `json:"globally_enabled"`
+}
+
+// ResourcesCatalog returns all static and templated tidegate:// MCP resources.
+func (s *Server) ResourcesCatalog(pol controller.SecurityPolicy) []ResourceCatalogItem {
+	enabled := !pol.MCPDisabled && !pol.MCPDisableResources
+	out := []ResourceCatalogItem{
+		{
+			URI:             "tidegate://projects",
+			Name:            "Tidegate 项目列表（已脱敏）",
+			Description:     "当前账号/令牌有权访问的全部项目元数据及脱敏环境变量列表。",
+			Scope:           "read",
+			GloballyEnabled: enabled,
+		},
+	}
+	for _, tpl := range s.listMCPResourceTemplates() {
+		out = append(out, ResourceCatalogItem{
+			URI:             tpl.URITemplate,
+			Name:            tpl.Name,
+			Description:     tpl.Description,
+			Scope:           "read",
+			GloballyEnabled: enabled,
+		})
+	}
+	return out
+}
+
+// PromptsCatalog returns all built-in diagnostic and load-design prompt templates.
+func (s *Server) PromptsCatalog(pol controller.SecurityPolicy) []PromptCatalogItem {
+	enabled := !pol.MCPDisabled && !pol.MCPDisablePrompts
+	raw := s.listMCPPrompts()
+	out := make([]PromptCatalogItem, 0, len(raw))
+	for _, p := range raw {
+		out = append(out, PromptCatalogItem{
+			Name:            p.Name,
+			Description:     p.Description,
+			Arguments:       p.Arguments,
+			GloballyEnabled: enabled,
+		})
+	}
+	return out
+}
+
+func effectiveMCPLimits(ctx context.Context, pol controller.SecurityPolicy) (maxVUs, maxDurSec, ratePerMin int) {
+	maxVUs = pol.EffectiveMCPMaxVUs()
+	maxDurSec = int(pol.EffectiveMCPMaxDuration().Seconds())
+	ratePerMin = pol.EffectiveMCPRatePerMin()
+	if tok, ok := auth.TokenFromContext(ctx); ok && tok != nil {
+		if tok.MCPMaxVUs > 0 && tok.MCPMaxVUs < maxVUs {
+			maxVUs = tok.MCPMaxVUs
+		}
+		if tok.MCPMaxDurationSec > 0 && tok.MCPMaxDurationSec < maxDurSec {
+			maxDurSec = tok.MCPMaxDurationSec
+		}
+		if tok.RatePerMin > 0 && tok.RatePerMin < ratePerMin {
+			ratePerMin = tok.RatePerMin
+		}
+	}
+	return maxVUs, maxDurSec, ratePerMin
 }
 
 func toolCategory(td toolDef) string {
@@ -650,7 +789,10 @@ func newRateWindow(limit int, window time.Duration) *rateWindow {
 	}
 }
 
-func (rw *rateWindow) allow(key string, now time.Time) bool {
+func (rw *rateWindow) allowLimit(key string, limit int, now time.Time) bool {
+	if limit <= 0 {
+		limit = rw.limit
+	}
 	rw.mu.Lock()
 	defer rw.mu.Unlock()
 	if len(rw.entries) > 2048 {
@@ -665,7 +807,7 @@ func (rw *rateWindow) allow(key string, now time.Time) bool {
 		rw.entries[key] = windowCounter{resetAt: now.Add(rw.window), count: 1}
 		return true
 	}
-	if cur.count >= rw.limit {
+	if cur.count >= limit {
 		return false
 	}
 	cur.count++

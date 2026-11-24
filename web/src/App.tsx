@@ -275,6 +275,8 @@ export function App() {
   }, [])
 
   const activeProject = projects.find((p) => p.id === activeProjectId) || null
+  const canWriteProject = activeProject?.effective_role ? activeProject.effective_role !== 'viewer' : user?.role !== 'viewer'
+  const isProjectTab = activeTab === 'workbench' || activeTab === 'scenarios' || activeTab === 'run' || activeTab === 'history'
 
   if (booting || !setupStatus) {
     return (
@@ -340,126 +342,164 @@ export function App() {
           onToast={pushToast}
         />
 
-        {!activeProject ? (
-          <div className="flex-1 flex flex-col items-center justify-center gap-3 text-sm text-fg-subtle">
-            <span>暂无项目</span>
+        {user.totp_policy_required && !user.totp_enabled && (
+          <div className="shrink-0 flex items-center justify-between gap-3 px-3.5 py-2 rounded-[14px] border border-amber-300/80 bg-amber-50/85 text-amber-900 text-xs">
+            <span className="font-medium">
+              管理员已启用「全员强制开启 2FA」安全策略，请尽快为当前账号绑定双因素验证。
+            </span>
             <button
               type="button"
-              onClick={() => setProjectModalOpen(true)}
-              className="inline-flex items-center gap-1.5 rounded-md bg-primary px-3.5 py-1.5 text-xs font-semibold text-white hover:bg-primary-hover"
+              onClick={() => openAccountWithTab('totp')}
+              className="shrink-0 px-2.5 py-1 rounded-lg bg-amber-600 hover:bg-amber-700 text-white font-semibold"
             >
-              新建或导入项目
+              立即绑定 2FA →
             </button>
           </div>
-        ) : (
-          <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
-            <div className={activeTab === 'workbench' ? 'flex-1 flex min-h-0 overflow-hidden' : 'hidden'}>
-              <WorkbenchView
-                projectId={activeProject.id}
-                environments={environments}
-                projectVariables={activeProject.variables || []}
-                activeEnvId={activeEnvId}
-                tempVars={tempVars}
-                canWrite={user.role !== 'viewer'}
-                onTempVarsChange={setTempVars}
-                onWorkspaceMutated={() => loadEnvironments(activeProject.id)}
-                onQuickLoadTest={(apiDraft) => {
-                  setPreloadedScenarioId('')
-                  setInspectRunId('')
-                  setQuickLoadAPI(apiDraft)
-                  setActiveTab('run')
-                  pushToast('info', `已将「${apiDraft.name || '未命名接口'}」带入压测视图`)
-                }}
-                incomingReplay={incomingReplay}
-                openRequest={openAPIRequest}
-                isActive={activeTab === 'workbench'}
-                onToast={pushToast}
-              />
-            </div>
-
-            <Suspense
-              fallback={
-                <div className="flex-1 flex items-center justify-center text-xs text-fg-subtle">加载中…</div>
-              }
-            >
-              {activeTab === 'scenarios' && (
-                <ScenariosView
-                  projectId={activeProject.id}
-                  environments={environments}
-                  activeEnvId={activeEnvId}
-                  tempVars={tempVars}
-                  canWrite={user.role !== 'viewer'}
-                  onLaunchScenario={(scenarioId) => {
-                    setQuickLoadAPI(null)
-                    setInspectRunId('')
-                    setPreloadedScenarioId(scenarioId)
-                    setActiveTab('run')
-                  }}
-                  onEditAPI={(apiId) => {
-                    setActiveTab('workbench')
-                    setOpenAPIRequest({ seq: replaySeq++, apiId })
-                  }}
-                  onToast={pushToast}
-                />
-              )}
-
-              {activeTab === 'run' && (
-                <LiveRunView
-                  projectId={activeProject.id}
-                  environments={environments}
-                  activeEnvId={activeEnvId}
-                  tempVars={tempVars}
-                  agents={liveAgents}
-                  canWrite={user.role !== 'viewer'}
-                  preloadedAPI={quickLoadAPI}
-                  preloadedScenarioId={preloadedScenarioId}
-                  inspectRunId={inspectRunId}
-                  onClearPreloads={() => {
-                    setQuickLoadAPI(null)
-                    setPreloadedScenarioId('')
-                    setInspectRunId('')
-                  }}
-                  onReplaySample={(sample) => {
-                    setIncomingReplay({ seq: replaySeq++, api: sampleToDraftAPI(sample) })
-                    setActiveTab('workbench')
-                    pushToast('info', '已将异常采样带入工作台，可直接调整并重发调试')
-                  }}
-                  onToast={pushToast}
-                />
-              )}
-
-              {activeTab === 'history' && (
-                <HistoryCompareView
-                  projectId={activeProject.id}
-                  canWrite={user.role !== 'viewer'}
-                  onInspectRun={(runId) => {
-                    setQuickLoadAPI(null)
-                    setPreloadedScenarioId('')
-                    setInspectRunId(runId)
-                    setActiveTab('run')
-                  }}
-                  onToast={pushToast}
-                />
-              )}
-
-              {activeTab === 'agents' && (
-                <AgentsView
-                  agents={liveAgents}
-                  isAdmin={user.role === 'admin'}
-                  onAgentsRefresh={async () => {
-                    const list = await api.listAgents()
-                    setAgents(list)
-                  }}
-                  onToast={pushToast}
-                />
-              )}
-
-              {activeTab === 'governance' && (
-                <GovernanceView currentUser={user} onToast={pushToast} />
-              )}
-            </Suspense>
-          </div>
         )}
+
+        <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
+          {!activeProject && isProjectTab ? (
+            <div className="flex-1 tg-glass-card flex flex-col items-center justify-center gap-3 text-sm text-fg-subtle">
+              <span>暂无可用项目</span>
+              <div className="flex items-center gap-2">
+                {user.role !== 'viewer' && (
+                  <button
+                    type="button"
+                    onClick={() => setProjectModalOpen(true)}
+                    className="tg-btn-primary"
+                  >
+                    新建或导入项目
+                  </button>
+                )}
+                {user.role === 'admin' && (
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('governance')}
+                    className="tg-btn-secondary"
+                  >
+                    前往系统治理
+                  </button>
+                )}
+              </div>
+            </div>
+          ) : (
+            <>
+              {activeProject && (
+                <div className={activeTab === 'workbench' ? 'flex-1 flex min-h-0 overflow-hidden' : 'hidden'}>
+                  <WorkbenchView
+                    projectId={activeProject.id}
+                    environments={environments}
+                    projectVariables={activeProject.variables || []}
+                    activeEnvId={activeEnvId}
+                    tempVars={tempVars}
+                    canWrite={canWriteProject}
+                    onTempVarsChange={setTempVars}
+                    onWorkspaceMutated={() => loadEnvironments(activeProject.id)}
+                    onQuickLoadTest={(apiDraft) => {
+                      setPreloadedScenarioId('')
+                      setInspectRunId('')
+                      setQuickLoadAPI(apiDraft)
+                      setActiveTab('run')
+                      pushToast('info', `已将「${apiDraft.name || '未命名接口'}」带入压测视图`)
+                    }}
+                    incomingReplay={incomingReplay}
+                    openRequest={openAPIRequest}
+                    isActive={activeTab === 'workbench'}
+                    onToast={pushToast}
+                  />
+                </div>
+              )}
+
+              <Suspense
+                fallback={
+                  <div className="flex-1 flex items-center justify-center text-xs text-fg-subtle">加载中…</div>
+                }
+              >
+                {activeProject && (
+                  <div className={activeTab === 'scenarios' ? 'flex-1 flex min-h-0 overflow-hidden' : 'hidden'}>
+                    <ScenariosView
+                      projectId={activeProject.id}
+                      environments={environments}
+                      activeEnvId={activeEnvId}
+                      tempVars={tempVars}
+                      canWrite={canWriteProject}
+                      onLaunchScenario={(scenarioId) => {
+                        setQuickLoadAPI(null)
+                        setInspectRunId('')
+                        setPreloadedScenarioId(scenarioId)
+                        setActiveTab('run')
+                      }}
+                      onEditAPI={(apiId) => {
+                        setActiveTab('workbench')
+                        setOpenAPIRequest({ seq: replaySeq++, apiId })
+                      }}
+                      onToast={pushToast}
+                    />
+                  </div>
+                )}
+
+                {activeProject && activeTab === 'run' && (
+                  <LiveRunView
+                    projectId={activeProject.id}
+                    environments={environments}
+                    activeEnvId={activeEnvId}
+                    tempVars={tempVars}
+                    agents={liveAgents}
+                    canWrite={canWriteProject}
+                    preloadedAPI={quickLoadAPI}
+                    preloadedScenarioId={preloadedScenarioId}
+                    inspectRunId={inspectRunId}
+                    onClearPreloads={() => {
+                      setQuickLoadAPI(null)
+                      setPreloadedScenarioId('')
+                      setInspectRunId('')
+                    }}
+                    onReplaySample={(sample) => {
+                      setIncomingReplay({ seq: replaySeq++, api: sampleToDraftAPI(sample) })
+                      setActiveTab('workbench')
+                      pushToast('info', '已将异常采样带入工作台，可直接调整并重发调试')
+                    }}
+                    onToast={pushToast}
+                  />
+                )}
+
+                {activeProject && activeTab === 'history' && (
+                  <HistoryCompareView
+                    projectId={activeProject.id}
+                    canWrite={canWriteProject}
+                    onInspectRun={(runId) => {
+                      setQuickLoadAPI(null)
+                      setPreloadedScenarioId('')
+                      setInspectRunId(runId)
+                      setActiveTab('run')
+                    }}
+                    onToast={pushToast}
+                  />
+                )}
+
+                {activeTab === 'agents' && (
+                  <AgentsView
+                    agents={liveAgents}
+                    isAdmin={user.role === 'admin'}
+                    onAgentsRefresh={async () => {
+                      const list = await api.listAgents()
+                      setAgents(list)
+                    }}
+                    onToast={pushToast}
+                  />
+                )}
+
+                {activeTab === 'governance' && (
+                  <GovernanceView
+                    currentUser={user}
+                    projects={projects}
+                    onToast={pushToast}
+                  />
+                )}
+              </Suspense>
+            </>
+          )}
+        </div>
       </div>
 
       <CommandPalette
@@ -479,6 +519,8 @@ export function App() {
           setOpenAPIRequest({ seq: replaySeq++, scratch: true })
         }}
         onOpenMCPConfig={() => openAccountWithTab('mcp')}
+        onOpenProjects={() => setProjectModalOpen(true)}
+        onOpenEnvs={() => setEnvModalOpen(true)}
       />
 
       <ProjectModal
@@ -489,6 +531,7 @@ export function App() {
         onClose={() => setProjectModalOpen(false)}
         onSelectProject={selectProject}
         onProjectsChanged={loadProjects}
+        onOpenGovernanceUsers={() => setActiveTab('governance')}
         onToast={pushToast}
       />
 
@@ -512,6 +555,7 @@ export function App() {
         projects={projects}
         onUserUpdated={(u) => setUser(u)}
         onClose={() => setAccountModalOpen(false)}
+        onOpenGovernance={() => setActiveTab('governance')}
         onToast={pushToast}
         onLoggedOut={() => {
           setUser(null)

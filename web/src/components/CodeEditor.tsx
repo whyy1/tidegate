@@ -12,6 +12,7 @@ interface Props {
   snippets?: CodeSnippet[]
   placeholder?: string
   rows?: number
+  fill?: boolean
   disabled?: boolean
   ariaLabel?: string
 }
@@ -22,10 +23,12 @@ export function CodeEditor({
   snippets = [],
   placeholder = '',
   rows = 7,
+  fill = false,
   disabled = false,
   ariaLabel,
 }: Props) {
   const areaRef = useRef<HTMLTextAreaElement>(null)
+  const gutterRef = useRef<HTMLDivElement>(null)
 
   const lineCount = useMemo(() => {
     if (!value) return 1
@@ -70,9 +73,9 @@ export function CodeEditor({
   }
 
   return (
-    <div className="space-y-1.5">
+    <div className={fill ? 'flex-1 min-h-[200px] flex flex-col gap-1.5' : 'space-y-1.5'}>
       {snippets.length > 0 && (
-        <div className="flex flex-wrap items-center gap-1.5">
+        <div className="flex flex-wrap items-center gap-1.5 shrink-0">
           <span className="text-[11px] text-fg-subtle">片段</span>
           {snippets.map((s) => (
             <button
@@ -89,10 +92,15 @@ export function CodeEditor({
         </div>
       )}
 
-      <div className="flex rounded-lg border border-line-strong bg-surface overflow-hidden focus-within:border-sky-500 focus-within:ring-1 focus-within:ring-sky-500/30">
+      <div
+        className={`flex rounded-lg border border-line-strong bg-surface overflow-hidden focus-within:border-sky-500 focus-within:ring-1 focus-within:ring-sky-500/30 ${
+          fill ? 'flex-1 min-h-0' : ''
+        }`}
+      >
         <div
+          ref={gutterRef}
           aria-hidden="true"
-          className="select-none bg-surface-subtle border-r border-line px-2 py-2 text-right font-mono text-[11px] leading-[1.5rem] text-fg-subtle tg-tabular min-w-[2.25rem]"
+          className="select-none bg-surface-subtle border-r border-line px-2 py-2 text-right font-mono text-[11px] leading-[1.5rem] text-fg-subtle tg-tabular min-w-[2.25rem] overflow-hidden shrink-0"
         >
           {lineNumbers.map((n) => (
             <div key={n}>{n}</div>
@@ -100,7 +108,7 @@ export function CodeEditor({
         </div>
         <textarea
           ref={areaRef}
-          rows={rows}
+          rows={fill ? undefined : rows}
           value={value}
           disabled={disabled}
           aria-label={ariaLabel}
@@ -108,9 +116,14 @@ export function CodeEditor({
           autoCapitalize="off"
           autoCorrect="off"
           onKeyDown={handleKeyDown}
+          onScroll={(e) => {
+            if (gutterRef.current) gutterRef.current.scrollTop = e.currentTarget.scrollTop
+          }}
           onChange={(e) => onChange(e.target.value)}
           placeholder={placeholder}
-          className="flex-1 min-w-0 px-2.5 py-2 font-mono text-xs leading-[1.5rem] bg-surface text-fg focus:outline-none resize-y"
+          className={`flex-1 min-w-0 px-2.5 py-2 font-mono text-xs leading-[1.5rem] bg-surface text-fg focus:outline-none ${
+            fill ? 'h-full resize-none overflow-auto tg-scroller' : 'resize-y'
+          }`}
         />
       </div>
     </div>

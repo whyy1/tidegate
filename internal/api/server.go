@@ -228,6 +228,7 @@ func (s *Server) buildHandler() http.Handler {
 	apiMux.Handle("POST /api/v1/auth/totp/confirm", authed(s.handleConfirmTOTP))
 	apiMux.Handle("POST /api/v1/auth/totp/disable", authed(s.handleDisableTOTP))
 	apiMux.Handle("GET /api/v1/auth/sessions", authed(s.handleListSessions))
+	apiMux.Handle("POST /api/v1/auth/sessions/revoke-others", authed(s.handleRevokeOtherSessions))
 	apiMux.Handle("DELETE /api/v1/auth/sessions/{id}", authed(s.handleRevokeSession))
 	apiMux.Handle("GET /api/v1/auth/tokens", authed(s.handleListAPITokens))
 	apiMux.Handle("POST /api/v1/auth/tokens", authed(s.handleCreateAPIToken))
@@ -239,7 +240,12 @@ func (s *Server) buildHandler() http.Handler {
 	apiMux.Handle("DELETE /api/v1/users/{id}", adminOnly(s.handleDeleteUser))
 	apiMux.Handle("POST /api/v1/users/{id}/password", adminOnly(s.handleAdminResetUserPassword))
 	apiMux.Handle("DELETE /api/v1/users/{id}/totp", adminOnly(s.handleAdminResetUserTOTP))
+	apiMux.Handle("DELETE /api/v1/users/{id}/sessions", adminOnly(s.handleAdminRevokeUserSessions))
+	apiMux.Handle("GET /api/v1/users/{id}/projects", adminOnly(s.handleGetUserProjects))
+	apiMux.Handle("PUT /api/v1/users/{id}/projects", adminOnly(s.handlePutUserProjects))
+	apiMux.Handle("GET /api/v1/admin/tokens", adminOnly(s.handleAdminListAPITokens))
 	apiMux.Handle("GET /api/v1/mcp/catalog", scoped("read", s.handleMCPCatalog))
+	apiMux.Handle("GET /api/v1/mcp/activity", scoped("read", s.handleMCPActivity))
 	apiMux.Handle("GET /api/v1/settings/security", scoped("read", s.handleGetSecurityPolicy))
 	apiMux.Handle("PUT /api/v1/settings/security", adminOnly(s.handlePutSecurityPolicy))
 	apiMux.Handle("GET /api/v1/settings/metrics-sink", scoped("read", s.handleGetMetricsSink))
@@ -357,6 +363,7 @@ func (s *Server) buildHandler() http.Handler {
 
 	rootMux := http.NewServeMux()
 	rootMux.Handle("/api/v1/mcp", mcpHandler)
+	rootMux.Handle("/mcp", mcpHandler)
 	rootMux.Handle("/api/", protectedAPI)
 	rootMux.HandleFunc("/", s.handleUI)
 

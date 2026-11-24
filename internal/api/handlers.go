@@ -7,6 +7,8 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -20,12 +22,15 @@ import (
 )
 
 type userDTO struct {
-	ID                int64     `json:"id"`
-	Username          string    `json:"username"`
-	Role              auth.Role `json:"role"`
-	TOTPEnabled       bool      `json:"totp_enabled"`
-	CreatedAt         time.Time `json:"created_at"`
-	PasswordChangedAt time.Time `json:"password_changed_at"`
+	ID                int64      `json:"id"`
+	Username          string     `json:"username"`
+	Role              auth.Role  `json:"role"`
+	TOTPEnabled       bool       `json:"totp_enabled"`
+	Disabled          bool       `json:"disabled,omitempty"`
+	ActiveSessions    int        `json:"active_sessions,omitempty"`
+	LastSeenAt        *time.Time `json:"last_seen_at,omitempty"`
+	CreatedAt         time.Time  `json:"created_at"`
+	PasswordChangedAt time.Time  `json:"password_changed_at"`
 }
 
 func toUserDTO(u *auth.User) userDTO {
@@ -34,9 +39,22 @@ func toUserDTO(u *auth.User) userDTO {
 		Username:          u.Username,
 		Role:              u.Role,
 		TOTPEnabled:       u.TOTPEnabled,
+		Disabled:          u.Disabled,
+		ActiveSessions:    u.ActiveSessions,
+		LastSeenAt:        u.LastSeenAt,
 		CreatedAt:         u.CreatedAt,
 		PasswordChangedAt: u.PasswordChangedAt,
 	}
+}
+
+func runtimeHint() string {
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		return "docker"
+	}
+	if strings.TrimSpace(os.Getenv("TIDEGATE_DATA")) == "/data" {
+		return "docker"
+	}
+	return runtime.GOOS
 }
 
 func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
@@ -49,6 +67,7 @@ func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
 		"setup_required": pending,
 		"version":        s.opts.Version,
 		"tls":            s.guard.IsSecureRequest(r),
+		"runtime":        runtimeHint(),
 	})
 }
 
@@ -125,7 +144,16 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 		writeError(w, auth.ErrUnauthenticated)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"user": toUserDTO(u)})
+	totpRequired := false
+	if !u.TOTPEnabled {
+		if pol, perr := s.ctrl.GetSecurityPolicy(r.Context()); perr == nil {
+			totpRequired = pol.RequireTOTP == "all" || (pol.RequireTOTP == "admin" && u.Role.IsAdmin())
+		}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"user":                 toUserDTO(u),
+		"totp_policy_required": totpRequired,
+	})
 }
 
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
@@ -216,6 +244,26 @@ func (s *Server) handleRevokeSession(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+func (s *Server) handleRevokeOtherSessions(w http.ResponseWriter, r *http.Request) {
+	u, ok := auth.UserFromContext(r.Context())
+	if !ok {
+		writeError(w, auth.ErrUnauthenticated)
+		return
+	}
+	curSess, _ := auth.SessionFromContext(r.Context())
+	keepID := ""
+	if curSess != nil {
+		keepID = curSess.ID
+	}
+	revoked, err := s.auth.RevokeOtherSessions(r.Context(), u.ID, keepID)
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	s.audit(r, "session.revoke_others", "user", strconv.FormatInt(u.ID, 10), map[string]any{"revoked": revoked})
+	writeJSON(w, http.StatusOK, map[string]int64{"revoked": revoked})
+}
+
 // deleteVersion extracts an optional version from either ?version= or a JSON body.
 func deleteVersion(w http.ResponseWriter, r *http.Request) string {
 	if v := r.URL.Query().Get("version"); v != "" {
@@ -254,6 +302,11 @@ func (s *Server) authorizeProject(w http.ResponseWriter, r *http.Request, pid st
 	return r.WithContext(auth.WithEffectiveRole(r.Context(), effRole)), true
 }
 
+type projectDTO struct {
+	*store.Project
+	EffectiveRole auth.Role `json:"effective_role,omitempty"`
+}
+
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	list, err := s.store.ListProjects()
 	if err != nil {
@@ -262,16 +315,18 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	u, _ := auth.UserFromContext(r.Context())
 	tok, _ := auth.TokenFromContext(r.Context())
-	if u != nil {
-		filtered := make([]*store.Project, 0, len(list))
-		for _, pr := range list {
-			if _, allowed, err := s.auth.ResolveProjectRole(r.Context(), u, tok, pr.ID); err == nil && allowed {
-				filtered = append(filtered, pr)
-			}
+	out := make([]projectDTO, 0, len(list))
+	for _, pr := range list {
+		if u == nil {
+			out = append(out, projectDTO{Project: pr})
+			continue
 		}
-		list = filtered
+		effRole, allowed, err := s.auth.ResolveProjectRole(r.Context(), u, tok, pr.ID)
+		if err == nil && allowed {
+			out = append(out, projectDTO{Project: pr, EffectiveRole: effRole})
+		}
 	}
-	writeJSON(w, http.StatusOK, list)
+	writeJSON(w, http.StatusOK, out)
 }
 
 func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
@@ -299,7 +354,11 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, pr)
+	var effRole auth.Role
+	if u, ok := auth.UserFromContext(r.Context()); ok && u != nil {
+		effRole = u.Role
+	}
+	writeJSON(w, http.StatusOK, projectDTO{Project: pr, EffectiveRole: effRole})
 }
 
 func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
@@ -1497,8 +1556,14 @@ func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 	res := map[string]any{
 		"version":                s.opts.Version,
 		"tls":                    s.guard.IsSecureRequest(r),
+		"runtime":                runtimeHint(),
 		"cluster_addr":           clusterAddr,
 		"cluster_ca_fingerprint": s.ctrl.ClusterCAFingerprint(),
+	}
+	if u, ok := auth.UserFromContext(r.Context()); ok && u.Role.IsAdmin() {
+		if exe, eerr := os.Executable(); eerr == nil && exe != "" {
+			res["exe_path"] = exe
+		}
 	}
 	if strings.TrimSpace(s.opts.PublicURL) != "" {
 		res["public_url"] = strings.TrimSpace(s.opts.PublicURL)

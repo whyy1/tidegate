@@ -28,6 +28,7 @@ import type {
   PreviewResult,
   Project,
   ProjectACL,
+  ProjectAccessRole,
   Run,
   RunComparisonResponse,
   RunDetail,
@@ -45,6 +46,7 @@ import type {
   TOTPEnrollment,
   Tree,
   User,
+  UserProjectsResponse,
   UserRole,
 } from './types'
 
@@ -168,13 +170,14 @@ export const api = {
     request<{ totp_enabled: boolean }>('/api/v1/auth/totp/disable', { method: 'POST', jsonBody: payload }),
   listSessions: () => request<{ sessions: SessionItem[] }>('/api/v1/auth/sessions'),
   revokeSession: (id: string) => request<void>(`/api/v1/auth/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  revokeOtherSessions: () => request<{ revoked: number }>('/api/v1/auth/sessions/revoke-others', { method: 'POST' }),
 
   // Projects & Project Import/Export
   listProjects: async () => (await request<Project[] | null>('/api/v1/projects')) || [],
   getProjectACL: (pid: string) => request<ProjectACL>(`/api/v1/projects/${encodeURIComponent(pid)}/acl`),
   putProjectACL: (
     pid: string,
-    payload: { restricted: boolean; members: Array<{ user_id: number; role: 'member' | 'viewer' }> }
+    payload: { restricted: boolean; members: Array<{ user_id: number; role: 'member' | 'viewer' | 'none' }> }
   ) =>
     request<ProjectACL>(`/api/v1/projects/${encodeURIComponent(pid)}/acl`, {
       method: 'PUT',
@@ -407,7 +410,7 @@ export const api = {
       `/api/v1/projects/${encodeURIComponent(pid)}/scenarios/${encodeURIComponent(id)}?version=${encodeURIComponent(version)}`,
       { method: 'DELETE' }
     ),
-  exportScenarioURL: (pid: string, id: string, format: 'k6' = 'k6', envId = '') => {
+  exportScenarioURL: (pid: string, id: string, format: 'yaml' | 'json' | 'k6' = 'yaml', envId = '') => {
     const qs = new URLSearchParams({ format })
     if (envId) qs.set('env_id', envId)
     return `/api/v1/projects/${encodeURIComponent(pid)}/scenarios/${encodeURIComponent(id)}/export?${qs.toString()}`
@@ -468,20 +471,89 @@ export const api = {
     request<void>(`/api/v1/agents/join-tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   systemInfo: () => request<SystemInfo>('/api/v1/system/info'),
 
-  // Personal API Tokens
+  // Personal API Tokens & MCP Probe
   listAPITokens: async () => (await request<APIToken[] | null>('/api/v1/auth/tokens')) || [],
+  adminListTokens: async () => (await request<APIToken[] | null>('/api/v1/admin/tokens')) || [],
   createAPIToken: (body: CreateAPIToken) =>
     request<CreateAPITokenResult>('/api/v1/auth/tokens', { method: 'POST', jsonBody: body }),
   getMCPCatalog: () => request<MCPCatalog>('/api/v1/mcp/catalog'),
+  mcpActivity: async (limit = 20) =>
+    (await request<AuditEntry[] | null>(`/api/v1/mcp/activity?limit=${limit}`)) || [],
+  mcpProbe: async (tokenPlaintext?: string) => {
+    const headers: Record<string, string> = {
+      'Content-Type': 'application/json',
+      Accept: 'application/json, text/event-stream',
+      'X-Tidegate-Request': '1',
+    }
+    if (tokenPlaintext && tokenPlaintext.trim()) {
+      headers.Authorization = `Bearer ${tokenPlaintext.trim()}`
+    }
+    const t0 = performance.now()
+    const initResp = await fetch('/api/v1/mcp', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers,
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-03-26',
+          capabilities: {},
+          clientInfo: { name: 'tidegate-web-probe', version: '1.0' },
+        },
+      }),
+    })
+    if (!initResp.ok) {
+      throw new APIError(initResp.status, 'mcp_probe_failed', `MCP 握手失败 (HTTP ${initResp.status})`)
+    }
+    const sessionId = initResp.headers.get('Mcp-Session-Id') || ''
+    const initData = (await initResp.json()) as {
+      result?: { serverInfo?: { name?: string; version?: string }; protocolVersion?: string }
+      error?: { message?: string }
+    }
+    if (initData.error) {
+      throw new APIError(400, 'mcp_rpc_error', initData.error.message || 'MCP initialize 报错')
+    }
+    const listHeaders: Record<string, string> = { ...headers }
+    if (sessionId) listHeaders['Mcp-Session-Id'] = sessionId
+    const listResp = await fetch('/api/v1/mcp', {
+      method: 'POST',
+      credentials: 'same-origin',
+      headers: listHeaders,
+      body: JSON.stringify({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} }),
+    })
+    const listData = (await listResp.json()) as {
+      result?: { tools?: Array<{ name: string }> }
+      error?: { message?: string }
+    }
+    const latencyMs = Math.round(performance.now() - t0)
+    return {
+      ok: listResp.ok && !listData.error,
+      latencyMs,
+      protocolVersion: initData.result?.protocolVersion || '2025-03-26',
+      serverName: initData.result?.serverInfo?.name || 'Tidegate MCP',
+      toolCount: listData.result?.tools?.length ?? 0,
+      tools: (listData.result?.tools || []).map((t) => t.name),
+    }
+  },
   revokeAPIToken: (id: string) =>
     request<void>(`/api/v1/auth/tokens/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
-  // Governance: Users, Security Policy, Metrics Sink & Audit Logs
+  // Governance: Users, Project Permissions, Security Policy, Metrics Sink & Audit Logs
   listUsers: async () => (await request<User[] | null>('/api/v1/users')) || [],
   createUser: (body: { username: string; password: string; role: UserRole }) =>
     request<{ user: User }>('/api/v1/users', { method: 'POST', jsonBody: body }),
-  patchUser: (id: number, body: { role: UserRole }) =>
+  patchUser: (id: number, body: { role?: UserRole; disabled?: boolean }) =>
     request<{ user: User }>(`/api/v1/users/${id}`, { method: 'PATCH', jsonBody: body }),
+  adminRevokeUserSessions: (id: number) =>
+    request<{ revoked: number }>(`/api/v1/users/${id}/sessions`, { method: 'DELETE' }),
+  getUserProjects: (id: number) => request<UserProjectsResponse>(`/api/v1/users/${id}/projects`),
+  putUserProjects: (id: number, overrides: Record<string, ProjectAccessRole>) =>
+    request<UserProjectsResponse>(`/api/v1/users/${id}/projects`, {
+      method: 'PUT',
+      jsonBody: { overrides },
+    }),
   deleteUser: (id: number) => request<void>(`/api/v1/users/${id}`, { method: 'DELETE' }),
   adminResetUserTOTP: (id: number) => request<void>(`/api/v1/users/${id}/totp`, { method: 'DELETE' }),
   adminResetUserPassword: (id: number, password: string) =>
@@ -499,10 +571,14 @@ export const api = {
     }),
   prometheusMetricsUrl: () => '/api/v1/metrics/prometheus',
   fetchPrometheusMetrics: () => request<string>('/api/v1/metrics/prometheus'),
-  listAuditLogs: async (params: { action?: string; username?: string; limit?: number; before_id?: number } = {}) => {
+  listAuditLogs: async (
+    params: { action?: string; action_prefix?: string; username?: string; user_id?: number; limit?: number; before_id?: number } = {}
+  ) => {
     const qs = new URLSearchParams()
     if (params.action) qs.set('action', params.action)
+    if (params.action_prefix) qs.set('action_prefix', params.action_prefix)
     if (params.username) qs.set('username', params.username)
+    if (params.user_id) qs.set('user_id', String(params.user_id))
     if (params.limit) qs.set('limit', String(params.limit))
     if (params.before_id) qs.set('before_id', String(params.before_id))
     const q = qs.toString()

@@ -25,6 +25,7 @@ import {
   Sparkles,
   Terminal,
   Trash2,
+  Upload,
   X,
   Zap,
 } from 'lucide-react'
@@ -242,6 +243,7 @@ export function WorkbenchView({
   const [tree, setTree] = useState<Tree>({ children: [] })
   const [files, setFiles] = useState<DataFile[]>([])
   const [history, setHistory] = useState<DebugRecord[]>([])
+  const [uploadingFile, setUploadingFile] = useState(false)
   const [runnerModal, setRunnerModal] = useState<{ open: boolean; folderId: string }>({
     open: false,
     folderId: '',
@@ -318,17 +320,17 @@ export function WorkbenchView({
   const [treeCollapsed, setTreeCollapsed] = useState(false)
   const [splitMode, setSplitMode] = useState<'horizontal' | 'vertical'>(() => {
     try {
-      return window.localStorage.getItem('tg.workbench.splitMode') === 'vertical' ? 'vertical' : 'horizontal'
+      return window.localStorage.getItem('tg.workbench.splitMode.v2') === 'horizontal' ? 'horizontal' : 'vertical'
     } catch {
-      return 'horizontal'
+      return 'vertical'
     }
   })
   const [splitPct, setSplitPct] = useState<number>(() => {
     try {
-      const n = Number(window.localStorage.getItem('tg.workbench.splitPct'))
-      return Number.isFinite(n) && n >= 28 && n <= 74 ? n : 52
+      const n = Number(window.localStorage.getItem('tg.workbench.splitPct.v2'))
+      return Number.isFinite(n) && n >= 28 && n <= 74 ? n : 50
     } catch {
-      return 52
+      return 50
     }
   })
   const splitBoxRef = useRef<HTMLDivElement | null>(null)
@@ -466,10 +468,26 @@ export function WorkbenchView({
     }
   }, [openRequest])
 
+  const uploadProjectFile = async (file: File): Promise<DataFile | null> => {
+    setUploadingFile(true)
+    try {
+      const existing = files.find((f) => f.name === file.name)
+      const saved = await api.uploadFile(projectId, file, existing?.version || '')
+      setFiles(await api.listFiles(projectId))
+      onToast('success', `已上传并选中 ${saved.name}`)
+      return saved
+    } catch (err) {
+      onToast('error', err instanceof APIError ? err.message : '上传文件失败')
+      return null
+    } finally {
+      setUploadingFile(false)
+    }
+  }
+
   const changeSplitMode = (mode: 'horizontal' | 'vertical') => {
     setSplitMode(mode)
     try {
-      window.localStorage.setItem('tg.workbench.splitMode', mode)
+      window.localStorage.setItem('tg.workbench.splitMode.v2', mode)
     } catch {
       // ignore
     }
@@ -479,7 +497,7 @@ export function WorkbenchView({
     const clamped = Math.max(28, Math.min(74, Math.round(nextPct * 10) / 10))
     setSplitPct(clamped)
     try {
-      window.localStorage.setItem('tg.workbench.splitPct', String(clamped))
+      window.localStorage.setItem('tg.workbench.splitPct.v2', String(clamped))
     } catch {
       // ignore
     }
@@ -1362,7 +1380,53 @@ export function WorkbenchView({
             }}
           >
             {visibleTree.length === 0 ? (
-              <div className="text-center py-8 px-3 text-xs text-fg-subtle">暂无匹配接口</div>
+              tree.children.length === 0 ? (
+                <div className="py-6 px-2.5 space-y-2 text-xs">
+                  <div className="text-center text-fg-subtle pb-1">目录为空</div>
+                  <button
+                    type="button"
+                    onClick={() => addScratchTab()}
+                    className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg bg-primary hover:bg-primary-hover text-white font-medium"
+                  >
+                    <FilePlus className="w-3.5 h-3.5" /> 新建接口草稿
+                  </button>
+                  {canWrite && (
+                    <button
+                      type="button"
+                      onClick={() => setImportOpen(true)}
+                      className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium"
+                    >
+                      <Import className="w-3.5 h-3.5 text-tidal" /> 导入 OpenAPI / Postman
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCurlTab('import')
+                      setCurlOpen(true)
+                    }}
+                    className="w-full inline-flex items-center justify-center gap-1.5 py-2 px-3 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium"
+                  >
+                    <Terminal className="w-3.5 h-3.5 text-sky-600" /> 粘贴 cURL 导入
+                  </button>
+                </div>
+              ) : (
+                <div className="text-center py-8 px-3 space-y-2 text-xs text-fg-subtle">
+                  <div>暂无匹配接口</div>
+                  {(search.trim() !== '' || protoFilter !== 'all') && (
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setSearch('')
+                        setProtoFilter('all')
+                      }}
+                      className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted"
+                    >
+                      重置筛选
+                    </button>
+                  )}
+                </div>
+              )
             ) : (
               renderTreeNodes(visibleTree)
             )}
@@ -1486,19 +1550,6 @@ export function WorkbenchView({
             <button
               type="button"
               role="radio"
-              aria-checked={splitMode === 'horizontal'}
-              onClick={() => changeSplitMode('horizontal')}
-              title="左右分屏"
-              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded ${
-                splitMode === 'horizontal' ? 'bg-primary text-white font-semibold' : 'text-fg-muted hover:bg-surface-hover'
-              }`}
-            >
-              <Columns2 className="w-3 h-3" />
-              <span className="hidden md:inline">左右</span>
-            </button>
-            <button
-              type="button"
-              role="radio"
               aria-checked={splitMode === 'vertical'}
               onClick={() => changeSplitMode('vertical')}
               title="上下分屏"
@@ -1508,6 +1559,19 @@ export function WorkbenchView({
             >
               <Rows2 className="w-3 h-3" />
               <span className="hidden md:inline">上下</span>
+            </button>
+            <button
+              type="button"
+              role="radio"
+              aria-checked={splitMode === 'horizontal'}
+              onClick={() => changeSplitMode('horizontal')}
+              title="左右分屏"
+              className={`inline-flex items-center gap-1 px-2 py-0.5 rounded ${
+                splitMode === 'horizontal' ? 'bg-primary text-white font-semibold' : 'text-fg-muted hover:bg-surface-hover'
+              }`}
+            >
+              <Columns2 className="w-3 h-3" />
+              <span className="hidden md:inline">左右</span>
             </button>
           </div>
         </div>
@@ -1769,8 +1833,8 @@ export function WorkbenchView({
                       role="tab"
                       aria-selected={selected}
                       onClick={() => setReqSubTab(st.id)}
-                      className={`relative z-10 inline-flex items-center gap-1 px-2 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
-                        selected ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
+                      className={`relative z-10 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg font-semibold transition-colors whitespace-nowrap ${
+                        selected ? 'text-tidal' : 'text-fg-muted hover:text-fg'
                       }`}
                     >
                       <span>{st.label}</span>
@@ -1785,27 +1849,14 @@ export function WorkbenchView({
               </div>
 
               <div className="flex items-center gap-1.5 shrink-0">
-                {reqSubTab === 'headers' && (
-                  <button
-                    type="button"
-                    onClick={() => void handleToggleEffectivePreview()}
-                    className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-medium ${
-                    activeTab.showEffective
-                      ? 'bg-sky-100 border-sky-300 text-sky-800'
-                      : 'bg-surface border-line-strong text-fg-muted hover:bg-surface-hover'
-                  }`}
-                >
-                  <Eye className="w-3 h-3" /> 生效预览
-                </button>
-              )}
-              <ModuleZoomButton
-                expanded={zoomedMod === 'request'}
-                onToggle={() => toggleZoomMod('request', reqPaneRef.current)}
-              />
+                <ModuleZoomButton
+                  expanded={zoomedMod === 'request'}
+                  onToggle={() => toggleZoomMod('request', reqPaneRef.current)}
+                />
               </div>
             </div>
 
-            <div className="relative z-10 flex-1 min-h-0 overflow-y-auto tg-scroller p-4 text-xs space-y-4">
+            <div className="relative z-10 flex-1 min-h-0 overflow-y-auto tg-scroller p-4 text-xs flex flex-col gap-4">
             {reqSubTab === 'params' && (
               <div className="space-y-4">
                 {(req.path_params?.length || 0) > 0 && (
@@ -1835,6 +1886,20 @@ export function WorkbenchView({
 
             {reqSubTab === 'headers' && (
               <div className="space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-semibold text-fg">{protocol === 'grpc' ? 'Metadata 请求头' : '请求头'}</span>
+                  <button
+                    type="button"
+                    onClick={() => void handleToggleEffectivePreview()}
+                    className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] font-medium transition-colors ${
+                      activeTab.showEffective
+                        ? 'bg-sky-500/15 border-sky-400/50 text-tidal'
+                        : 'bg-surface border-line-strong text-fg-muted hover:bg-surface-hover'
+                    }`}
+                  >
+                    <Eye className="w-3 h-3" /> {activeTab.showEffective ? '收起生效预览' : '生效预览'}
+                  </button>
+                </div>
                 {activeTab.showEffective && activeTab.effective && (
                   <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-3 space-y-2.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1898,7 +1963,7 @@ export function WorkbenchView({
             )}
 
             {reqSubTab === 'body' && (
-              <div className="space-y-4">
+              <div className="flex-1 min-h-0 flex flex-col gap-3">
                 {protocol === 'ws' && (
                   <div className="rounded-lg border border-purple-200 bg-purple-50/40 p-3 space-y-3">
                     <div className="font-semibold text-purple-900">WebSocket</div>
@@ -2194,16 +2259,22 @@ export function WorkbenchView({
                         </label>
                       </div>
                     </div>
-                    <div>
-                      <label className="block text-fg-muted font-medium mb-1">
+                    <div className="flex-1 min-h-0 flex flex-col">
+                      <label className="block text-fg-muted font-medium mb-1 shrink-0">
                         请求载荷
                       </label>
-                      <textarea
-                        rows={6}
+                      <CodeEditor
+                        fill
+                        rows={8}
                         value={body.content || ''}
-                        onChange={(e) => updateBody({ type: body.type && body.type !== 'none' ? body.type : 'json', content: e.target.value })}
-                        placeholder='{\n  "name": "{{user}}"\n}'
-                        className="w-full p-2.5 border border-line-strong rounded bg-surface font-mono text-xs"
+                        onChange={(next) =>
+                          updateBody({
+                            type: body.type && body.type !== 'none' ? body.type : 'json',
+                            content: next,
+                          })
+                        }
+                        ariaLabel="gRPC 请求载荷"
+                        placeholder={'{\n  "name": "{{user}}"\n}'}
                       />
                     </div>
                   </div>
@@ -2253,8 +2324,8 @@ export function WorkbenchView({
                 )}
 
                 {(protocol === 'http' || protocol === 'sse') && (
-                  <div className="space-y-3">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div className="flex-1 min-h-0 flex flex-col gap-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2 shrink-0">
                   <div className="flex flex-wrap gap-1.5">
                     {(
                       [
@@ -2303,20 +2374,18 @@ export function WorkbenchView({
                 )}
 
                 {body.type === 'json' && (
-                  <textarea
-                    rows={8}
+                  <CodeEditor
+                    fill
+                    rows={10}
                     value={body.content || ''}
-                    onChange={(e) => updateBody({ content: e.target.value })}
-                    autoCorrect="off"
-                    autoCapitalize="none"
-                    spellCheck={false}
-                    placeholder='{\n  "user_id": "{{uid}}"\n}'
-                    className="w-full p-3 border border-line-strong rounded-lg bg-surface text-fg font-mono text-xs focus:border-sky-500 focus:outline-none"
+                    onChange={(next) => updateBody({ content: next })}
+                    ariaLabel="JSON 请求体"
+                    placeholder={'{\n  "user_id": "{{uid}}"\n}'}
                   />
                 )}
 
                 {body.type === 'raw' && (
-                  <div className="space-y-2">
+                  <div className="flex-1 min-h-0 flex flex-col gap-2">
                     <input
                       type="text"
                       value={body.content_type || ''}
@@ -2325,17 +2394,15 @@ export function WorkbenchView({
                       autoCapitalize="none"
                       spellCheck={false}
                       placeholder="Content-Type · text/plain"
-                      className="w-64 px-2.5 py-1.5 border border-line-strong rounded-md bg-surface text-fg font-mono text-xs focus:border-sky-500 focus:outline-none"
+                      className="w-64 shrink-0 px-2.5 py-1.5 border border-line-strong rounded-md bg-surface text-fg font-mono text-xs focus:border-sky-500 focus:outline-none"
                     />
-                    <textarea
-                      rows={7}
+                    <CodeEditor
+                      fill
+                      rows={9}
                       value={body.content || ''}
-                      onChange={(e) => updateBody({ content: e.target.value })}
-                      autoCorrect="off"
-                      autoCapitalize="none"
-                      spellCheck={false}
+                      onChange={(next) => updateBody({ content: next })}
+                      ariaLabel="Raw 请求体"
                       placeholder="请求体文本，支持 {{变量}}"
-                      className="w-full p-3 border border-line-strong rounded-lg bg-surface text-fg font-mono text-xs focus:border-sky-500 focus:outline-none"
                     />
                   </div>
                 )}
@@ -2361,19 +2428,43 @@ export function WorkbenchView({
                       />
                     </div>
                     <div>
-                      <div className="flex items-center justify-between mb-1">
+                      <div className="flex items-center justify-between gap-2 mb-1">
                         <span className="font-medium text-fg">文件字段</span>
-                        <button
-                          type="button"
-                          onClick={() =>
-                            updateBody({
-                              files: [...(body.files || []), { field: 'file', path: files[0]?.name || '' }],
-                            })
-                          }
-                          className="inline-flex items-center gap-1 text-tidal hover:underline font-medium"
-                        >
-                          <Plus className="w-3.5 h-3.5" /> 添加
-                        </button>
+                        <div className="flex items-center gap-2">
+                          <label
+                            className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium cursor-pointer ${
+                              uploadingFile || !canWrite ? 'opacity-50 pointer-events-none' : ''
+                            }`}
+                          >
+                            <Upload className="w-3.5 h-3.5 text-tidal" />
+                            <span>{uploadingFile ? '上传中…' : '上传并新增文件字段'}</span>
+                            <input
+                              type="file"
+                              className="sr-only"
+                              disabled={uploadingFile || !canWrite}
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0]
+                                e.target.value = ''
+                                if (!file) return
+                                const saved = await uploadProjectFile(file)
+                                if (saved) {
+                                  updateBody({ files: [...(body.files || []), { field: 'file', path: saved.name }] })
+                                }
+                              }}
+                            />
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              updateBody({
+                                files: [...(body.files || []), { field: 'file', path: files[0]?.name || '' }],
+                              })
+                            }
+                            className="inline-flex items-center gap-1 text-tidal hover:underline font-medium"
+                          >
+                            <Plus className="w-3.5 h-3.5" /> 添加行
+                          </button>
+                        </div>
                       </div>
                       {(body.files || []).map((bf, i) => (
                         <div key={i} className="flex items-center gap-2 mb-1.5">
@@ -2381,15 +2472,17 @@ export function WorkbenchView({
                             type="text"
                             value={bf.field}
                             placeholder="字段名 file"
+                            aria-label={`文件字段名 ${i + 1}`}
                             onChange={(e) => {
                               const next = (body.files || []).map((x, j) =>
                                 j === i ? { ...x, field: e.target.value } : x
                               )
                               updateBody({ files: next })
                             }}
-                            className="w-36 px-2 py-1 border border-line-strong rounded bg-surface text-fg font-mono"
+                            className="w-36 px-2 py-1.5 border border-line-strong rounded-lg bg-surface text-fg font-mono"
                           />
                           <select
+                            aria-label={`文件字段 ${i + 1} 已上传文件`}
                             value={bf.path}
                             onChange={(e) => {
                               const next = (body.files || []).map((x, j) =>
@@ -2397,17 +2490,45 @@ export function WorkbenchView({
                               )
                               updateBody({ files: next })
                             }}
-                            className="flex-1 px-2 py-1 border border-line-strong rounded font-mono bg-surface text-fg"
+                            className="tg-select flex-1 px-2.5 py-1.5 border border-line-strong rounded-lg font-mono bg-surface text-fg"
                           >
-                            <option value="">选择项目文件</option>
+                            <option value="">
+                              {files.length === 0 ? '暂无项目文件，请点击右侧上传本地文件' : '选择项目文件'}
+                            </option>
                             {files.map((df) => (
                               <option key={df.name} value={df.name}>
-                                {df.name}
+                                {df.name} ({Math.max(1, Math.round(df.size / 1024))} KB)
                               </option>
                             ))}
                           </select>
+                          <label
+                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium cursor-pointer shrink-0 ${
+                              uploadingFile || !canWrite ? 'opacity-50 pointer-events-none' : ''
+                            }`}
+                          >
+                            <Upload className="w-3.5 h-3.5 text-tidal" />
+                            <span>上传</span>
+                            <input
+                              type="file"
+                              className="sr-only"
+                              disabled={uploadingFile || !canWrite}
+                              onChange={async (e) => {
+                                const file = e.target.files?.[0]
+                                e.target.value = ''
+                                if (!file) return
+                                const saved = await uploadProjectFile(file)
+                                if (saved) {
+                                  const next = (body.files || []).map((x, j) =>
+                                    j === i ? { ...x, path: saved.name } : x
+                                  )
+                                  updateBody({ files: next })
+                                }
+                              }}
+                            />
+                          </label>
                           <button
                             type="button"
+                            aria-label="删除文件字段"
                             onClick={() => updateBody({ files: (body.files || []).filter((_, j) => j !== i) })}
                             className="p-1 text-fg-subtle hover:text-rose-600"
                           >
@@ -2420,27 +2541,74 @@ export function WorkbenchView({
                 )}
 
                 {body.type === 'binary' && (
-                  <div className="space-y-2 max-w-md">
-                    <label className="block font-medium text-fg">项目文件</label>
-                    <select
-                      value={body.file || ''}
-                      onChange={(e) => updateBody({ file: e.target.value })}
-                      className="w-full px-2.5 py-1.5 border border-line-strong rounded-md font-mono bg-surface"
-                    >
-                      <option value="">选择文件…</option>
-                      {files.map((df) => (
-                        <option key={df.name} value={df.name}>
-                          {df.name} ({Math.round(df.size / 1024)} KB)
+                  <div className="space-y-3 max-w-2xl">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label
+                        className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-sky-400/50 bg-sky-500/12 hover:bg-sky-500/20 text-tidal font-semibold cursor-pointer shrink-0 transition-colors ${
+                          uploadingFile || !canWrite ? 'opacity-50 pointer-events-none' : ''
+                        }`}
+                      >
+                        <Upload className="w-3.5 h-3.5" />
+                        <span>{uploadingFile ? '上传中…' : '选择本地文件上传'}</span>
+                        <input
+                          type="file"
+                          aria-label="上传 Binary 请求体文件"
+                          className="sr-only"
+                          disabled={uploadingFile || !canWrite}
+                          onChange={async (e) => {
+                            const file = e.target.files?.[0]
+                            e.target.value = ''
+                            if (!file) return
+                            const saved = await uploadProjectFile(file)
+                            if (saved) {
+                              updateBody({
+                                file: saved.name,
+                                content_type: body.content_type || file.type || 'application/octet-stream',
+                              })
+                            }
+                          }}
+                        />
+                      </label>
+                      <select
+                        name="binary-project-file"
+                        aria-label="Binary 项目文件"
+                        value={body.file || ''}
+                        onChange={(e) => updateBody({ file: e.target.value })}
+                        className="tg-select flex-1 min-w-[220px] px-2.5 py-1.5 border border-line-strong rounded-lg font-mono bg-surface text-fg"
+                      >
+                        <option value="">
+                          {files.length === 0 ? '暂无项目文件，请点击左侧上传本地文件…' : '选择已上传项目文件…'}
                         </option>
-                      ))}
-                    </select>
-                    <input
-                      type="text"
-                      value={body.content_type || ''}
-                      onChange={(e) => updateBody({ content_type: e.target.value })}
-                      placeholder="Content-Type · application/octet-stream"
-                      className="w-full px-2.5 py-1.5 border border-line-strong rounded-md bg-surface text-fg font-mono"
-                    />
+                        {files.map((df) => (
+                          <option key={df.name} value={df.name}>
+                            {df.name} ({Math.max(1, Math.round(df.size / 1024))} KB)
+                          </option>
+                        ))}
+                      </select>
+                      {body.file && (
+                        <button
+                          type="button"
+                          onClick={() => updateBody({ file: '' })}
+                          className="px-2 py-1.5 rounded-lg border border-line text-fg-muted hover:text-rose-600 hover:bg-surface-hover"
+                          title="清除已选文件"
+                        >
+                          清除
+                        </button>
+                      )}
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <label htmlFor="binary-content-type" className="text-fg-muted font-medium w-24 shrink-0">
+                        Content-Type
+                      </label>
+                      <input
+                        id="binary-content-type"
+                        type="text"
+                        value={body.content_type || ''}
+                        onChange={(e) => updateBody({ content_type: e.target.value })}
+                        placeholder="application/octet-stream"
+                        className="flex-1 min-w-[220px] px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg font-mono"
+                      />
+                    </div>
                   </div>
                 )}
                   </div>
@@ -2671,11 +2839,39 @@ export function WorkbenchView({
 
             {reqSubTab === 'scripts' && (
               <div className="space-y-5">
-                <div className="flex flex-wrap items-center gap-1 text-[11px]" aria-label="脚本可用函数">
-                  {['vars.name', 'now_sec()', 'now_ms()', 'uuid()', 'hmac_sha256(k, d)', 'base64_encode(s)', 'resp.status', 'resp.header(n)', 'resp.json(p)', 'jsonpath(s, p)', 'assert(c, msg)'].map((fn) => (
-                    <code key={fn} className="px-1.5 py-0.5 rounded border border-line bg-surface-subtle font-mono text-fg-muted">
-                      {fn}
-                    </code>
+                <div className="flex flex-wrap items-center gap-1 text-[11px]" aria-label="点击插入脚本函数">
+                  {[
+                    { label: 'vars.name', expr: 'vars.name', target: 'pre' as const },
+                    { label: 'now_sec()', expr: 'now_sec()', target: 'pre' as const },
+                    { label: 'now_ms()', expr: 'now_ms()', target: 'pre' as const },
+                    { label: 'uuid()', expr: 'uuid()', target: 'pre' as const },
+                    { label: 'hmac_sha256(k, d)', expr: 'hmac_sha256(vars.api_secret, d)', target: 'pre' as const },
+                    { label: 'base64_encode(s)', expr: 'base64_encode(s)', target: 'pre' as const },
+                    { label: 'resp.status', expr: 'resp.status', target: 'post' as const },
+                    { label: 'resp.header(n)', expr: 'resp.header("X-Trace-Id")', target: 'post' as const },
+                    { label: 'resp.json(p)', expr: 'resp.json("$.data")', target: 'post' as const },
+                    { label: 'jsonpath(s, p)', expr: 'jsonpath(s, "$.data")', target: 'post' as const },
+                    { label: 'assert(c, msg)', expr: 'assert(resp.status == 200, "status check")', target: 'post' as const },
+                  ].map((fn) => (
+                    <button
+                      key={fn.label}
+                      type="button"
+                      disabled={!canWrite}
+                      onClick={() =>
+                        updateActiveAPI((cur) => {
+                          if (fn.target === 'pre') {
+                            const prev = cur.pre_script || ''
+                            return { ...cur, pre_script: prev ? `${prev}\n${fn.expr}` : fn.expr }
+                          }
+                          const prev = cur.post_script || ''
+                          return { ...cur, post_script: prev ? `${prev}\n${fn.expr}` : fn.expr }
+                        })
+                      }
+                      title={fn.target === 'pre' ? '点击追加到前置脚本' : '点击追加到后置脚本'}
+                      className="px-1.5 py-0.5 rounded border border-line bg-surface-subtle hover:border-sky-400 hover:text-tidal font-mono text-fg-muted transition-colors disabled:opacity-50"
+                    >
+                      {fn.label}
+                    </button>
                   ))}
                 </div>
 
@@ -2689,15 +2885,15 @@ export function WorkbenchView({
                     disabled={!canWrite}
                     value={activeTab.api.pre_script || ''}
                     onChange={(next) => updateActiveAPI((cur) => ({ ...cur, pre_script: next }))}
-                    placeholder={'// 例如生成时间戳与签名：\nvars.ts = to_string(now_sec());\nvars.sig = hmac_sha256("secret", vars.ts);'}
+                    placeholder={'// 例如生成时间戳与签名（推荐从密文环境变量读取密钥）：\nvars.ts = to_string(now_sec());\nvars.sig = hmac_sha256(vars.api_secret, vars.ts);'}
                     snippets={[
                       {
                         label: 'HMAC-SHA256 签名',
-                        code: 'vars.ts = to_string(now_sec());\nvars.sig = hmac_sha256("secret", vars.ts);',
+                        code: 'vars.ts = to_string(now_sec());\nvars.sig = hmac_sha256(vars.api_secret, vars.ts);',
                       },
                       { label: '生成 UUID', code: 'vars.req_id = uuid();' },
                       { label: '毫秒时间戳', code: 'vars.nonce_ms = to_string(now_ms());' },
-                      { label: 'Base64 编码', code: 'vars.auth_b64 = base64_encode("user:pass");' },
+                      { label: 'Base64 编码', code: 'vars.auth_b64 = base64_encode(vars.basic_creds);' },
                     ]}
                   />
                 </div>
@@ -3105,6 +3301,7 @@ export function WorkbenchView({
         tempVars={tempVars}
         canWrite={canWrite}
         onClose={() => setRunnerModal({ open: false, folderId: '' })}
+        onOpenAPI={(apiId) => void openSavedAPI(apiId)}
         onToast={onToast}
       />
     </div>

@@ -235,7 +235,7 @@ export function JSONTreeViewer({ rawText, onPickExtractJSONPath, onPickAssertJSO
 
   if (!parsed.ok) {
     return (
-      <pre className="p-3 rounded-lg border tg-code-surface tg-scroller-dark text-xs font-mono overflow-auto max-h-[60dvh] whitespace-pre-wrap break-all">
+      <pre className="flex-1 min-h-[180px] p-3 rounded-lg border tg-code-surface tg-scroller-dark text-xs font-mono overflow-auto whitespace-pre-wrap break-all">
         {rawText || '(空响应体)'}
       </pre>
     )
@@ -258,7 +258,7 @@ export function JSONTreeViewer({ rawText, onPickExtractJSONPath, onPickAssertJSO
   const hitCount = found?.matches.size ?? 0
 
   return (
-    <div className="rounded-lg border border-line bg-surface font-mono text-xs flex flex-col max-h-[min(64dvh,640px)]">
+    <div className="flex-1 min-h-[180px] rounded-lg border border-line bg-surface font-mono text-xs flex flex-col">
       <div className="flex items-center gap-1.5 px-2 py-1.5 border-b border-line bg-surface-subtle rounded-t-lg shrink-0 font-sans">
         <search className="relative flex-1 min-w-0">
           <Search className="w-3.5 h-3.5 text-fg-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
