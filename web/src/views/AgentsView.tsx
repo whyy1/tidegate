@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { Check, Copy, Cpu, Download, HardDrive, KeyRound, Network, Plus, Save, Server, Shield, Tags, Terminal, Trash2 } from 'lucide-react'
+import { RollingNumber } from '../components/DropletFilter'
 import { api, APIError } from '../lib/api'
 import { copyText } from '../lib/download'
 import type { AgentJoinToken, AgentView, JoinTokenCreated, SystemInfo } from '../lib/types'
@@ -199,34 +200,34 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
   }
 
   return (
-    <div className="flex-1 overflow-y-auto tg-scroller bg-canvas p-5 space-y-5 text-xs">
-      <section aria-label="节点接入" className="bg-surface rounded-xl border border-line overflow-hidden shadow-xs">
-        <div className="tg-telemetry-strip px-4 py-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="flex items-center gap-2 font-semibold text-sm text-white">
-            <Terminal className="w-4 h-4 text-sky-400" /> 节点接入
+    <div className="flex-1 overflow-y-auto tg-scroller bg-transparent p-2.5 pb-[72px] space-y-3 text-xs">
+      <section aria-label="节点接入" className="tg-accent-card p-4 space-y-3.5">
+        <div className="pb-3 border-b border-line flex flex-wrap items-center justify-between gap-2">
+          <h2 className="flex items-center gap-2 font-semibold text-sm text-fg">
+            <Terminal className="w-4 h-4 text-tidal" /> 节点接入
           </h2>
           <div className="flex flex-wrap items-center gap-2">
             {sysInfo && (
-              <span className="tg-tabular font-mono text-[11px] text-sky-200">
+              <span className="tg-tabular font-mono text-[11px] text-fg-muted">
                 {sysInfo.version} · {sysInfo.cluster_addr}
               </span>
             )}
             <a
               href={api.exportAgentCAPEMUrl()}
               download="tidegate-cluster-ca.pem"
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-white/20 bg-white/10 hover:bg-white/20 text-white font-medium"
+              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium"
             >
-              <Download className="w-3.5 h-3.5 text-sky-400" /> 下载 CA (.pem)
+              <Download className="w-3.5 h-3.5 text-tidal" /> 下载 CA (.pem)
             </a>
           </div>
         </div>
 
-        <div className="p-4 space-y-3">
+        <div className="space-y-3">
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-3 items-start">
             {isAdmin && (
               <form
                 onSubmit={handleCreateJoinToken}
-                className="xl:col-span-5 grid grid-cols-[1fr_auto] gap-2 p-2.5 rounded-lg border border-line bg-surface-subtle"
+                className="xl:col-span-5 grid grid-cols-[1fr_auto] gap-2 p-2.5 rounded-xl border border-line bg-surface-subtle"
               >
                 <div className="col-span-2 flex flex-wrap items-center gap-2">
                   <input
@@ -301,7 +302,7 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
                 </button>
               </div>
               {sysInfo?.cluster_ca_fingerprint && (
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded border border-sky-200 bg-sky-50 text-sky-900 font-mono text-[11px] min-w-0">
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-sky-200 bg-sky-50 text-sky-900 font-mono text-[11px] min-w-0">
                   <Shield className="w-3.5 h-3.5 text-sky-600 shrink-0" />
                   <span className="font-sans font-medium shrink-0">CA 指纹</span>
                   <span className="truncate select-all">{sysInfo.cluster_ca_fingerprint}</span>
@@ -377,9 +378,9 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
       </section>
 
       {agents.length === 0 ? (
-        <div className="bg-surface rounded-xl border border-line p-10 text-center text-fg-subtle">暂无在线发压节点</div>
+        <div className="tg-glass-card p-10 text-center text-fg-subtle">暂无在线发压节点</div>
       ) : (
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
           {agents.map((ag) => {
             const cpuPct = ag.stats ? Math.min(100, ag.stats.cpu.machine * 100) : 0
             const procCpuPct = ag.stats ? Math.min(100, ag.stats.cpu.process * 100) : 0
@@ -400,7 +401,7 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
             const cleanCls = 'border-line-strong bg-surface text-fg'
 
             return (
-              <article key={ag.id} className="bg-surface rounded-xl border border-line p-4 shadow-xs space-y-3">
+              <article key={ag.id} className="tg-glass-card tg-tilt-card p-4 space-y-3">
                 <header className="flex flex-wrap items-start justify-between gap-2 border-b border-line pb-2.5">
                   <div className="flex items-center gap-2 min-w-0">
                     <div className="p-2 rounded-lg bg-sky-50 text-sky-700 shrink-0">
@@ -455,9 +456,9 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
                         <span className="inline-flex items-center gap-1">
                           <Cpu className="w-3.5 h-3.5 text-sky-600" /> 整机 CPU
                         </span>
-                        <span className="tg-tabular font-mono font-semibold text-fg">{cpuPct.toFixed(1)}%</span>
+                        <RollingNumber value={cpuPct} decimals={1} suffix="%" className="font-mono font-semibold text-fg" />
                       </div>
-                      <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                      <div className="h-2 rounded-full bg-surface-subtle border border-line overflow-hidden">
                         <div className={`h-full ${cpuPct > 85 ? 'bg-rose-500' : 'bg-sky-500'}`} style={{ width: `${cpuPct}%` }} />
                       </div>
                       <div className="tg-tabular text-[11px] text-fg-subtle font-mono">发压进程 {procCpuPct.toFixed(1)}%</div>
@@ -468,9 +469,9 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
                         <span className="inline-flex items-center gap-1">
                           <HardDrive className="w-3.5 h-3.5 text-emerald-600" /> 内存
                         </span>
-                        <span className="tg-tabular font-mono font-semibold text-fg">{memPct.toFixed(1)}%</span>
+                        <RollingNumber value={memPct} decimals={1} suffix="%" className="font-mono font-semibold text-fg" />
                       </div>
-                      <div className="h-2 rounded-full bg-slate-100 overflow-hidden">
+                      <div className="h-2 rounded-full bg-surface-subtle border border-line overflow-hidden">
                         <div className={`h-full ${memPct > 85 ? 'bg-rose-500' : 'bg-emerald-500'}`} style={{ width: `${memPct}%` }} />
                       </div>
                       <div className="tg-tabular text-[11px] text-fg-subtle font-mono">

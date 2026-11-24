@@ -45,6 +45,39 @@ function flattenAPINodes(nodes: TreeNode[], prefix = ''): Array<{ id: string; na
   return out
 }
 
+function HighlightText({ text, query }: { text: string; query: string }) {
+  const q = query.trim()
+  if (!q) return <>{text}</>
+  const lower = text.toLowerCase()
+  const ql = q.toLowerCase()
+  const out: Array<{ k: number; s: string; hit: boolean }> = []
+  let i = 0
+  let k = 0
+  while (i < text.length) {
+    const at = lower.indexOf(ql, i)
+    if (at < 0) {
+      out.push({ k: k++, s: text.slice(i), hit: false })
+      break
+    }
+    if (at > i) out.push({ k: k++, s: text.slice(i, at), hit: false })
+    out.push({ k: k++, s: text.slice(at, at + q.length), hit: true })
+    i = at + q.length
+  }
+  return (
+    <>
+      {out.map((p) =>
+        p.hit ? (
+          <mark key={p.k} className="rounded bg-sky-200/80 dark:bg-sky-400/30 px-0.5 text-fg">
+            {p.s}
+          </mark>
+        ) : (
+          <span key={p.k}>{p.s}</span>
+        )
+      )}
+    </>
+  )
+}
+
 export function CommandPalette({
   open,
   projectId,
@@ -272,8 +305,8 @@ export function CommandPalette({
       aria-labelledby="tg-cmd-title"
       className="tg-dialog w-[min(36rem,calc(100vw-2rem))] mt-[12vh] overflow-hidden"
     >
-      <search className="px-4 py-3 border-b border-slate-200 flex items-center gap-2.5 bg-surface">
-        <Search className="w-4 h-4 text-sky-600 shrink-0" />
+      <search className="px-4 py-3 border-b border-line flex items-center gap-2.5">
+        <Search className="w-4 h-4 text-tidal shrink-0" />
         <h2 id="tg-cmd-title" className="sr-only">
           全局命令与接口搜索
         </h2>
@@ -299,21 +332,21 @@ export function CommandPalette({
             }
           }}
           placeholder="接口、场景、环境、命令"
-          className="flex-1 min-w-0 text-sm text-slate-900 placeholder:text-slate-400 focus:outline-none"
+          className="flex-1 min-w-0 bg-transparent text-sm text-fg placeholder:text-fg-subtle focus:outline-none"
         />
         <button
           type="button"
           onClick={onClose}
           aria-label="关闭命令面板"
-          className="p-1 rounded text-slate-400 hover:text-slate-700 hover:bg-slate-100"
+          className="p-1 rounded-lg text-fg-subtle hover:text-fg hover:bg-surface-hover"
         >
           <X className="w-4 h-4" />
         </button>
       </search>
 
-      <div className="max-h-[55vh] overflow-y-auto tg-scroller divide-y divide-slate-100 bg-surface">
+      <div className="max-h-[55vh] overflow-y-auto tg-scroller divide-y divide-[var(--tg-border)]">
         {items.length === 0 ? (
-          <div className="py-10 text-center text-xs text-slate-400">无匹配结果</div>
+          <div className="py-10 text-center text-xs text-fg-subtle">无匹配结果</div>
         ) : (
           items.map((it, idx) => {
             const active = idx === selectedIdx
@@ -324,27 +357,33 @@ export function CommandPalette({
                 onMouseEnter={() => setSelectedIdx(idx)}
                 onClick={it.run}
                 className={`w-full px-4 py-2.5 flex items-center gap-3 text-left text-xs transition-colors ${
-                  active ? 'bg-sky-50 text-sky-950' : 'text-slate-700 hover:bg-slate-50'
+                  active ? 'bg-sky-500/15 text-fg' : 'text-fg-muted hover:bg-surface-hover'
                 }`}
               >
                 {iconFor(it)}
                 <div className="min-w-0 flex-1">
-                  <div className="font-medium text-slate-900 truncate">{it.label}</div>
-                  {it.hint && <div className="text-[11px] text-slate-500 font-mono truncate">{it.hint}</div>}
+                  <div className="font-semibold text-fg truncate">
+                    <HighlightText text={it.label} query={query} />
+                  </div>
+                  {it.hint && (
+                    <div className="text-[11px] text-fg-subtle font-mono truncate">
+                      <HighlightText text={it.hint} query={query} />
+                    </div>
+                  )}
                 </div>
                 {it.badge && (
-                  <span className="px-2 py-0.5 rounded border border-slate-200 bg-slate-100 font-mono text-[10px] font-semibold text-slate-700 shrink-0">
+                  <span className="px-2 py-0.5 rounded-full border border-line bg-surface-subtle font-mono text-[10px] font-semibold text-fg-muted shrink-0">
                     {it.badge}
                   </span>
                 )}
-                {active && <CornerDownLeft className="w-3.5 h-3.5 text-sky-600 shrink-0" />}
+                {active && <CornerDownLeft className="w-3.5 h-3.5 text-tidal shrink-0" />}
               </button>
             )
           })
         )}
       </div>
 
-      <div className="px-4 py-2 bg-slate-50 border-t border-slate-200 flex items-center justify-between text-[11px] text-slate-500 font-mono">
+      <div className="px-4 py-2 bg-surface-subtle border-t border-line flex items-center justify-between text-[11px] text-fg-subtle font-mono">
         <span className="flex items-center gap-1">
           <kbd className="tg-kbd">↑</kbd>
           <kbd className="tg-kbd">↓</kbd>

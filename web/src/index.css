@@ -43,25 +43,27 @@
   --tg-navy-800: #123862;
   --tg-tidal-400: #38bdf8;
 
-  /* Raw light / dark pairs */
-  --tg-canvas-light: #eef2f7;
-  --tg-canvas-dark: #090d16;
-  --tg-surface-light: #ffffff;
-  --tg-surface-dark: #0f1623;
-  --tg-surface-subtle-light: #f6f8fb;
-  --tg-surface-subtle-dark: #162032;
-  --tg-surface-hover-light: #eef2f7;
-  --tg-surface-hover-dark: #1b2638;
-  --tg-border-light: #e2e8f0;
-  --tg-border-dark: rgb(148 163 184 / 0.14);
-  --tg-border-strong-light: #cbd5e1;
-  --tg-border-strong-dark: rgb(148 163 184 / 0.26);
+  /* Warm terracotta x coastal sky-blue frosted glass palette */
+  --tg-canvas-light: #f4efe9;
+  --tg-canvas-dark: #070e1b;
+  --tg-surface-light: rgb(255 255 255 / 0.64);
+  --tg-surface-dark: rgb(15 24 40 / 0.72);
+  --tg-surface-subtle-light: rgb(255 255 255 / 0.46);
+  --tg-surface-subtle-dark: rgb(20 32 52 / 0.62);
+  --tg-surface-hover-light: rgb(255 255 255 / 0.84);
+  --tg-surface-hover-dark: rgb(28 44 68 / 0.82);
+  --tg-border-light: rgb(255 255 255 / 0.86);
+  --tg-border-dark: rgb(148 210 255 / 0.16);
+  --tg-border-strong-light: rgb(148 163 184 / 0.34);
+  --tg-border-strong-dark: rgb(148 210 255 / 0.28);
   --tg-text-light: #0f172a;
-  --tg-text-dark: #e6ebf2;
+  --tg-text-dark: #eaf0f7;
   --tg-text-muted-light: #475569;
-  --tg-text-muted-dark: #a5b0c0;
+  --tg-text-muted-dark: #a6b4c8;
   --tg-text-subtle-light: #64748b;
-  --tg-text-subtle-dark: #8391a6;
+  --tg-text-subtle-dark: #8494aa;
+  --tg-specular-light: rgb(255 255 255 / 0.90);
+  --tg-specular-dark: rgb(255 255 255 / 0.12);
   --tg-tidal-600-light: #0284c7;
   --tg-tidal-600-dark: #38bdf8;
   --tg-tidal-500-light: #0ea5e9;
@@ -72,12 +74,23 @@
   --tg-primary-hover-dark: #0477b8;
   --tg-scrollbar-thumb-light: #94a3b8;
   --tg-scrollbar-thumb-dark: #475569;
-  --tg-scrollbar-track-light: #eef2f7;
-  --tg-scrollbar-track-dark: #0f1623;
+  --tg-scrollbar-track-light: transparent;
+  --tg-scrollbar-track-dark: transparent;
   --tg-selection-light: #bae6fd;
   --tg-selection-dark: rgb(56 189 248 / 0.32);
-  --tg-shadow-light: rgb(15 23 42 / 0.08);
-  --tg-shadow-dark: rgb(0 0 0 / 0.45);
+  --tg-shadow-light: rgb(78 44 24 / 0.13);
+  --tg-shadow-dark: rgb(0 0 0 / 0.50);
+  --tg-mesh-bg-light:
+    radial-gradient(58% 64% at 12% 14%, rgb(235 166 128 / 0.52), transparent 66%),
+    radial-gradient(66% 68% at 88% 12%, rgb(125 206 255 / 0.56), transparent 64%),
+    radial-gradient(54% 58% at 72% 88%, rgb(240 189 160 / 0.44), transparent 68%),
+    radial-gradient(48% 54% at 22% 86%, rgb(165 216 255 / 0.46), transparent 68%),
+    linear-gradient(138deg, #fbf4ef 0%, #f4f7fb 52%, #ebf3ff 100%);
+  --tg-mesh-bg-dark:
+    radial-gradient(56% 62% at 14% 16%, rgb(194 109 67 / 0.16), transparent 68%),
+    radial-gradient(64% 68% at 86% 14%, rgb(14 165 233 / 0.22), transparent 64%),
+    radial-gradient(52% 58% at 74% 88%, rgb(56 189 248 / 0.12), transparent 70%),
+    linear-gradient(142deg, #060d18 0%, #081224 52%, #0b192e 100%);
 
   /* Fallback: browsers without light-dark() follow the OS preference only */
   --tg-canvas: var(--tg-canvas-light);
@@ -89,6 +102,7 @@
   --tg-text: var(--tg-text-light);
   --tg-text-muted: var(--tg-text-muted-light);
   --tg-text-subtle: var(--tg-text-subtle-light);
+  --tg-specular: var(--tg-specular-light);
   --tg-tidal-600: var(--tg-tidal-600-light);
   --tg-tidal-500: var(--tg-tidal-500-light);
   --tg-primary: var(--tg-primary-light);
@@ -97,6 +111,7 @@
   --tg-scrollbar-track: var(--tg-scrollbar-track-light);
   --tg-selection: var(--tg-selection-light);
   --tg-shadow: var(--tg-shadow-light);
+  --tg-mesh-bg: var(--tg-mesh-bg-light);
 
   accent-color: var(--tg-tidal-600);
   color: var(--tg-text);
@@ -114,6 +129,7 @@
     --tg-text: var(--tg-text-dark);
     --tg-text-muted: var(--tg-text-muted-dark);
     --tg-text-subtle: var(--tg-text-subtle-dark);
+    --tg-specular: var(--tg-specular-dark);
     --tg-tidal-600: var(--tg-tidal-600-dark);
     --tg-tidal-500: var(--tg-tidal-500-dark);
     --tg-primary: var(--tg-primary-dark);
@@ -122,6 +138,23 @@
     --tg-scrollbar-track: var(--tg-scrollbar-track-dark);
     --tg-selection: var(--tg-selection-dark);
     --tg-shadow: var(--tg-shadow-dark);
+    --tg-mesh-bg: var(--tg-mesh-bg-dark);
+  }
+}
+
+@supports (background: linear-gradient(in oklab, white, black)) {
+  :root {
+    --tg-mesh-bg-light:
+      radial-gradient(58% 64% at 12% 14% in oklab, rgb(235 166 128 / 0.52), transparent 66%),
+      radial-gradient(66% 68% at 88% 12% in oklab, rgb(125 206 255 / 0.56), transparent 64%),
+      radial-gradient(54% 58% at 72% 88% in oklab, rgb(240 189 160 / 0.44), transparent 68%),
+      radial-gradient(48% 54% at 22% 86% in oklab, rgb(165 216 255 / 0.46), transparent 68%),
+      linear-gradient(138deg in oklab, #fbf4ef 0%, #f4f7fb 52%, #ebf3ff 100%);
+    --tg-mesh-bg-dark:
+      radial-gradient(56% 62% at 14% 16% in oklab, rgb(194 109 67 / 0.16), transparent 68%),
+      radial-gradient(64% 68% at 86% 14% in oklab, rgb(14 165 233 / 0.22), transparent 64%),
+      radial-gradient(52% 58% at 74% 88% in oklab, rgb(56 189 248 / 0.12), transparent 70%),
+      linear-gradient(142deg in oklab, #060d18 0%, #081224 52%, #0b192e 100%);
   }
 }
 
@@ -136,6 +169,7 @@
     --tg-text: light-dark(var(--tg-text-light), var(--tg-text-dark));
     --tg-text-muted: light-dark(var(--tg-text-muted-light), var(--tg-text-muted-dark));
     --tg-text-subtle: light-dark(var(--tg-text-subtle-light), var(--tg-text-subtle-dark));
+    --tg-specular: light-dark(var(--tg-specular-light), var(--tg-specular-dark));
     --tg-tidal-600: light-dark(var(--tg-tidal-600-light), var(--tg-tidal-600-dark));
     --tg-tidal-500: light-dark(var(--tg-tidal-500-light), var(--tg-tidal-500-dark));
     --tg-primary: light-dark(var(--tg-primary-light), var(--tg-primary-dark));
@@ -149,10 +183,12 @@
 
 :root:has(> head > meta[name="color-scheme"][content="dark"]) {
   color-scheme: dark;
+  --tg-mesh-bg: var(--tg-mesh-bg-dark);
 }
 
 :root:has(> head > meta[name="color-scheme"][content="light"]) {
   color-scheme: light;
+  --tg-mesh-bg: var(--tg-mesh-bg-light);
 }
 
 body {
@@ -206,6 +242,143 @@ code, pre, kbd, .font-mono {
 }
 
 @layer components {
+/* ===== Warm Terracotta × Coastal Blue ambient canvas ===== */
+.tg-mesh-canvas {
+  background-color: var(--tg-canvas);
+  background-image: var(--tg-mesh-bg);
+  background-attachment: fixed;
+}
+
+/* ===== Frosted glass card & tonal sky-frosted accent card ===== */
+.tg-glass-card,
+.tg-accent-card {
+  --mx: -420px;
+  --my: -420px;
+  position: relative;
+  border-radius: 1.375rem;
+  backdrop-filter: blur(22px) saturate(168%);
+  -webkit-backdrop-filter: blur(22px) saturate(168%);
+  overflow: clip;
+  box-shadow:
+    0 18px 44px -20px var(--tg-shadow),
+    0 4px 14px -6px rgb(14 165 233 / 0.1),
+    inset 0 1px 0 var(--tg-specular);
+  transition: box-shadow 220ms ease, border-color 220ms ease, background-color 220ms ease;
+}
+
+.tg-glass-card {
+  background: var(--tg-surface);
+  border: 1px solid var(--tg-border);
+  color: var(--tg-text);
+}
+
+.tg-accent-card {
+  background: linear-gradient(155deg, rgb(255 255 255 / 0.88) 0%, rgb(235 246 255 / 0.82) 100%);
+  border: 1px solid rgb(125 211 252 / 0.52);
+  color: var(--tg-text);
+  box-shadow:
+    0 20px 46px -22px rgb(2 132 199 / 0.16),
+    0 4px 14px -6px rgb(14 165 233 / 0.1),
+    inset 0 1px 0 rgb(255 255 255 / 0.94);
+}
+
+:root:has(> head > meta[name="color-scheme"][content="dark"]) .tg-accent-card {
+  background: linear-gradient(155deg, rgb(10 25 46 / 0.90) 0%, rgb(13 38 68 / 0.86) 100%);
+  border-color: rgb(125 211 252 / 0.26);
+  box-shadow:
+    0 24px 52px -22px rgb(4 12 24 / 0.62),
+    inset 0 1px 0 rgb(255 255 255 / 0.14);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(:has(> head > meta[name="color-scheme"][content="light"])) .tg-accent-card {
+    background: linear-gradient(155deg, rgb(10 25 46 / 0.90) 0%, rgb(13 38 68 / 0.86) 100%);
+    border-color: rgb(125 211 252 / 0.26);
+    box-shadow:
+      0 24px 52px -22px rgb(4 12 24 / 0.62),
+      inset 0 1px 0 rgb(255 255 255 / 0.14);
+  }
+}
+
+/* Cursor inner spotlight (only visible on hovered card) */
+.tg-glass-card::before,
+.tg-accent-card::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 200ms ease;
+  z-index: 1;
+}
+
+.tg-glass-card::before,
+.tg-accent-card::before {
+  background: radial-gradient(
+    280px circle at var(--mx) var(--my),
+    rgb(255 255 255 / 0.44),
+    rgb(56 189 248 / 0.10) 45%,
+    transparent 72%
+  );
+}
+
+:root:has(> head > meta[name="color-scheme"][content="dark"]) .tg-glass-card::before,
+:root:has(> head > meta[name="color-scheme"][content="dark"]) .tg-accent-card::before {
+  background: radial-gradient(
+    300px circle at var(--mx) var(--my),
+    rgb(56 189 248 / 0.18),
+    rgb(255 255 255 / 0.06) 46%,
+    transparent 72%
+  );
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(:has(> head > meta[name="color-scheme"][content="light"])) .tg-glass-card::before,
+  :root:not(:has(> head > meta[name="color-scheme"][content="light"])) .tg-accent-card::before {
+    background: radial-gradient(
+      300px circle at var(--mx) var(--my),
+      rgb(56 189 248 / 0.18),
+      rgb(255 255 255 / 0.06) 46%,
+      transparent 72%
+    );
+  }
+}
+
+.tg-glass-card:hover::before,
+.tg-accent-card:hover::before {
+  opacity: 1;
+}
+
+/* Proximity border specular glow (tracks pointer across adjacent cards) */
+.tg-glass-card::after,
+.tg-accent-card::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  padding: 1.5px;
+  border-radius: inherit;
+  pointer-events: none;
+  background: radial-gradient(
+    220px circle at var(--mx) var(--my),
+    rgb(255 255 255 / 0.96),
+    rgb(14 165 233 / 0.58) 42%,
+    transparent 72%
+  );
+  -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+  mask-composite: exclude;
+  z-index: 2;
+}
+
+.tg-tilt-card {
+  transition:
+    transform 220ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 220ms ease,
+    border-color 220ms ease;
+}
+
 /* ===== Fixed deep-sea regions (component-specific color scheme) ===== */
 .tg-sidebar,
 .tg-hero-grid,
@@ -248,18 +421,32 @@ code, pre, kbd, .font-mono {
   color: #e2e8f0;
 }
 
-/* ===== Native <dialog> modal ===== */
+/* ===== Native <dialog> frosted glass modal ===== */
 dialog.tg-dialog {
   margin: auto;
   padding: 0;
   max-width: calc(100vw - 2rem);
   max-height: calc(100dvh - 2rem);
   border: 1px solid var(--tg-border);
-  border-radius: 0.875rem;
-  box-shadow: 0 28px 70px -18px rgb(2 8 23 / 0.55), 0 0 0 1px rgb(148 163 184 / 0.04);
-  background: var(--tg-surface);
+  border-radius: 1.375rem;
+  box-shadow:
+    0 32px 76px -18px rgb(4 12 24 / 0.42),
+    inset 0 1px 0 var(--tg-specular);
+  background: rgb(255 255 255 / 0.88);
+  backdrop-filter: blur(28px) saturate(180%);
+  -webkit-backdrop-filter: blur(28px) saturate(180%);
   color: var(--tg-text);
   overflow: hidden;
+}
+
+:root:has(> head > meta[name="color-scheme"][content="dark"]) dialog.tg-dialog {
+  background: rgb(11 20 35 / 0.90);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(:has(> head > meta[name="color-scheme"][content="light"])) dialog.tg-dialog {
+    background: rgb(11 20 35 / 0.90);
+  }
 }
 
 dialog.tg-dialog:not([open]) {
@@ -424,15 +611,74 @@ dialog.tg-dialog::backdrop {
   line-height: 1;
 }
 
+.tg-dock-bar {
+  background: rgb(255 255 255 / 0.72);
+  border: 1px solid rgb(255 255 255 / 0.90);
+  backdrop-filter: blur(26px) saturate(185%);
+  -webkit-backdrop-filter: blur(26px) saturate(185%);
+  box-shadow:
+    0 20px 44px -14px rgb(7 25 46 / 0.24),
+    inset 0 1px 0 rgb(255 255 255 / 0.95);
+}
+
+:root:has(> head > meta[name="color-scheme"][content="dark"]) .tg-dock-bar {
+  background: rgb(11 21 38 / 0.80);
+  border-color: rgb(148 210 255 / 0.22);
+  box-shadow:
+    0 20px 46px -14px rgb(0 0 0 / 0.65),
+    inset 0 1px 0 rgb(255 255 255 / 0.14);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(:has(> head > meta[name="color-scheme"][content="light"])) .tg-dock-bar {
+    background: rgb(11 21 38 / 0.80);
+    border-color: rgb(148 210 255 / 0.22);
+    box-shadow:
+      0 20px 46px -14px rgb(0 0 0 / 0.65),
+      inset 0 1px 0 rgb(255 255 255 / 0.14);
+  }
+}
+
+.tg-dock-btn {
+  transform-origin: center bottom;
+  transition: transform 95ms cubic-bezier(0.22, 1, 0.36, 1), background-color 160ms ease, color 160ms ease;
+}
+
+.tg-dock-tip {
+  transform: translateX(-50%) translateY(5px) scale(0.92);
+  opacity: 0;
+  transition: opacity 140ms ease, transform 160ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.tg-dock-btn:hover .tg-dock-tip,
+.tg-dock-btn:focus-visible .tg-dock-tip {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0) scale(1);
+}
+
 }
 
 @media (prefers-reduced-motion: reduce) {
-  *,
-  *::before,
-  *::after {
-    animation-duration: 0.01ms !important;
-    animation-iteration-count: 1 !important;
-    transition-duration: 0.01ms !important;
-    scroll-behavior: auto !important;
+  .tg-scope-scan {
+    animation: none;
+  }
+
+  .tg-swap-in {
+    animation: none;
+  }
+
+  dialog.tg-dialog[open] {
+    animation: none;
+  }
+
+  .tg-tilt-card,
+  .tg-dock-btn {
+    transform: none !important;
+    transition: background-color 150ms ease, border-color 150ms ease, color 150ms ease, opacity 150ms ease;
+  }
+
+  .tg-dock-tip {
+    transform: translateX(-50%);
+    transition: opacity 150ms ease;
   }
 }

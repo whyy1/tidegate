@@ -18,6 +18,7 @@ import {
 } from 'lucide-react'
 import { api, APIError } from '../lib/api'
 import { copyText } from '../lib/download'
+import { useGlassStagePhysics } from '../lib/glassPhysics'
 import type { SetupStatus, User } from '../lib/types'
 import { ThemeToggle } from './ThemeToggle'
 
@@ -200,6 +201,8 @@ export function AuthGate({ status, onAuthenticated }: Props) {
   const totpInputRef = useRef<HTMLInputElement>(null)
   const firstFieldRef = useRef<HTMLInputElement>(null)
   const backRef = useRef<HTMLButtonElement>(null)
+  const authStageRef = useRef<HTMLDivElement>(null)
+  useGlassStagePhysics(authStageRef)
 
   useEffect(() => {
     if (totpStep) totpInputRef.current?.focus()
@@ -276,7 +279,7 @@ export function AuthGate({ status, onAuthenticated }: Props) {
   const transport = status.tls ? 'HTTPS' : 'HTTP'
 
   return (
-    <div className="min-h-dvh grid lg:grid-cols-[1.08fr_1fr] bg-canvas">
+    <div ref={authStageRef} className="min-h-dvh grid lg:grid-cols-[1.08fr_1fr] tg-mesh-canvas">
       {/* ---------------- Deep-sea visual column ---------------- */}
       <aside className="tg-hero-grid relative hidden lg:flex flex-col justify-between overflow-hidden px-12 py-10 xl:px-16">
         <div className="flex items-center gap-3">
@@ -344,9 +347,9 @@ export function AuthGate({ status, onAuthenticated }: Props) {
             <span className="text-base font-semibold text-fg">Tidegate</span>
           </div>
 
-          <div className="rounded-2xl border border-line bg-surface p-7 shadow-[0_24px_60px_-28px_var(--tg-shadow)]">
+          <div className="tg-glass-card tg-tilt-card p-7">
             {view === 'auth' ? (
-              <div key="auth" className="tg-swap-in">
+              <div key="auth" className="relative z-10 tg-swap-in">
                 <header className="mb-6">
                   <h1 className="text-xl font-semibold tracking-tight text-fg">
                     {isSetup ? '初始化管理员' : totpStep ? '双因素验证' : '登录'}
@@ -542,7 +545,7 @@ export function AuthGate({ status, onAuthenticated }: Props) {
                 </form>
               </div>
             ) : (
-              <div key="reset" className="tg-swap-in">
+              <div key="reset" className="relative z-10 tg-swap-in">
                 <button
                   ref={backRef}
                   type="button"

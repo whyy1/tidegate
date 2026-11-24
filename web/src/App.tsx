@@ -1,13 +1,16 @@
-import { Suspense, lazy, useCallback, useEffect, useMemo, useState } from 'react'
+import { Suspense, lazy, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { AccountModal, type AccountModalTab } from './components/AccountModal'
 import { AuthGate } from './components/AuthGate'
 import { CommandPalette } from './components/CommandPalette'
+import { GooFilterDefs } from './components/DropletFilter'
 import { EnvModal } from './components/EnvModal'
+import { GlassDock } from './components/GlassDock'
 import { ProjectModal } from './components/ProjectModal'
 import { SidebarRail } from './components/SidebarRail'
 import { ToastContainer, type ToastItem } from './components/Toast'
 import { TopBar, type NavTab } from './components/TopBar'
 import { api, UNAUTHORIZED_EVENT } from './lib/api'
+import { useGlassStagePhysics } from './lib/glassPhysics'
 import type {
   API,
   APIBody,
@@ -114,6 +117,8 @@ export function App() {
   const [accountModalOpen, setAccountModalOpen] = useState(false)
   const [accountInitialTab, setAccountInitialTab] = useState<AccountModalTab>('sessions')
   const [toasts, setToasts] = useState<ToastItem[]>([])
+  const stageRef = useRef<HTMLDivElement | null>(null)
+  useGlassStagePhysics(stageRef)
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((cur) => {
@@ -137,6 +142,15 @@ export function App() {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault()
         setCmdOpen((v) => !v)
+        return
+      }
+      if (e.key === '/' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        const tgt = e.target instanceof Element ? e.target : null
+        const inField = Boolean(tgt?.closest('input, textarea, select, [contenteditable="true"]'))
+        if (!inField && !document.querySelector('dialog[open]')) {
+          e.preventDefault()
+          setCmdOpen(true)
+        }
       }
     }
     window.addEventListener('keydown', onGlobalKey)
@@ -285,7 +299,8 @@ export function App() {
   }
 
   return (
-    <div className="h-dvh flex bg-[var(--tg-canvas)] overflow-hidden">
+    <div ref={stageRef} className="h-dvh flex gap-2.5 p-2.5 tg-mesh-canvas overflow-hidden">
+      <GooFilterDefs />
       <SidebarRail
         user={user}
         agents={liveAgents}
@@ -299,7 +314,7 @@ export function App() {
         onOpenAccountModal={openAccountWithTab}
       />
 
-      <div className="flex-1 min-w-0 flex flex-col overflow-hidden">
+      <div className="flex-1 min-w-0 flex flex-col gap-2.5 overflow-hidden">
         <TopBar
           user={user}
           projects={projects}
@@ -509,6 +524,14 @@ export function App() {
           setOpenAPIRequest(null)
           wsClient.stop()
         }}
+      />
+
+      <GlassDock
+        activeTab={activeTab}
+        activeRunId={activeRunId}
+        onChangeTab={setActiveTab}
+        onOpenCommandPalette={() => setCmdOpen(true)}
+        onOpenMCP={() => openAccountWithTab('mcp')}
       />
 
       <ToastContainer

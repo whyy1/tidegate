@@ -16,7 +16,10 @@ import {
 } from 'lucide-react'
 import { copyText, downloadText, fileStamp } from '../lib/download'
 import type { APIResponseExample, DebugAPIResponse, DebugRecord } from '../lib/types'
+import { RollingNumber } from './DropletFilter'
 import { JSONTreeViewer } from './JSONTreeViewer'
+import { LiquidCapsule } from './LiquidCapsule'
+import { ModuleZoomButton } from './ModuleStage'
 
 export type RespSubTab = 'body' | 'extract_assert' | 'actual' | 'headers' | 'history'
 
@@ -38,6 +41,8 @@ interface Props {
   onSaveEnvVars?: (vars: Record<string, string>) => Promise<void>
   /** Append the current response to the API's examples. Omit to hide the action (e.g. read-only). */
   onSaveExample?: (example: APIResponseExample) => void
+  zoomed?: boolean
+  onToggleZoom?: () => void
   onRefreshHistory: () => Promise<void>
   onLoadHistoryRecord: (id: string) => Promise<void>
   onClearHistory: () => Promise<void>
@@ -74,10 +79,10 @@ function safeFileName(s: string): string {
 }
 
 function statusTone(status: number, error?: string): string {
-  if (error || status <= 0) return 'bg-rose-100 text-rose-800 border-rose-200'
-  if (status >= 200 && status < 300) return 'bg-emerald-100 text-emerald-800 border-emerald-200'
-  if (status >= 400) return 'bg-rose-100 text-rose-800 border-rose-200'
-  return 'bg-amber-100 text-amber-800 border-amber-200'
+  if (error || status <= 0) return 'bg-rose-50 text-rose-800 border-rose-200'
+  if (status >= 200 && status < 300) return 'bg-emerald-50 text-emerald-800 border-emerald-200'
+  if (status >= 400) return 'bg-rose-50 text-rose-800 border-rose-200'
+  return 'bg-amber-50 text-amber-800 border-amber-200'
 }
 
 const headerBtn =
@@ -97,6 +102,8 @@ export function ResponsePanel({
   onPushTempVars,
   onSaveEnvVars,
   onSaveExample,
+  zoomed,
+  onToggleZoom,
   onRefreshHistory,
   onLoadHistoryRecord,
   onClearHistory,
@@ -108,6 +115,7 @@ export function ResponsePanel({
   const [confirmClear, setConfirmClear] = useState(false)
   const [loadingRecordId, setLoadingRecordId] = useState('')
   const confirmTimer = useRef<number | undefined>(undefined)
+  const respTabsRef = useRef<HTMLDivElement | null>(null)
 
   useEffect(() => () => window.clearTimeout(confirmTimer.current), [])
   useEffect(() => setSavedExample(false), [debugResp])
@@ -175,10 +183,21 @@ export function ResponsePanel({
   }
 
   return (
-    <div className="flex-1 min-h-0 bg-canvas flex flex-col">
+    <div className="tg-accent-card flex-1 min-h-0 flex flex-col">
       {/* Response Header Tabs & Telemetry */}
-      <div className="px-3 border-b border-line bg-surface flex flex-wrap items-center justify-between gap-x-3 gap-y-1 shrink-0">
-        <div role="tablist" aria-label="响应检查器页签" className="tg-tablist gap-1 text-xs font-medium min-w-0">
+      <div className="relative z-10 px-3 py-1 border-b border-line bg-surface-subtle/60 flex flex-wrap items-center justify-between gap-x-2.5 gap-y-1 shrink-0">
+        <div
+          ref={respTabsRef}
+          role="tablist"
+          aria-label="响应检查器页签"
+          className="relative tg-tablist gap-1 text-xs font-medium min-w-0 py-0.5"
+        >
+          <LiquidCapsule
+            containerRef={respTabsRef}
+            activeId={subTab}
+            orientation="horizontal"
+            className="rounded-lg"
+          />
           {(
             [
               { id: 'body' as const, label: '响应体', count: 0 },
@@ -199,6 +218,7 @@ export function ResponsePanel({
             return (
               <button
                 key={t.id}
+                data-liq-id={t.id}
                 type="button"
                 role="tab"
                 aria-selected={selected}
@@ -206,13 +226,13 @@ export function ResponsePanel({
                   setSubTab(t.id)
                   if (t.id === 'history') void onRefreshHistory()
                 }}
-                className={`tg-tab inline-flex items-center gap-1.5 px-2.5 py-2 transition-colors ${
-                  selected ? 'text-tidal' : 'text-fg-muted hover:text-fg'
+                className={`relative z-10 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
+                  selected ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
                 }`}
               >
                 <span>{t.label}</span>
                 {t.count > 0 && (
-                  <span className="tg-tabular px-1.5 rounded-full bg-slate-100 text-fg-muted font-mono text-[10px]">
+                  <span className="tg-tabular px-1.5 rounded-full bg-sky-500/12 text-tidal font-mono text-[10px]">
                     {t.count}
                   </span>
                 )}
@@ -221,57 +241,67 @@ export function ResponsePanel({
           })}
         </div>
 
-        {step && (
-          <div className="tg-tabular flex flex-wrap items-center gap-2 text-xs py-1">
-            <span className={`px-2 py-0.5 rounded-full border font-mono font-semibold ${statusTone(step.status, step.error)}`}>
-              {step.status > 0 ? `HTTP ${step.status}` : '网络错误'}
-            </span>
-            <span className="font-mono font-semibold text-fg">{step.timing.total_ms.toFixed(2)} ms</span>
-            <span className="text-fg-subtle text-[11px] font-mono" title="接收 / 发送">
-              {formatBytes(step.bytes_received)} / {formatBytes(step.bytes_sent)}
-            </span>
-            <span
-              className={`inline-flex items-center gap-1 font-semibold ${
-                step.passed ? 'text-emerald-700' : 'text-rose-700'
-              }`}
-            >
-              {step.passed ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
-              {step.passed ? '通过' : '未通过'}
-            </span>
-            {hasTextBody && (
-              <span className="inline-flex items-center gap-1 pl-2 border-l border-line">
-                <button type="button" onClick={handleDownload} className={headerBtn} title="下载响应体">
-                  <Download className="w-3 h-3" /> 下载
-                </button>
-                {onSaveExample && (
-                  <button
-                    type="button"
-                    onClick={handleSaveExample}
-                    disabled={savedExample}
-                    className={`${headerBtn} disabled:opacity-70`}
-                    title="追加到接口文档的响应示例"
-                  >
-                    {savedExample ? (
-                      <Check className="w-3 h-3 text-emerald-600" />
-                    ) : (
-                      <BookmarkPlus className="w-3 h-3" />
-                    )}
-                    {savedExample ? '已存为示例' : '存为示例'}
-                  </button>
-                )}
+        <div className="tg-tabular flex flex-wrap items-center gap-2 text-xs py-0.5 ml-auto">
+          {step && (
+            <>
+              <span className={`px-2 py-0.5 rounded-full border font-mono font-semibold ${statusTone(step.status, step.error)}`}>
+                {step.status > 0 ? `HTTP ${step.status}` : '网络错误'}
               </span>
-            )}
-          </div>
-        )}
+              <RollingNumber
+                value={step.timing.total_ms}
+                decimals={2}
+                suffix=" ms"
+                className="font-mono font-semibold text-fg"
+              />
+              <span className="text-fg-subtle text-[11px] font-mono" title="接收 / 发送">
+                {formatBytes(step.bytes_received)} / {formatBytes(step.bytes_sent)}
+              </span>
+              <span
+                className={`inline-flex items-center gap-1 font-semibold ${
+                  step.passed ? 'text-emerald-700' : 'text-rose-700'
+                }`}
+              >
+                {step.passed ? <CheckCircle2 className="w-3.5 h-3.5" /> : <XCircle className="w-3.5 h-3.5" />}
+                {step.passed ? '通过' : '未通过'}
+              </span>
+              {hasTextBody && (
+                <span className="inline-flex items-center gap-1 pl-2 border-l border-line">
+                  <button type="button" onClick={handleDownload} className={headerBtn} title="下载响应体">
+                    <Download className="w-3 h-3" /> 下载
+                  </button>
+                  {onSaveExample && (
+                    <button
+                      type="button"
+                      onClick={handleSaveExample}
+                      disabled={savedExample}
+                      className={`${headerBtn} disabled:opacity-70`}
+                      title="追加到接口文档的响应示例"
+                    >
+                      {savedExample ? (
+                        <Check className="w-3 h-3 text-emerald-600" />
+                      ) : (
+                        <BookmarkPlus className="w-3 h-3" />
+                      )}
+                      {savedExample ? '已存为示例' : '存为示例'}
+                    </button>
+                  )}
+                </span>
+              )}
+            </>
+          )}
+          {onToggleZoom && (
+            <ModuleZoomButton expanded={Boolean(zoomed)} onToggle={onToggleZoom} />
+          )}
+        </div>
       </div>
 
       {/* Inline 5-Phase Waterfall */}
       {timing && subTab !== 'history' && (
-        <div className="px-3 py-1.5 bg-surface border-b border-line flex flex-wrap items-center gap-3 text-[11px] shrink-0">
-          <div className="flex items-center gap-1 text-fg-subtle font-medium">
-            <Clock className="w-3 h-3" /> 耗时分布
+        <div className="relative z-10 px-3 py-2 bg-surface-subtle/70 border-b border-line flex flex-wrap items-center gap-3 text-[11px] shrink-0">
+          <div className="flex items-center gap-1 text-fg-muted font-medium">
+            <Clock className="w-3 h-3 text-tidal" /> 耗时分布
           </div>
-          <div className="flex-1 min-w-[140px] h-2 rounded-full overflow-hidden bg-slate-100 flex">
+          <div className="flex-1 min-w-[140px] h-2 rounded-full overflow-hidden bg-line flex">
             {phases.map((p) =>
               p.ms > 0 ? (
                 <div
@@ -291,14 +321,14 @@ export function ResponsePanel({
               </span>
             ))}
             {timing.reused && (
-              <span className="px-1.5 rounded bg-sky-100 text-sky-800 text-[10px]">复用连接</span>
+              <span className="px-1.5 rounded bg-sky-50 border border-sky-200 text-sky-800 text-[10px]">复用连接</span>
             )}
           </div>
         </div>
       )}
 
       {/* Scrollable Inspector Content */}
-      <div className="flex-1 min-h-0 overflow-y-auto tg-scroller p-3 text-xs">
+      <div className="relative z-10 flex-1 min-h-0 overflow-y-auto tg-scroller p-3 text-xs">
         {loadingDebug ? (
           <div className="py-12 text-center">
             <div className="inline-flex items-center gap-2 px-3 py-1.5 rounded-full bg-sky-50 border border-sky-200 text-sky-800 font-medium">
@@ -361,8 +391,8 @@ export function ResponsePanel({
                             }
                           }}
                           title="回填请求并查看响应"
-                          className={`cursor-pointer focus:outline-none focus-visible:bg-sky-50 hover:bg-sky-50 ${
-                            current ? 'bg-sky-50 shadow-[inset_2px_0_0_var(--tg-tidal-600)]' : ''
+                          className={`cursor-pointer focus:outline-none focus-visible:bg-surface-hover hover:bg-surface-hover ${
+                            current ? 'bg-sky-500/10 shadow-[inset_2px_0_0_var(--tg-tidal-600)]' : ''
                           } ${loadingRecordId === rec.id ? 'opacity-60' : ''}`}
                         >
                           <td className="px-3 py-1.5 font-mono font-semibold text-fg">{rec.method}</td>
@@ -547,7 +577,7 @@ export function ResponsePanel({
                             <tr key={i}>
                               <td className="px-3 py-1.5 font-mono font-semibold text-sky-800">{ex.name}</td>
                               <td className="px-3 py-1.5 font-mono text-fg-muted">
-                                <span className="px-1 rounded bg-slate-100 text-[10px] mr-1">{ex.from}</span>
+                                <span className="px-1 rounded bg-surface-subtle border border-line text-fg-muted text-[10px] mr-1">{ex.from}</span>
                                 {ex.expr}
                               </td>
                               <td className="px-3 py-1.5">
@@ -660,7 +690,7 @@ export function ResponsePanel({
                     <div className="space-y-1 font-mono text-[11px] tg-tabular">
                       {step.redirects!.map((hop, i) => (
                         <div key={i} className="flex items-center gap-2 text-fg-muted min-w-0">
-                          <span className="px-1.5 py-0.5 rounded bg-slate-100">{hop.status}</span>
+                          <span className="px-1.5 py-0.5 rounded bg-surface-subtle border border-line text-fg-muted">{hop.status}</span>
                           <span>{hop.method}</span>
                           <span className="truncate">{hop.url}</span>
                           {hop.location && (

@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import {
   Activity,
   Bot,
@@ -11,6 +12,7 @@ import {
   Workflow,
 } from 'lucide-react'
 import type { AccountModalTab } from './AccountModal'
+import { LiquidCapsule } from './LiquidCapsule'
 import type { NavTab } from './TopBar'
 import type { AgentView, User } from '../lib/types'
 
@@ -41,6 +43,8 @@ export function SidebarRail({
   onOpenCommandPalette,
   onOpenAccountModal,
 }: Props) {
+  const navListRef = useRef<HTMLUListElement | null>(null)
+
   const navItems: Array<{
     id: NavTab
     label: string
@@ -57,7 +61,7 @@ export function SidebarRail({
   ]
 
   const linkState = wsConnected && agents.length > 0 ? 'ok' : wsConnected ? 'idle' : 'down'
-  const linkDot = linkState === 'ok' ? 'bg-emerald-400' : linkState === 'idle' ? 'bg-amber-400' : 'bg-rose-400'
+  const linkDot = linkState === 'ok' ? 'bg-emerald-500' : linkState === 'idle' ? 'bg-amber-500' : 'bg-rose-500'
   const linkTitle = linkState === 'ok' ? '遥测已连接' : linkState === 'idle' ? '遥测已连接 · 无在线节点' : '遥测重连中'
 
   const rowCls = collapsed ? 'justify-center px-0 h-9' : 'px-2.5 h-9'
@@ -65,21 +69,32 @@ export function SidebarRail({
   return (
     <aside
       aria-label="主导航"
-      className={`tg-sidebar relative shrink-0 flex flex-col border-r border-white/[0.06] select-none transition-[width] duration-200 ease-out ${
-        collapsed ? 'w-[60px]' : 'w-[204px]'
+      className={`tg-glass-card relative shrink-0 flex flex-col select-none transition-[width] duration-200 ease-out ${
+        collapsed ? 'w-[60px]' : 'w-[196px]'
       }`}
     >
       {/* Brand */}
-      <div className={`h-11 flex items-center shrink-0 border-b border-white/[0.07] ${collapsed ? 'justify-center' : 'px-3 gap-2.5'}`}>
-        <img src="/favicon.svg" alt="" className="w-7 h-7 rounded-md shrink-0 ring-1 ring-white/15" />
+      <div
+        className={`relative z-10 h-12 flex items-center shrink-0 border-b border-line ${
+          collapsed ? 'justify-center' : 'px-3 gap-2.5'
+        }`}
+      >
+        <img src="/favicon.svg" alt="" className="w-7 h-7 rounded-lg shrink-0 shadow-xs ring-1 ring-line" />
         {!collapsed && (
-          <span className="min-w-0 flex-1 truncate text-[13px] font-semibold tracking-tight text-white">Tidegate</span>
+          <span className="min-w-0 flex-1 truncate text-[13px] font-bold tracking-tight text-fg">Tidegate</span>
         )}
       </div>
 
-      {/* Primary navigation */}
-      <nav className="flex-1 min-h-0 overflow-y-auto tg-scroller-dark px-2 py-2.5">
-        <ul className="space-y-0.5">
+      {/* Primary vertical navigation with LiquidCapsule */}
+      <nav className="relative z-10 flex-1 min-h-0 overflow-y-auto tg-scroller px-2 py-2.5">
+        <ul ref={navListRef} className="relative space-y-1">
+          <LiquidCapsule
+            containerRef={navListRef}
+            activeId={activeTab}
+            orientation="vertical"
+            tone="light"
+            className="rounded-xl"
+          />
           {navItems.map((item) => {
             const Icon = item.icon
             const active = activeTab === item.id
@@ -87,43 +102,38 @@ export function SidebarRail({
               <li key={item.id}>
                 <button
                   type="button"
+                  data-liq-id={item.id}
                   onClick={() => onChangeTab(item.id)}
                   title={collapsed ? item.label : undefined}
                   aria-label={collapsed ? item.label : undefined}
                   aria-current={active ? 'page' : undefined}
-                  className={`group relative w-full flex items-center gap-2.5 rounded-md text-[13px] transition-colors focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-sky-400 ${rowCls} ${
-                    active
-                      ? 'bg-gradient-to-r from-sky-400/[0.18] to-sky-400/[0.04] text-white font-semibold'
-                      : 'text-slate-300 hover:bg-white/[0.06] hover:text-white'
+                  className={`group relative z-10 w-full flex items-center gap-2.5 rounded-xl text-[13px] transition-colors focus-visible:outline-2 focus-visible:outline-offset-[-2px] focus-visible:outline-sky-500 ${rowCls} ${
+                    active ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
-                  <span
-                    aria-hidden="true"
-                    className={`absolute left-0 top-2 bottom-2 w-[3px] rounded-r-full bg-sky-400 shadow-[0_0_10px_2px_rgb(56_189_248/0.55)] transition-opacity ${
-                      active ? 'opacity-100' : 'opacity-0'
-                    }`}
-                  />
                   <Icon
-                    className={`w-4 h-4 shrink-0 transition-colors ${active ? 'text-sky-300' : 'text-slate-400 group-hover:text-slate-200'}`}
+                    className={`w-4 h-4 shrink-0 transition-colors ${
+                      active ? 'text-tidal' : 'text-fg-subtle group-hover:text-fg'
+                    }`}
                   />
                   {!collapsed && <span className="min-w-0 flex-1 truncate text-left">{item.label}</span>}
                   {!collapsed && item.pulse && (
-                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-400/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-300">
-                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
+                    <span className="inline-flex items-center gap-1 rounded-full bg-emerald-500/15 px-1.5 py-0.5 text-[10px] font-semibold text-emerald-700">
+                      <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse" />
                       运行
                     </span>
                   )}
                   {!collapsed && !item.pulse && item.badge && (
                     <span
-                      className={`tg-tabular min-w-5 rounded px-1 py-px text-center font-mono text-[10px] ${
-                        active ? 'bg-sky-400/20 text-sky-100' : 'bg-white/[0.07] text-slate-300'
+                      className={`tg-tabular min-w-5 rounded-md px-1 py-px text-center font-mono text-[10px] ${
+                        active ? 'bg-sky-500/15 text-tidal' : 'bg-surface-subtle text-fg-muted border border-line'
                       }`}
                     >
                       {item.badge}
                     </span>
                   )}
                   {collapsed && item.pulse && (
-                    <span aria-hidden="true" className="absolute top-1.5 right-2 h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                    <span aria-hidden="true" className="absolute top-1.5 right-2 h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
                   )}
                 </button>
               </li>
@@ -133,21 +143,19 @@ export function SidebarRail({
       </nav>
 
       {/* Utilities */}
-      <div className="shrink-0 border-t border-white/[0.07] px-2 py-2 space-y-0.5">
+      <div className="relative z-10 shrink-0 border-t border-line px-2 py-2 space-y-0.5">
         <button
           type="button"
           onClick={onOpenCommandPalette}
           title={collapsed ? '检索 Ctrl+K' : undefined}
           aria-label="检索"
-          className={`w-full flex items-center gap-2.5 rounded-md text-[13px] text-slate-300 hover:bg-white/[0.06] hover:text-white transition-colors ${rowCls}`}
+          className={`w-full flex items-center gap-2.5 rounded-xl text-[13px] text-fg-muted hover:bg-surface-hover hover:text-fg transition-colors ${rowCls}`}
         >
-          <Search className="w-4 h-4 shrink-0 text-slate-400" />
+          <Search className="w-4 h-4 shrink-0 text-fg-subtle" />
           {!collapsed && (
             <>
               <span className="min-w-0 flex-1 truncate text-left">检索</span>
-              <kbd className="shrink-0 rounded border border-white/15 bg-black/25 px-1 py-px font-mono text-[10px] text-slate-400">
-                Ctrl K
-              </kbd>
+              <kbd className="tg-kbd font-mono">Ctrl K</kbd>
             </>
           )}
         </button>
@@ -157,9 +165,9 @@ export function SidebarRail({
           onClick={() => onOpenAccountModal('mcp')}
           title={collapsed ? 'MCP' : undefined}
           aria-label="MCP 接入"
-          className={`w-full flex items-center gap-2.5 rounded-md text-[13px] text-slate-300 hover:bg-white/[0.06] hover:text-white transition-colors ${rowCls}`}
+          className={`w-full flex items-center gap-2.5 rounded-xl text-[13px] text-fg-muted hover:bg-surface-hover hover:text-fg transition-colors ${rowCls}`}
         >
-          <Bot className="w-4 h-4 shrink-0 text-cyan-300" />
+          <Bot className="w-4 h-4 shrink-0 text-tidal" />
           {!collapsed && <span className="min-w-0 flex-1 truncate text-left">MCP</span>}
         </button>
 
@@ -168,23 +176,23 @@ export function SidebarRail({
           onClick={() => onOpenAccountModal('sessions')}
           title={`${user.username} · ${ROLE_LABEL[user.role] || user.role} · ${linkTitle}`}
           aria-label="账户"
-          className={`w-full flex items-center gap-2.5 rounded-md text-[13px] hover:bg-white/[0.06] transition-colors ${
+          className={`w-full flex items-center gap-2.5 rounded-xl text-[13px] hover:bg-surface-hover transition-colors ${
             collapsed ? 'justify-center h-10' : 'px-2 h-11'
           }`}
         >
           <span className="relative shrink-0">
-            <span className="flex h-7 w-7 items-center justify-center rounded-md bg-gradient-to-br from-sky-500/40 to-cyan-400/20 text-[12px] font-semibold uppercase text-white ring-1 ring-white/15">
+            <span className="flex h-7 w-7 items-center justify-center rounded-lg bg-gradient-to-br from-sky-500 to-sky-700 text-[12px] font-semibold uppercase text-white shadow-xs">
               {user.username.slice(0, 1)}
             </span>
             <span
               aria-hidden="true"
-              className={`absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-[#08203b] ${linkDot}`}
+              className={`absolute -right-0.5 -bottom-0.5 h-2.5 w-2.5 rounded-full ring-2 ring-surface ${linkDot}`}
             />
           </span>
           {!collapsed && (
             <span className="min-w-0 flex-1 text-left leading-tight">
-              <span className="block truncate font-medium text-white">{user.username}</span>
-              <span className="block truncate text-[11px] text-slate-400">{ROLE_LABEL[user.role] || user.role}</span>
+              <span className="block truncate font-semibold text-fg">{user.username}</span>
+              <span className="block truncate text-[11px] text-fg-subtle">{ROLE_LABEL[user.role] || user.role}</span>
             </span>
           )}
         </button>
@@ -195,7 +203,7 @@ export function SidebarRail({
           aria-label={collapsed ? '展开侧栏' : '收起侧栏'}
           title={collapsed ? '展开侧栏' : '收起侧栏'}
           aria-expanded={!collapsed}
-          className={`w-full flex items-center gap-2.5 rounded-md text-[12px] text-slate-500 hover:bg-white/[0.06] hover:text-slate-200 transition-colors ${
+          className={`w-full flex items-center gap-2.5 rounded-xl text-[12px] text-fg-subtle hover:bg-surface-hover hover:text-fg transition-colors ${
             collapsed ? 'justify-center h-8' : 'px-2.5 h-8'
           }`}
         >

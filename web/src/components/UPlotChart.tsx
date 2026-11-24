@@ -176,7 +176,7 @@ export function UPlotChart({ title, series, data, height = 220, yUnit = '', aler
   const pointCount = data[0]?.length || 0
 
   return (
-    <figure className="bg-surface rounded-xl border border-line p-3.5 shadow-xs m-0">
+    <figure className="tg-glass-card tg-tilt-card p-3.5 m-0">
       <figcaption className="flex items-center justify-between gap-2 mb-2 min-w-0">
         <h3 className="text-xs font-semibold text-fg truncate">{title}</h3>
         <span className="text-[11px] font-mono text-fg-subtle tg-tabular shrink-0">{pointCount} 点</span>

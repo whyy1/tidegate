@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import type uPlot from 'uplot'
 import { Download, Eye, FileSpreadsheet, GitCompare, ImageDown, RefreshCw, Search, Trash2, X } from 'lucide-react'
+import { DropletFilter, RollingNumber } from '../components/DropletFilter'
 import { UPlotChart } from '../components/UPlotChart'
 import { api, APIError } from '../lib/api'
 import { downloadText, fileStamp, toCSV } from '../lib/download'
@@ -44,6 +45,7 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
   const [runs, setRuns] = useState<Run[]>([])
   const [loading, setLoading] = useState(false)
   const [query, setQuery] = useState('')
+  const [statusFilter, setStatusFilter] = useState<'all' | 'finished' | 'active' | 'failed'>('all')
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [baselineId, setBaselineId] = useState('')
   const [comparing, setComparing] = useState(false)
@@ -74,6 +76,7 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
     setBaselineId('')
     setCmpResult(null)
     setQuery('')
+    setStatusFilter('all')
     void loadRuns()
   }, [projectId])
 
@@ -91,9 +94,14 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
 
   const filteredRuns = useMemo(() => {
     const q = query.trim().toLowerCase()
-    if (!q) return runs
-    return runs.filter((r) => (r.scenario_name || '').toLowerCase().includes(q) || r.id.toLowerCase().includes(q))
-  }, [runs, query])
+    return runs.filter((r) => {
+      if (statusFilter === 'finished' && r.status !== 'finished') return false
+      if (statusFilter === 'failed' && r.status !== 'failed') return false
+      if (statusFilter === 'active' && !isActiveRun(r)) return false
+      if (!q) return true
+      return (r.scenario_name || '').toLowerCase().includes(q) || r.id.toLowerCase().includes(q)
+    })
+  }, [runs, query, statusFilter])
 
   const effectiveBase = baselineId && selectedIds.includes(baselineId) ? baselineId : selectedIds[0] || ''
   const canCompare = selectedIds.length >= 2 && selectedIds.length <= MAX_COMPARE
@@ -290,49 +298,68 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
     'inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-line-strong bg-surface hover:bg-surface-hover text-fg disabled:opacity-45'
 
   return (
-    <div className="flex-1 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-5 space-y-5 text-xs tg-tabular">
-      <div className="bg-surface rounded-xl border border-line overflow-hidden shadow-xs">
-        <div className="tg-telemetry-strip px-4 py-3 flex flex-wrap items-center justify-between gap-2">
-          <h2 className="text-sm font-semibold text-white">压测记录</h2>
-          <div className="flex flex-wrap items-center gap-2">
-            {canCompare && (
-              <select
-                name="baseline_run"
-                aria-label="选择基线压测记录"
-                value={effectiveBase}
-                onChange={(e) => setBaselineId(e.target.value)}
-                className="px-2.5 py-1.5 border border-white/20 rounded-md bg-white/10 text-white [&>option]:bg-slate-900 [&>option]:text-slate-100"
-              >
-                {selectedIds.map((id) => {
-                  const r = runs.find((x) => x.id === id)
-                  return (
-                    <option key={id} value={id}>
-                      基线：{r?.scenario_name || id} ({id.slice(-5)})
-                    </option>
-                  )
-                })}
-              </select>
-            )}
-            <button
-              type="button"
-              disabled={comparing || !canCompare}
-              onClick={() => compareKey && void runCompare(compareKey.split(','))}
-              title={selectedIds.length > MAX_COMPARE ? `对比最多 ${MAX_COMPARE} 条` : '勾选 2~6 条自动对比'}
-              className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-md bg-sky-500 hover:bg-sky-400 text-slate-950 font-semibold disabled:opacity-45 disabled:hover:bg-sky-500"
-            >
-              <GitCompare className={`w-3.5 h-3.5 ${comparing ? 'animate-pulse' : ''}`} />
-              {comparing ? '对比中' : `对比 ${Math.min(selectedIds.length, 99)}/${MAX_COMPARE}`}
-            </button>
-            <button
-              type="button"
-              onClick={() => void loadRuns()}
-              className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-white/20 bg-white/10 hover:bg-white/20 text-white"
-            >
-              <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> 刷新
-            </button>
-          </div>
+    <div className="flex-1 overflow-y-auto tg-scroller bg-transparent p-2.5 pb-[72px] space-y-3 text-xs tg-tabular">
+      <div className="tg-accent-card !overflow-visible px-4 py-3 flex flex-wrap items-center justify-between gap-2 relative z-20">
+        <div className="flex flex-wrap items-center gap-2.5">
+          <h2 className="text-sm font-semibold text-fg">压测记录</h2>
+          <DropletFilter
+            size="sm"
+            ariaLabel="按运行状态筛选"
+            value={statusFilter}
+            onChange={(v) => setStatusFilter(v as typeof statusFilter)}
+            options={[
+              { value: 'all', label: '全部', dotClass: 'bg-sky-400' },
+              { value: 'finished', label: '已完成', dotClass: 'bg-emerald-400' },
+              { value: 'active', label: '运行中', dotClass: 'bg-amber-400' },
+              { value: 'failed', label: '失败', dotClass: 'bg-rose-400' },
+            ]}
+          />
+          <RollingNumber
+            value={filteredRuns.length}
+            suffix=" 条"
+            className="text-[11px] font-mono text-fg-subtle"
+          />
         </div>
+        <div className="flex flex-wrap items-center gap-2">
+          {canCompare && (
+            <select
+              name="baseline_run"
+              aria-label="选择基线压测记录"
+              value={effectiveBase}
+              onChange={(e) => setBaselineId(e.target.value)}
+              className="px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg [&>option]:bg-surface [&>option]:text-fg"
+            >
+              {selectedIds.map((id) => {
+                const r = runs.find((x) => x.id === id)
+                return (
+                  <option key={id} value={id}>
+                    基线：{r?.scenario_name || id} ({id.slice(-5)})
+                  </option>
+                )
+              })}
+            </select>
+          )}
+          <button
+            type="button"
+            disabled={comparing || !canCompare}
+            onClick={() => compareKey && void runCompare(compareKey.split(','))}
+            title={selectedIds.length > MAX_COMPARE ? `对比最多 ${MAX_COMPARE} 条` : '勾选 2~6 条自动对比'}
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-primary hover:bg-primary-hover text-white font-semibold disabled:opacity-45"
+          >
+            <GitCompare className={`w-3.5 h-3.5 ${comparing ? 'animate-pulse' : ''}`} />
+            {comparing ? '对比中' : `对比 ${Math.min(selectedIds.length, 99)}/${MAX_COMPARE}`}
+          </button>
+          <button
+            type="button"
+            onClick={() => void loadRuns()}
+            className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> 刷新
+          </button>
+        </div>
+      </div>
 
+      <div className="tg-glass-card overflow-hidden">
         <div className="p-4 space-y-3">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <search className="relative flex-1 min-w-[14rem] max-w-md">
@@ -429,15 +456,15 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
                     <th className="px-3 py-2 text-right">导出与操作</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="divide-y divide-line">
                   {filteredRuns.map((r) => {
                     const checked = selectedIds.includes(r.id)
                     const active = isActiveRun(r)
                     const isBase = checked && canCompare && r.id === effectiveBase
-                    const st = STATUS_META[r.status] || { label: r.status, cls: 'bg-slate-100 text-slate-700' }
+                    const st = STATUS_META[r.status] || { label: r.status, cls: 'bg-surface-subtle text-fg-muted' }
                     const tps = iterationsPerSecond(r.summary)
                     return (
-                      <tr key={r.id} className={checked ? 'bg-sky-50/70' : 'hover:bg-surface-hover'}>
+                      <tr key={r.id} className={checked ? 'bg-sky-500/10' : 'hover:bg-surface-hover'}>
                         <td className="px-3 py-2 text-center">
                           <input
                             type="checkbox"
@@ -560,8 +587,8 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
 
       {/* Comparison Results */}
       {cmpResult && (
-        <div ref={resultRef} className={`space-y-4 transition-opacity ${comparing ? 'opacity-60' : ''}`}>
-          <div className="bg-surface rounded-xl border border-line p-4 shadow-xs space-y-3">
+        <div ref={resultRef} className={`space-y-3 transition-opacity ${comparing ? 'opacity-60' : ''}`}>
+          <div className="tg-glass-card p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="text-sm font-semibold text-fg">关键指标对比</h3>
               <div className="flex flex-wrap items-center gap-1.5">
@@ -587,9 +614,9 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
                     <th className="px-3 py-2 w-24" />
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100">
+                <tbody className="divide-y divide-line">
                   {cmpResult.runs.map((item, idx) => (
-                    <tr key={item.run.id} className={idx === 0 ? 'bg-sky-50/50' : 'hover:bg-surface-hover'}>
+                    <tr key={item.run.id} className={idx === 0 ? 'bg-sky-500/8' : 'hover:bg-surface-hover'}>
                       <td className="px-3 py-2">
                         <div className="font-semibold text-fg flex items-center gap-1.5">
                           <span
@@ -655,7 +682,7 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
           {cmpResult.runs.some(
             (item, idx) => idx > 0 && item.delta?.step_deltas && Object.keys(item.delta.step_deltas).length > 0,
           ) && (
-            <div className="bg-surface rounded-xl border border-line p-4 shadow-xs space-y-3">
+            <div className="tg-glass-card p-4 space-y-3">
               <h3 className="text-sm font-semibold text-fg">分步骤回归明细</h3>
               <div className="overflow-x-auto border border-line rounded-lg">
                 <table className="w-full text-left border-collapse">
@@ -670,7 +697,7 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
                       <th className="px-3 py-2 text-right">错误率差值</th>
                     </tr>
                   </thead>
-                  <tbody className="divide-y divide-slate-100">
+                  <tbody className="divide-y divide-line">
                     {cmpResult.runs.slice(1).flatMap((item, runIdx) =>
                       Object.entries(item.delta?.step_deltas || {}).map(([stepKey, sd]) => (
                         <tr key={`${item.run.id}-${stepKey}`}>

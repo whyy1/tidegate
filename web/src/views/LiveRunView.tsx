@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type uPlot from 'uplot'
 import {
   Activity,
@@ -23,10 +23,14 @@ import {
   X,
   XCircle,
 } from 'lucide-react'
+import { DropletFilter, RollingNumber } from '../components/DropletFilter'
+import { LiquidCapsule } from '../components/LiquidCapsule'
 import { LoadConfigEditor } from '../components/LoadConfigEditor'
+import { BottomModuleStrip, ModuleZoomButton } from '../components/ModuleStage'
 import { UPlotChart, type AlertWindow } from '../components/UPlotChart'
 import { api, APIError, type StartRunPayload } from '../lib/api'
 import { copyText } from '../lib/download'
+import { flipFromRect } from '../lib/glassPhysics'
 import { exportRunReportPng, iterationsPerSecond } from '../lib/reportPng'
 import type {
   API,
@@ -214,8 +218,43 @@ export function LiveRunView({
   const [exportingPng, setExportingPng] = useState(false)
   const [moreOpen, setMoreOpen] = useState(false)
   const [copiedSampleId, setCopiedSampleId] = useState<number | null>(null)
+  const [zoomedMod, setZoomedMod] = useState<'' | 'launcher' | 'telemetry' | 'charts' | 'inspector'>('')
+  const launcherRef = useRef<HTMLDivElement>(null)
+  const telemetryRef = useRef<HTMLDivElement>(null)
   const chartsRef = useRef<HTMLDivElement>(null)
+  const inspectorRef = useRef<HTMLDivElement>(null)
+  const detailTabsRef = useRef<HTMLDivElement>(null)
   const moreRef = useRef<HTMLDivElement>(null)
+
+  const modRefFor = (id: 'launcher' | 'telemetry' | 'charts' | 'inspector') => {
+    if (id === 'launcher') return launcherRef.current
+    if (id === 'telemetry') return telemetryRef.current
+    if (id === 'charts') return chartsRef.current
+    return inspectorRef.current
+  }
+
+  const toggleZoomMod = (id: 'launcher' | 'telemetry' | 'charts' | 'inspector', el?: HTMLElement | null) => {
+    const rect = (el ?? modRefFor(id))?.getBoundingClientRect() ?? null
+    setZoomedMod((cur) => {
+      const next = cur === id ? '' : id
+      if (next === 'launcher') setShowLauncher(true)
+      requestAnimationFrame(() => flipFromRect(modRefFor(id), rect))
+      return next
+    })
+  }
+
+  useEffect(() => {
+    if (!zoomedMod) return
+    if (!run && zoomedMod !== 'launcher') {
+      setZoomedMod('')
+      return
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setZoomedMod('')
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [zoomedMod, run])
 
   useEffect(() => {
     if (!confirmAbort) return
@@ -655,28 +694,47 @@ export function LiveRunView({
   const filteredSamples = samples.filter((s) => sampleFilter === 'all' || s.kind === sampleFilter)
 
   return (
-    <div className="flex-1 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-4 space-y-4 text-xs tg-tabular">
+    <div
+      className={`flex-1 overflow-y-auto tg-scroller bg-transparent p-2.5 space-y-3 text-xs tg-tabular ${
+        zoomedMod ? 'pb-[124px]' : 'pb-[72px]'
+      }`}
+    >
       {/* Top Launcher Card */}
-      <div className="bg-surface rounded-xl border border-slate-200 shadow-xs overflow-hidden">
+      <div
+        ref={launcherRef}
+        className={`tg-glass-card ${zoomedMod && zoomedMod !== 'launcher' ? 'hidden' : ''}`}
+      >
         <div
           onClick={() => setShowLauncher((v) => !v)}
-          className="px-4 py-2.5 tg-telemetry-strip flex items-center justify-between cursor-pointer"
+          className="px-4 py-2.5 border-b border-line bg-surface-subtle/60 flex items-center justify-between gap-2 cursor-pointer"
         >
-          <span className="font-semibold text-sm text-white flex items-center gap-2">
-            <Play className="w-4 h-4 text-[#38BDF8]" /> 发起新压测与开压容量预估
+          <span className="font-semibold text-sm text-fg flex items-center gap-2">
+            <Play className="w-4 h-4 text-tidal" /> 发起新压测与开压容量预估
           </span>
-          <span className="text-sky-300 font-medium">{showLauncher ? '收起配置' : '展开发起新压测'}</span>
+          <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+            <button
+              type="button"
+              onClick={() => setShowLauncher((v) => !v)}
+              className="text-tidal font-medium hover:underline"
+            >
+              {showLauncher ? '收起配置' : '展开发起新压测'}
+            </button>
+            <ModuleZoomButton
+              expanded={zoomedMod === 'launcher'}
+              onToggle={() => toggleZoomMod('launcher', launcherRef.current)}
+            />
+          </div>
         </div>
 
         {showLauncher && (
           <div className="p-4 space-y-4">
             <div className="flex flex-wrap items-center gap-3">
-              <div className="inline-flex rounded-md border border-slate-200 p-0.5 bg-slate-50">
+              <div className="inline-flex rounded-xl border border-line p-0.5 bg-surface-subtle">
                 <button
                   type="button"
                   onClick={() => setSourceType('scenario')}
-                  className={`px-3 py-1 rounded font-medium ${
-                    sourceType === 'scenario' ? 'bg-surface shadow-xs text-sky-700' : 'text-slate-600'
+                  className={`px-3 py-1 rounded-lg font-medium ${
+                    sourceType === 'scenario' ? 'bg-surface shadow-xs text-tidal' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   压测场景
@@ -694,8 +752,8 @@ export function LiveRunView({
                       )
                     }
                   }}
-                  className={`px-3 py-1 rounded font-medium ${
-                    sourceType === 'mix' ? 'bg-surface shadow-xs text-sky-700' : 'text-slate-600'
+                  className={`px-3 py-1 rounded-lg font-medium ${
+                    sourceType === 'mix' ? 'bg-surface shadow-xs text-tidal' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   多场景混合 (Mix)
@@ -703,8 +761,8 @@ export function LiveRunView({
                 <button
                   type="button"
                   onClick={() => setSourceType('api')}
-                  className={`px-3 py-1 rounded font-medium ${
-                    sourceType === 'api' ? 'bg-surface shadow-xs text-sky-700' : 'text-slate-600'
+                  className={`px-3 py-1 rounded-lg font-medium ${
+                    sourceType === 'api' ? 'bg-surface shadow-xs text-tidal' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   单接口快速压测
@@ -713,8 +771,8 @@ export function LiveRunView({
                   <button
                     type="button"
                     onClick={() => setSourceType('draft')}
-                    className={`px-3 py-1 rounded font-medium ${
-                      sourceType === 'draft' ? 'bg-amber-100 shadow-xs text-amber-900' : 'text-slate-600'
+                    className={`px-3 py-1 rounded-lg font-medium ${
+                      sourceType === 'draft' ? 'bg-amber-100 shadow-xs text-amber-900' : 'text-fg-muted hover:text-fg'
                     }`}
                   >
                     工作台草稿：{preloadedAPI.name || '当前请求'}
@@ -726,7 +784,7 @@ export function LiveRunView({
                 <select
                   value={selectedScenarioId}
                   onChange={(e) => setSelectedScenarioId(e.target.value)}
-                  className="px-2.5 py-1.5 border border-slate-300 rounded-md bg-surface min-w-[200px]"
+                  className="px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg min-w-[200px]"
                 >
                   <option value="">选择场景...</option>
                   {scenarios.map((sc) => (
@@ -741,7 +799,7 @@ export function LiveRunView({
                 <select
                   value={selectedApiId}
                   onChange={(e) => setSelectedApiId(e.target.value)}
-                  className="px-2.5 py-1.5 border border-slate-300 rounded-md bg-surface min-w-[220px]"
+                  className="px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg min-w-[220px]"
                 >
                   <option value="">选择接口...</option>
                   {apis.map((a) => (
@@ -755,7 +813,7 @@ export function LiveRunView({
               <select
                 value={envOverrideId}
                 onChange={(e) => setEnvOverrideId(e.target.value)}
-                className="px-2.5 py-1.5 border border-slate-300 rounded-md bg-surface"
+                className="px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg"
               >
                 <option value="">环境：使用默认 / 无环境</option>
                 {environments.map((env) => (
@@ -766,7 +824,7 @@ export function LiveRunView({
               </select>
 
               {(sourceType === 'scenario' || sourceType === 'mix') && (
-                <label className="inline-flex items-center gap-1.5 text-slate-700 cursor-pointer">
+                <label className="inline-flex items-center gap-1.5 text-fg-muted cursor-pointer">
                   <input
                     type="checkbox"
                     checked={overrideScenarioLoad}
@@ -778,9 +836,9 @@ export function LiveRunView({
             </div>
 
             {sourceType === 'mix' && (
-              <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 space-y-2">
+              <div className="rounded-xl border border-line bg-surface-subtle p-3 space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="font-semibold text-slate-800">多场景按权重加权并发编排</span>
+                  <span className="font-semibold text-fg">多场景按权重加权并发编排</span>
                   <button
                     type="button"
                     onClick={() =>
@@ -789,13 +847,13 @@ export function LiveRunView({
                         { scenario_id: scenarios[0]?.id || '', weight: 20 },
                       ])
                     }
-                    className="text-sky-700 hover:underline font-medium"
+                    className="text-tidal hover:underline font-medium"
                   >
                     + 添加混合场景
                   </button>
                 </div>
                 {mixItems.length === 0 ? (
-                  <p className="text-slate-400">当前项目暂无场景，请先在「场景与数据」创建压测场景。</p>
+                  <p className="text-fg-subtle">当前项目暂无场景，请先在「场景与数据」创建压测场景。</p>
                 ) : (
                   (() => {
                     const totalW = mixItems.reduce((acc, x) => acc + Math.max(0, x.weight || 0), 0) || 1
@@ -810,7 +868,7 @@ export function LiveRunView({
                                   prev.map((row, j) => (j === idx ? { ...row, scenario_id: e.target.value } : row))
                                 )
                               }
-                              className="col-span-6 px-2 py-1 border border-slate-300 rounded bg-surface"
+                              className="col-span-6 px-2 py-1 border border-line-strong rounded bg-surface text-fg"
                             >
                               <option value="">选择场景...</option>
                               {scenarios.map((sc) => (
@@ -820,7 +878,7 @@ export function LiveRunView({
                               ))}
                             </select>
                             <div className="col-span-3 flex items-center gap-1">
-                              <span className="text-slate-500">权重</span>
+                              <span className="text-fg-subtle">权重</span>
                               <input
                                 type="number"
                                 min={0.1}
@@ -833,10 +891,10 @@ export function LiveRunView({
                                     )
                                   )
                                 }
-                                className="w-full px-2 py-1 border border-slate-300 rounded font-mono bg-surface"
+                                className="w-full px-2 py-1 border border-line-strong rounded font-mono bg-surface text-fg"
                               />
                             </div>
-                            <span className="col-span-2 font-mono text-slate-600">
+                            <span className="col-span-2 font-mono text-fg-muted">
                               占比 {(((it.weight || 0) / totalW) * 100).toFixed(1)}%
                             </span>
                             <button
@@ -844,7 +902,7 @@ export function LiveRunView({
                               aria-label="移除该场景"
                               title="移除"
                               onClick={() => setMixItems((prev) => prev.filter((_, j) => j !== idx))}
-                              className="col-span-1 justify-self-end p-1 rounded text-slate-400 hover:text-rose-600 hover:bg-rose-50"
+                              className="col-span-1 justify-self-end p-1 rounded text-fg-subtle hover:text-rose-600 hover:bg-rose-50"
                             >
                               <X className="w-3.5 h-3.5" />
                             </button>
@@ -858,9 +916,9 @@ export function LiveRunView({
             )}
 
             {/* Distributed Scheduling & Failover */}
-            <div className="rounded-lg border border-slate-200 bg-slate-50/70 p-3 grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div className="rounded-xl border border-line bg-surface-subtle p-3 grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
-                <label htmlFor="run-node-selector" className="block font-medium text-slate-700 mb-1">
+                <label htmlFor="run-node-selector" className="block font-medium text-fg-muted mb-1">
                   节点标签筛选
                 </label>
                 <input
@@ -873,7 +931,7 @@ export function LiveRunView({
                   value={nodeSelectorText}
                   onChange={(e) => setNodeSelectorText(e.target.value)}
                   placeholder="全部在线节点 · zone=cn-east, tier=perf"
-                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-surface font-mono"
+                  className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface text-fg font-mono"
                 />
                 {(() => {
                   const pairs = new Set<string>()
@@ -886,7 +944,7 @@ export function LiveRunView({
                   if (list.length === 0) return null
                   return (
                     <div className="flex flex-wrap gap-1 mt-1.5">
-                      <span className="text-[10px] text-slate-500">当前节点可用标签：</span>
+                      <span className="text-[10px] text-fg-subtle">当前节点可用标签：</span>
                       {list.map((kv) => (
                         <button
                           key={kv}
@@ -901,7 +959,7 @@ export function LiveRunView({
                               return [...parts, kv].join(', ')
                             })
                           }
-                          className="px-1.5 py-0.5 rounded bg-surface border border-slate-300 hover:border-sky-400 font-mono text-[10px] text-slate-700"
+                          className="px-1.5 py-0.5 rounded bg-surface border border-line-strong hover:border-sky-400 font-mono text-[10px] text-fg-muted"
                         >
                           +{kv}
                         </button>
@@ -911,13 +969,13 @@ export function LiveRunView({
                 })()}
               </div>
               <div>
-                <label htmlFor="run-node-failure" className="block font-medium text-slate-700 mb-1">节点掉线策略</label>
+                <label htmlFor="run-node-failure" className="block font-medium text-fg-muted mb-1">节点掉线策略</label>
                 <select
                   id="run-node-failure"
                   name="node_failure_policy"
                   value={nodeFailurePolicy}
                   onChange={(e) => setNodeFailurePolicy(e.target.value as 'redistribute' | 'abort')}
-                  className="w-full px-2.5 py-1.5 border border-slate-300 rounded bg-surface"
+                  className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface text-fg"
                 >
                   <option value="redistribute">自动重平衡到剩余节点</option>
                   <option value="abort">任一节点掉线即中止</option>
@@ -930,31 +988,31 @@ export function LiveRunView({
             )}
 
             {estimate && (
-              <div className="rounded-lg border border-sky-200 bg-sky-50/60 p-3 space-y-2">
+              <div className="rounded-xl border border-sky-200 bg-sky-50/60 dark:bg-sky-950/30 dark:border-sky-800/40 p-3 space-y-2">
                 <div className="grid grid-cols-2 sm:grid-cols-5 gap-2 font-mono">
                   <div>
-                    <div className="text-[11px] text-slate-500">预估峰值 QPS / RPS</div>
-                    <div className="font-bold text-slate-900">{estimate.estimated_peak_rps} req/s</div>
+                    <div className="text-[11px] text-fg-subtle">预估峰值 QPS / RPS</div>
+                    <div className="font-bold text-fg">{estimate.estimated_peak_rps} req/s</div>
                   </div>
                   <div>
-                    <div className="text-[11px] text-slate-500">单请求估算体积</div>
-                    <div className="font-bold text-slate-900">{estimate.avg_request_bytes} B</div>
+                    <div className="text-[11px] text-fg-subtle">单请求估算体积</div>
+                    <div className="font-bold text-fg">{estimate.avg_request_bytes} B</div>
                   </div>
                   <div>
-                    <div className="text-[11px] text-slate-500">预估上行带宽</div>
-                    <div className="font-bold text-sky-800">{(estimate.estimated_uplink_bps / 1e6).toFixed(2)} Mbps</div>
+                    <div className="text-[11px] text-fg-subtle">预估上行带宽</div>
+                    <div className="font-bold text-tidal">{(estimate.estimated_uplink_bps / 1e6).toFixed(2)} Mbps</div>
                   </div>
                   <div>
-                    <div className="text-[11px] text-slate-500">集群可用上限</div>
-                    <div className="font-bold text-slate-900">
+                    <div className="text-[11px] text-fg-subtle">集群可用上限</div>
+                    <div className="font-bold text-fg">
                       {estimate.available_uplink_bps > 0
                         ? `${(estimate.available_uplink_bps / 1e6).toFixed(1)} Mbps`
                         : '未检测/未设置'}
                     </div>
                   </div>
                   <div>
-                    <div className="text-[11px] text-slate-500">在线节点 / 总核数</div>
-                    <div className="font-bold text-slate-900">
+                    <div className="text-[11px] text-fg-subtle">在线节点 / 总核数</div>
+                    <div className="font-bold text-fg">
                       {estimate.online_agents} 节点 / {estimate.total_cpu_cores} 核
                     </div>
                   </div>
@@ -976,9 +1034,9 @@ export function LiveRunView({
                 type="button"
                 disabled={estimating}
                 onClick={() => void handleEstimate()}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-slate-300 bg-surface hover:bg-slate-50 text-slate-700 font-medium disabled:opacity-50"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted font-medium disabled:opacity-50"
               >
-                <Gauge className="w-3.5 h-3.5 text-sky-600" />
+                <Gauge className="w-3.5 h-3.5 text-tidal" />
                 {estimating ? '计算中...' : '开压前带宽预估'}
               </button>
               <button
@@ -997,348 +1055,413 @@ export function LiveRunView({
 
       {/* Active / Inspected Run Dashboard */}
       {run && (
-        <div className="space-y-4">
-          <div className="bg-surface rounded-xl border border-line p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
-            <div className="space-y-0.5 min-w-0">
-              <div className="flex items-center gap-2 min-w-0">
-                <h2 className="text-base font-bold text-fg truncate">{run.scenario_name}</h2>
-                <span className={`shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold ${statusBadge(run.status).cls}`}>
-                  {statusBadge(run.status).text}
-                </span>
-                {loadMode && (
-                  <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium border border-line text-fg-muted">
-                    {loadMode === 'rate' ? 'QPS 模式' : 'VU 模式'}
+        <div className="space-y-3">
+          {/* Tonal Sky-Frosted Accent Card: Run Header + Alerts + 6-KPI Summary */}
+          <div
+            ref={telemetryRef}
+            className={`tg-accent-card !overflow-visible p-4 space-y-3.5 ${
+              zoomedMod && zoomedMod !== 'telemetry' ? 'hidden' : ''
+            }`}
+          >
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <div className="space-y-0.5 min-w-0">
+                <div className="flex items-center gap-2 min-w-0">
+                  <h2 className="text-base font-bold text-fg truncate">{run.scenario_name}</h2>
+                  <span className={`shrink-0 px-2 py-0.5 rounded-full text-[11px] font-semibold ${statusBadge(run.status).cls}`}>
+                    {statusBadge(run.status).text}
                   </span>
-                )}
+                  {loadMode && (
+                    <span className="shrink-0 px-2 py-0.5 rounded-full text-[11px] font-medium border border-line-strong bg-surface-subtle text-fg-muted">
+                      {loadMode === 'rate' ? 'QPS 模式' : 'VU 模式'}
+                    </span>
+                  )}
+                </div>
+                <div className="text-[11px] font-mono tg-tabular text-fg-subtle">
+                  Run ID: {run.id} · 创建于 {new Date(run.created_at).toLocaleString()}
+                  {run.error && <span className="text-rose-700 ml-2">· {run.error}</span>}
+                </div>
               </div>
-              <div className="text-[11px] font-mono tg-tabular text-fg-subtle">
-                Run ID: {run.id} · 创建于 {new Date(run.created_at).toLocaleString()}
-                {run.error && <span className="text-rose-700 ml-2">· {run.error}</span>}
-              </div>
-            </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              {isActive && (
-                <>
-                  <form
-                    onSubmit={(e) => {
-                      e.preventDefault()
-                      void handleSetTarget(Number(targetInput))
-                    }}
-                    className="flex items-center gap-1 bg-surface-subtle p-1 rounded-lg border border-line"
-                  >
-                    <span className="text-fg-muted px-1.5">在线调压</span>
-                    <button
-                      type="button"
-                      disabled={!canWrite || updatingTarget}
-                      onClick={() => void handleSetTarget(stepTarget(0.8))}
-                      title={`${liveTarget} → ${stepTarget(0.8)} ${targetUnit}`}
-                      className="px-2 py-1 rounded bg-surface border border-line-strong hover:bg-surface-hover font-mono tg-tabular disabled:opacity-45"
-                    >
-                      -20%
-                    </button>
-                    <label className="flex items-center gap-1 px-1 rounded border border-line-strong bg-surface focus-within:border-sky-500">
-                      <input
-                        type="number"
-                        name="run_target"
-                        aria-label={`运行目标 (${targetUnit})`}
-                        min={loadMode === 'rate' ? 0.1 : 1}
-                        step={loadMode === 'rate' ? 'any' : 1}
-                        disabled={!canWrite}
-                        value={targetInput}
-                        onChange={(e) => setTargetInput(e.target.value)}
-                        className="w-20 py-1 pl-1 font-mono tg-tabular bg-transparent outline-none disabled:opacity-50"
-                      />
-                      <span className="text-[11px] text-fg-subtle font-medium pr-0.5">{targetUnit}</span>
-                    </label>
-                    <button
-                      type="submit"
-                      disabled={!canWrite || updatingTarget}
-                      className="px-2.5 py-1 rounded bg-sky-600 text-white font-medium hover:bg-sky-solid disabled:opacity-45"
-                    >
-                      {updatingTarget ? '应用中' : '应用'}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={!canWrite || updatingTarget}
-                      onClick={() => void handleSetTarget(stepTarget(1.2))}
-                      title={`${liveTarget} → ${stepTarget(1.2)} ${targetUnit}`}
-                      className="px-2 py-1 rounded bg-surface border border-line-strong hover:bg-surface-hover font-mono tg-tabular disabled:opacity-45"
-                    >
-                      +20%
-                    </button>
-                    {liveTarget > 0 && (
-                      <span className="px-1.5 text-[11px] font-mono tg-tabular text-fg-subtle" title="当前实时目标">
-                        当前 {liveTarget}
-                      </span>
-                    )}
-                  </form>
-
-                  <button
-                    type="button"
-                    disabled={!canWrite || stopping !== '' || run.status === 'stopping'}
-                    onClick={() => void handleStop('graceful')}
-                    className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold disabled:opacity-45"
-                  >
-                    <Square className="w-3.5 h-3.5" /> {stopping === 'graceful' ? '停止中' : '优雅停止'}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={!canWrite || stopping !== ''}
-                    onClick={() => void handleStop('abort')}
-                    onBlur={() => setConfirmAbort(false)}
-                    className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-lg font-semibold text-white disabled:opacity-45 ${
-                      confirmAbort ? 'bg-rose-600 hover:bg-rose-solid ring-2 ring-rose-300' : 'bg-rose-600 hover:bg-rose-solid'
-                    }`}
-                  >
-                    <OctagonAlert className="w-3.5 h-3.5" /> {confirmAbort ? '确认中止？' : '立即中止'}
-                  </button>
-                </>
-              )}
-
-              <div className="flex flex-wrap items-center gap-1.5">
-                {!isActive && (
-                  <button
-                    type="button"
-                    onClick={() => void hydrateRun(run.id)}
-                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted"
-                  >
-                    <RefreshCw className="w-3.5 h-3.5" /> 刷新
-                  </button>
-                )}
-                <button
-                  type="button"
-                  disabled={exportingPng || !latest}
-                  onClick={() => void handleExportPng()}
-                  title={isActive ? '导出当前时刻的快照报告' : '导出完整报告长图'}
-                  className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-line-strong bg-surface hover:bg-surface-hover text-fg disabled:opacity-45"
-                >
-                  <ImageDown className="w-3.5 h-3.5 text-sky-600" /> {exportingPng ? '生成中' : '导出 PNG'}
-                </button>
-                {!isActive && (
+              <div className="flex flex-wrap items-center gap-2">
+                {isActive && (
                   <>
-                    <a
-                      href={api.exportRunURL(run.id, 'html')}
-                      download
-                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-line-strong bg-surface hover:bg-surface-hover text-fg"
+                    <form
+                      onSubmit={(e) => {
+                        e.preventDefault()
+                        void handleSetTarget(Number(targetInput))
+                      }}
+                      className="flex items-center gap-1 bg-surface-subtle p-1 rounded-lg border border-line"
                     >
-                      <FileCode2 className="w-3.5 h-3.5 text-sky-600" /> 导出 HTML
-                    </a>
-                    <div ref={moreRef} className="relative">
+                      <span className="text-fg-muted px-1.5">在线调压</span>
                       <button
                         type="button"
-                        aria-haspopup="menu"
-                        aria-expanded={moreOpen}
-                        onClick={() => setMoreOpen((v) => !v)}
-                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted"
+                        disabled={!canWrite || updatingTarget}
+                        onClick={() => void handleSetTarget(stepTarget(0.8))}
+                        title={`${liveTarget} → ${stepTarget(0.8)} ${targetUnit}`}
+                        className="px-2 py-1 rounded bg-surface border border-line-strong hover:bg-surface-hover text-fg font-mono tg-tabular disabled:opacity-45"
                       >
-                        <Download className="w-3.5 h-3.5" /> 更多格式
-                        <ChevronDown className={`w-3 h-3 transition-transform ${moreOpen ? 'rotate-180' : ''}`} />
+                        -20%
                       </button>
-                      {moreOpen && (
-                        <div
-                          role="menu"
-                          className="absolute right-0 top-full mt-1 z-30 min-w-36 py-1 rounded-lg border border-line bg-surface shadow-lg"
-                        >
-                          {MORE_FORMATS.map((ex) => (
-                            <a
-                              key={ex.fmt}
-                              role="menuitem"
-                              href={api.exportRunURL(run.id, ex.fmt)}
-                              download
-                              onClick={() => setMoreOpen(false)}
-                              className="flex items-center gap-2 px-3 py-1.5 text-fg hover:bg-surface-hover"
-                            >
-                              <Download className="w-3.5 h-3.5 text-fg-subtle" /> {ex.label}
-                            </a>
-                          ))}
-                        </div>
+                      <label className="flex items-center gap-1 px-1 rounded border border-line-strong bg-surface focus-within:border-sky-500">
+                        <input
+                          type="number"
+                          name="run_target"
+                          aria-label={`运行目标 (${targetUnit})`}
+                          min={loadMode === 'rate' ? 0.1 : 1}
+                          step={loadMode === 'rate' ? 'any' : 1}
+                          disabled={!canWrite}
+                          value={targetInput}
+                          onChange={(e) => setTargetInput(e.target.value)}
+                          className="w-20 py-1 pl-1 font-mono tg-tabular bg-transparent text-fg outline-none disabled:opacity-50"
+                        />
+                        <span className="text-[11px] text-fg-subtle font-medium pr-0.5">{targetUnit}</span>
+                      </label>
+                      <button
+                        type="submit"
+                        disabled={!canWrite || updatingTarget}
+                        className="px-2.5 py-1 rounded bg-primary text-white font-semibold hover:bg-primary-hover disabled:opacity-45"
+                      >
+                        {updatingTarget ? '应用中' : '应用'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={!canWrite || updatingTarget}
+                        onClick={() => void handleSetTarget(stepTarget(1.2))}
+                        title={`${liveTarget} → ${stepTarget(1.2)} ${targetUnit}`}
+                        className="px-2 py-1 rounded bg-surface border border-line-strong hover:bg-surface-hover text-fg font-mono tg-tabular disabled:opacity-45"
+                      >
+                        +20%
+                      </button>
+                      {liveTarget > 0 && (
+                        <span className="px-1.5 text-[11px] font-mono tg-tabular text-fg-subtle" title="当前实时目标">
+                          当前 {liveTarget}
+                        </span>
                       )}
-                    </div>
+                    </form>
+
+                    <button
+                      type="button"
+                      disabled={!canWrite || stopping !== '' || run.status === 'stopping'}
+                      onClick={() => void handleStop('graceful')}
+                      className="inline-flex items-center gap-1 px-3 py-1.5 rounded-lg border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 font-semibold disabled:opacity-45"
+                    >
+                      <Square className="w-3.5 h-3.5" /> {stopping === 'graceful' ? '停止中' : '优雅停止'}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!canWrite || stopping !== ''}
+                      onClick={() => void handleStop('abort')}
+                      onBlur={() => setConfirmAbort(false)}
+                      className={`inline-flex items-center gap-1 px-3 py-1.5 rounded-lg font-semibold text-white disabled:opacity-45 ${
+                        confirmAbort ? 'bg-rose-600 hover:bg-rose-solid ring-2 ring-rose-300' : 'bg-rose-600 hover:bg-rose-solid'
+                      }`}
+                    >
+                      <OctagonAlert className="w-3.5 h-3.5" /> {confirmAbort ? '确认中止？' : '立即中止'}
+                    </button>
                   </>
                 )}
+
+                <div className="flex flex-wrap items-center gap-1.5">
+                  {!isActive && (
+                    <button
+                      type="button"
+                      onClick={() => void hydrateRun(run.id)}
+                      className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg"
+                    >
+                      <RefreshCw className="w-3.5 h-3.5 text-fg-muted" /> 刷新
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    disabled={exportingPng || !latest}
+                    onClick={() => void handleExportPng()}
+                    title={isActive ? '导出当前时刻的快照报告' : '导出完整报告长图'}
+                    className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg disabled:opacity-45"
+                  >
+                    <ImageDown className="w-3.5 h-3.5 text-tidal" /> {exportingPng ? '生成中' : '导出 PNG'}
+                  </button>
+                  {!isActive && (
+                    <>
+                      <a
+                        href={api.exportRunURL(run.id, 'html')}
+                        download
+                        className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg"
+                      >
+                        <FileCode2 className="w-3.5 h-3.5 text-tidal" /> 导出 HTML
+                      </a>
+                      <div ref={moreRef} className="relative">
+                        <button
+                          type="button"
+                          aria-haspopup="menu"
+                          aria-expanded={moreOpen}
+                          onClick={() => setMoreOpen((v) => !v)}
+                          className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg"
+                        >
+                          <Download className="w-3.5 h-3.5 text-fg-muted" /> 更多格式
+                          <ChevronDown className={`w-3 h-3 transition-transform ${moreOpen ? 'rotate-180' : ''}`} />
+                        </button>
+                        {moreOpen && (
+                          <div
+                            role="menu"
+                            className="absolute right-0 top-full mt-1 z-30 min-w-36 py-1 rounded-xl border border-line bg-surface shadow-xl"
+                          >
+                            {MORE_FORMATS.map((ex) => (
+                              <a
+                                key={ex.fmt}
+                                role="menuitem"
+                                href={api.exportRunURL(run.id, ex.fmt)}
+                                download
+                                onClick={() => setMoreOpen(false)}
+                                className="flex items-center gap-2 px-3 py-1.5 text-fg hover:bg-surface-hover"
+                              >
+                                <Download className="w-3.5 h-3.5 text-fg-subtle" /> {ex.label}
+                              </a>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </>
+                  )}
+                  <ModuleZoomButton
+                    expanded={zoomedMod === 'telemetry'}
+                    onToggle={() => toggleZoomMod('telemetry', telemetryRef.current)}
+                  />
+                </div>
               </div>
             </div>
+
+            {alerts.length > 0 && (
+              <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-950 space-y-1.5">
+                <div className="font-semibold flex items-center gap-2 text-sm">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>发压机或阈值在本次压测期间触发告警，当前结果可能低估被测服务真实能力</span>
+                </div>
+                <div className="space-y-0.5 pl-6 text-xs">
+                  {alerts.map((al) => (
+                    <div key={al.id} className="font-mono">
+                      <span className={al.level === 'critical' ? 'text-rose-700 font-bold' : 'text-amber-800 font-semibold'}>
+                        [{al.level === 'critical' ? '严重' : '警告'}
+                        {al.agent ? ` · ${al.agent}` : ''}]
+                      </span>{' '}
+                      {al.message}（{new Date(al.started_at).toLocaleTimeString()}
+                      {al.ended_at ? ` ~ ${new Date(al.ended_at).toLocaleTimeString()}` : ' ~ 持续中'}）
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* 6 KPI Cards */}
+            {latest && (
+              <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
+                <KPICard
+                  label="QPS / RPS"
+                  value={<RollingNumber value={latest.rps || 0} decimals={1} suffix=" /s" />}
+                  sub={`请求 ${latest.requests.toLocaleString()}`}
+                  accent
+                />
+                <KPICard
+                  label="TPS"
+                  value={<RollingNumber value={latestTps} decimals={2} suffix=" /s" />}
+                  sub={
+                    latest.dropped_iterations > 0
+                      ? `迭代 ${(latest.iterations || 0).toLocaleString()} · 丢弃 ${latest.dropped_iterations.toLocaleString()}`
+                      : `迭代 ${(latest.iterations || 0).toLocaleString()}`
+                  }
+                  warn={latest.dropped_iterations > 0}
+                />
+                <KPICard
+                  label="错误率"
+                  value={<RollingNumber value={(latest.error_rate || 0) * 100} decimals={2} suffix="%" />}
+                  sub={`失败 ${latest.errors.toLocaleString()}`}
+                  danger={(latest.error_rate || 0) > 0.01}
+                />
+                <KPICard
+                  label="P95 / P99"
+                  value={
+                    <span className="inline-flex items-baseline gap-1">
+                      <RollingNumber value={latest.latency?.p95_ms || 0} decimals={1} />
+                      <span className="text-fg-subtle">/</span>
+                      <RollingNumber value={latest.latency?.p99_ms || 0} decimals={1} />
+                    </span>
+                  }
+                  sub={`ms · P50 ${(latest.latency?.p50_ms || 0).toFixed(1)} · Max ${(latest.latency?.max_ms || 0).toFixed(1)}`}
+                />
+                <KPICard
+                  label="并发 VU / 连接"
+                  value={`${latest.active_vus} / ${latest.active_conns}`}
+                  sub={liveTarget > 0 ? `目标 ${liveTarget} ${targetUnit}` : '活跃连接'}
+                />
+                <KPICard
+                  label="上行 / 下行"
+                  value={`${((latest.sent_bps || 0) / 1e6).toFixed(2)} / ${((latest.received_bps || 0) / 1e6).toFixed(2)}`}
+                  sub="Mbps"
+                />
+              </div>
+            )}
           </div>
-
-          {alerts.length > 0 && (
-            <div className="rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-amber-950 space-y-1.5">
-              <div className="font-semibold flex items-center gap-2 text-sm">
-                <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                <span>发压机或阈值在本次压测期间触发告警，当前结果可能低估被测服务真实能力</span>
-              </div>
-              <div className="space-y-0.5 pl-6 text-xs">
-                {alerts.map((al) => (
-                  <div key={al.id} className="font-mono">
-                    <span className={al.level === 'critical' ? 'text-rose-700 font-bold' : 'text-amber-800 font-semibold'}>
-                      [{al.level === 'critical' ? '严重' : '警告'}
-                      {al.agent ? ` · ${al.agent}` : ''}]
-                    </span>{' '}
-                    {al.message}（{new Date(al.started_at).toLocaleTimeString()}
-                    {al.ended_at ? ` ~ ${new Date(al.ended_at).toLocaleTimeString()}` : ' ~ 持续中'}）
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
-
-          {/* 6 KPI Cards */}
-          {latest && (
-            <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3">
-              <KPICard
-                label="QPS / RPS"
-                value={`${(latest.rps || 0).toFixed(1)} /s`}
-                sub={`请求 ${latest.requests.toLocaleString()}`}
-                accent
-              />
-              <KPICard
-                label="TPS"
-                value={`${latestTps.toFixed(2)} /s`}
-                sub={
-                  latest.dropped_iterations > 0
-                    ? `迭代 ${(latest.iterations || 0).toLocaleString()} · 丢弃 ${latest.dropped_iterations.toLocaleString()}`
-                    : `迭代 ${(latest.iterations || 0).toLocaleString()}`
-                }
-                warn={latest.dropped_iterations > 0}
-              />
-              <KPICard
-                label="错误率"
-                value={`${((latest.error_rate || 0) * 100).toFixed(2)}%`}
-                sub={`失败 ${latest.errors.toLocaleString()}`}
-                danger={(latest.error_rate || 0) > 0.01}
-              />
-              <KPICard
-                label="P95 / P99"
-                value={`${(latest.latency?.p95_ms || 0).toFixed(1)} / ${(latest.latency?.p99_ms || 0).toFixed(1)}`}
-                sub={`ms · P50 ${(latest.latency?.p50_ms || 0).toFixed(1)} · Max ${(latest.latency?.max_ms || 0).toFixed(1)}`}
-              />
-              <KPICard
-                label="并发 VU / 连接"
-                value={`${latest.active_vus} / ${latest.active_conns}`}
-                sub={liveTarget > 0 ? `目标 ${liveTarget} ${targetUnit}` : '活跃连接'}
-              />
-              <KPICard
-                label="上行 / 下行"
-                value={`${((latest.sent_bps || 0) / 1e6).toFixed(2)} / ${((latest.received_bps || 0) / 1e6).toFixed(2)}`}
-                sub="Mbps"
-              />
-            </div>
-          )}
 
           {/* 4 uPlot Charts */}
-          <div ref={chartsRef} className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <UPlotChart
-              title="QPS / RPS · TPS 与错误率走势"
-              data={chartModel.rpsData}
-              series={[
-                { label: 'QPS / RPS', stroke: '#0284c7', fill: 'rgba(2, 132, 199, 0.08)' },
-                { label: 'TPS', stroke: '#8b5cf6' },
-                { label: '错误率 (%)', stroke: '#e11d48' },
-              ]}
-              alertWindows={chartModel.alertWindows}
-            />
-            <UPlotChart
-              title="响应延迟百分位 (ms)"
-              yUnit="ms"
-              data={chartModel.latData}
-              series={[
-                { label: 'P50', stroke: '#16a34a' },
-                { label: 'P95', stroke: '#d97706' },
-                { label: 'P99', stroke: '#dc2626' },
-              ]}
-              alertWindows={chartModel.alertWindows}
-            />
-            <UPlotChart
-              title="双层网络带宽 (应用层 vs 网卡实时速率 Mbps)"
-              yUnit="M"
-              data={chartModel.bwData}
-              series={[
-                { label: '应用上行 Mbps', stroke: '#0ea5e9' },
-                { label: '应用下行 Mbps', stroke: '#8b5cf6' },
-                { label: '网卡TX Mbps', stroke: '#f97316', dash: [5, 4] },
-              ]}
-              alertWindows={chartModel.alertWindows}
-            />
-            <UPlotChart
-              title="活跃虚拟用户数与连接数"
-              data={chartModel.vuData}
-              series={[
-                { label: '活跃 VU', stroke: '#14b8a6' },
-                { label: '活跃连接', stroke: '#64748b' },
-              ]}
-              alertWindows={chartModel.alertWindows}
-            />
-          </div>
+          <section
+            ref={chartsRef}
+            className={zoomedMod && zoomedMod !== 'charts' ? 'hidden' : 'space-y-2.5'}
+          >
+            <div className="flex items-center justify-between gap-2 px-1">
+              <h3 className="font-semibold text-fg flex items-center gap-1.5">
+                <Activity className="w-3.5 h-3.5 text-tidal" />
+                实时性能时序曲线
+                <RollingNumber value={snapshots.length} suffix=" 点" className="text-[11px] font-mono text-fg-subtle font-normal" />
+              </h3>
+              <ModuleZoomButton
+                expanded={zoomedMod === 'charts'}
+                onToggle={() => toggleZoomMod('charts', chartsRef.current)}
+              />
+            </div>
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+              <UPlotChart
+                title="QPS / RPS · TPS 与错误率走势"
+                data={chartModel.rpsData}
+                series={[
+                  { label: 'QPS / RPS', stroke: '#0284c7', fill: 'rgba(2, 132, 199, 0.08)' },
+                  { label: 'TPS', stroke: '#8b5cf6' },
+                  { label: '错误率 (%)', stroke: '#e11d48' },
+                ]}
+                alertWindows={chartModel.alertWindows}
+              />
+              <UPlotChart
+                title="响应延迟百分位 (ms)"
+                yUnit="ms"
+                data={chartModel.latData}
+                series={[
+                  { label: 'P50', stroke: '#16a34a' },
+                  { label: 'P95', stroke: '#d97706' },
+                  { label: 'P99', stroke: '#dc2626' },
+                ]}
+                alertWindows={chartModel.alertWindows}
+              />
+              <UPlotChart
+                title="双层网络带宽 (应用层 vs 网卡实时速率 Mbps)"
+                yUnit="M"
+                data={chartModel.bwData}
+                series={[
+                  { label: '应用上行 Mbps', stroke: '#0ea5e9' },
+                  { label: '应用下行 Mbps', stroke: '#8b5cf6' },
+                  { label: '网卡TX Mbps', stroke: '#f97316', dash: [5, 4] },
+                ]}
+                alertWindows={chartModel.alertWindows}
+              />
+              <UPlotChart
+                title="活跃虚拟用户数与连接数"
+                data={chartModel.vuData}
+                series={[
+                  { label: '活跃 VU', stroke: '#14b8a6' },
+                  { label: '活跃连接', stroke: '#64748b' },
+                ]}
+                alertWindows={chartModel.alertWindows}
+              />
+            </div>
+          </section>
 
           {/* Bottom Diagnostic Panel */}
-          <div className="bg-surface rounded-xl border border-slate-200 shadow-xs overflow-hidden">
-            <div className="px-4 py-2 border-b border-slate-200 bg-slate-50 flex flex-wrap items-center justify-between gap-2">
-              <div className="flex flex-wrap items-center gap-1 font-medium">
+          <div
+            ref={inspectorRef}
+            className={`tg-glass-card !overflow-visible ${zoomedMod && zoomedMod !== 'inspector' ? 'hidden' : ''}`}
+          >
+            <div className="px-4 py-2 border-b border-line bg-surface-subtle/60 flex flex-wrap items-center justify-between gap-2 rounded-t-[22px]">
+              <div
+                ref={detailTabsRef}
+                role="tablist"
+                aria-label="诊断明细页签"
+                className="relative flex flex-wrap items-center gap-1 font-medium"
+              >
+                <LiquidCapsule containerRef={detailTabsRef} activeId={detailTab} />
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={detailTab === 'steps'}
+                  data-liq-id="steps"
                   onClick={() => setDetailTab('steps')}
-                  className={`px-3 py-1 rounded ${
-                    detailTab === 'steps' ? 'bg-surface shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
+                  className={`relative z-10 px-3 py-1.5 rounded-xl transition-colors ${
+                    detailTab === 'steps' ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <Activity className="w-3.5 h-3.5 inline mr-1" /> 按步骤统计 ({latest?.steps?.length || 0})
                 </button>
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={detailTab === 'distribution'}
+                  data-liq-id="distribution"
                   onClick={() => {
                     setDetailTab('distribution')
                     if (run) void loadHistogram(run.id)
                   }}
-                  className={`px-3 py-1 rounded ${
-                    detailTab === 'distribution' ? 'bg-surface shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
+                  className={`relative z-10 px-3 py-1.5 rounded-xl transition-colors ${
+                    detailTab === 'distribution' ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <BarChart3 className="w-3.5 h-3.5 inline mr-1" /> 延迟分布与热力图
                 </button>
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={detailTab === 'phases'}
+                  data-liq-id="phases"
                   onClick={() => setDetailTab('phases')}
-                  className={`px-3 py-1 rounded ${
-                    detailTab === 'phases' ? 'bg-surface shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
+                  className={`relative z-10 px-3 py-1.5 rounded-xl transition-colors ${
+                    detailTab === 'phases' ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <Layers className="w-3.5 h-3.5 inline mr-1" /> 五段耗时分解
                 </button>
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={detailTab === 'nodes'}
+                  data-liq-id="nodes"
                   onClick={() => setDetailTab('nodes')}
-                  className={`px-3 py-1 rounded ${
-                    detailTab === 'nodes' ? 'bg-surface shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
+                  className={`relative z-10 px-3 py-1.5 rounded-xl transition-colors ${
+                    detailTab === 'nodes' ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <Server className="w-3.5 h-3.5 inline mr-1" /> 分节点指标 ({latest?.nodes?.length || 0})
                 </button>
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={detailTab === 'thresholds'}
+                  data-liq-id="thresholds"
                   onClick={() => setDetailTab('thresholds')}
-                  className={`px-3 py-1 rounded ${
-                    detailTab === 'thresholds' ? 'bg-surface shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
+                  className={`relative z-10 px-3 py-1.5 rounded-xl transition-colors ${
+                    detailTab === 'thresholds' ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <CopyCheck className="w-3.5 h-3.5 inline mr-1" /> 阈值校验 ({run.thresholds?.length || 0})
                 </button>
                 <button
                   type="button"
+                  role="tab"
+                  aria-selected={detailTab === 'samples'}
+                  data-liq-id="samples"
                   onClick={() => setDetailTab('samples')}
-                  className={`px-3 py-1 rounded ${
-                    detailTab === 'samples' ? 'bg-surface shadow-xs text-sky-700 font-semibold' : 'text-slate-600'
+                  className={`relative z-10 px-3 py-1.5 rounded-xl transition-colors ${
+                    detailTab === 'samples' ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <Wrench className="w-3.5 h-3.5 inline mr-1" /> 错误与慢请求采样 ({samples.length})
                 </button>
               </div>
+              <ModuleZoomButton
+                expanded={zoomedMod === 'inspector'}
+                onToggle={() => toggleZoomMod('inspector', inspectorRef.current)}
+              />
             </div>
 
             <div className="p-4">
               {detailTab === 'steps' && (
                 <div className="overflow-x-auto">
                   {!latest?.steps?.length ? (
-                    <p className="text-slate-400">暂无步骤统计数据。</p>
+                    <p className="text-fg-subtle">暂无步骤统计数据。</p>
                   ) : (
                     <table className="w-full text-left border-collapse">
                       <thead className="bg-surface-subtle border-b border-line text-fg-subtle">
@@ -1354,7 +1477,7 @@ export function LiveRunView({
                           <th className="px-3 py-1.5">状态码</th>
                         </tr>
                       </thead>
-                      <tbody className="divide-y divide-slate-100 font-mono tg-tabular">
+                      <tbody className="divide-y divide-line font-mono tg-tabular">
                         <tr className="bg-surface-subtle">
                           <td className="px-3 py-1.5 font-sans font-semibold text-fg">
                             场景迭代
@@ -1369,7 +1492,7 @@ export function LiveRunView({
                             )}
                           </td>
                           <td className="px-3 py-1.5 text-right">{(latest.iterations || 0).toLocaleString()}</td>
-                          <td className="px-3 py-1.5 text-right font-semibold text-violet-700">{latestTps.toFixed(2)} TPS</td>
+                          <td className="px-3 py-1.5 text-right font-semibold text-violet-600">{latestTps.toFixed(2)} TPS</td>
                           <td className="px-3 py-1.5 text-right text-fg-subtle" colSpan={6}>
                             {latest.duration_ms > 0 ? `统计窗口 ${(latest.duration_ms / 1000).toFixed(1)}s` : ''}
                           </td>
@@ -1385,11 +1508,11 @@ export function LiveRunView({
                               )}
                             </td>
                             <td className="px-3 py-1.5 text-right">{st.requests.toLocaleString()}</td>
-                            <td className={`px-3 py-1.5 text-right ${st.is_group ? 'font-semibold text-sky-700' : ''}`}>
+                            <td className={`px-3 py-1.5 text-right ${st.is_group ? 'font-semibold text-tidal' : ''}`}>
                               {st.rps.toFixed(1)}
                               {st.is_group && <span className="ml-1 text-[10px] font-sans font-medium">TPS</span>}
                             </td>
-                            <td className={`px-3 py-1.5 text-right ${st.error_rate > 0 ? 'text-rose-700 font-semibold' : ''}`}>
+                            <td className={`px-3 py-1.5 text-right ${st.error_rate > 0 ? 'text-rose-600 font-semibold' : ''}`}>
                               {(st.error_rate * 100).toFixed(2)}%
                             </td>
                             <td className="px-3 py-1.5 text-right">{st.latency.p50_ms.toFixed(2)}</td>
@@ -1430,7 +1553,7 @@ export function LiveRunView({
               {detailTab === 'thresholds' && (
                 <div>
                   {!run.thresholds?.length ? (
-                    <p className="text-slate-400">本次压测未配置阈值规则，或仍在运行尚未生成汇总评估。</p>
+                    <p className="text-fg-subtle">本次压测未配置阈值规则，或仍在运行尚未生成汇总评估。</p>
                   ) : (
                     <div className="space-y-2">
                       {run.thresholds.map((tr, i) => (
@@ -1460,19 +1583,23 @@ export function LiveRunView({
 
               {detailTab === 'samples' && (
                 <div className="space-y-3">
-                  <div className="flex items-center gap-2">
-                    {(['all', 'error', 'slow'] as const).map((k) => (
-                      <button
-                        key={k}
-                        type="button"
-                        onClick={() => setSampleFilter(k)}
-                        className={`px-2.5 py-1 rounded border font-medium ${
-                          sampleFilter === k ? 'bg-sky-50 border-sky-300 text-sky-800' : 'border-slate-200 text-slate-600'
-                        }`}
-                      >
-                        {k === 'all' ? '全部' : k === 'error' ? '失败请求' : '慢请求'}
-                      </button>
-                    ))}
+                  <div className="flex flex-wrap items-center gap-2.5">
+                    <DropletFilter
+                      size="sm"
+                      ariaLabel="筛选采样类型"
+                      value={sampleFilter}
+                      onChange={(v) => setSampleFilter(v as typeof sampleFilter)}
+                      options={[
+                        { value: 'all', label: '全部', dotClass: 'bg-sky-500' },
+                        { value: 'error', label: '失败请求', dotClass: 'bg-rose-500' },
+                        { value: 'slow', label: '慢请求', dotClass: 'bg-amber-500' },
+                      ]}
+                    />
+                    <RollingNumber
+                      value={filteredSamples.length}
+                      suffix=" 条"
+                      className="text-[11px] font-mono text-fg-subtle"
+                    />
                   </div>
                   {filteredSamples.length === 0 ? (
                     <p className="text-fg-subtle">当前筛选条件下暂无异常采样。</p>
@@ -1496,11 +1623,11 @@ export function LiveRunView({
                                 <span className="text-fg-muted truncate max-w-md">{sm.url}</span>
                               </div>
                               <div className="flex items-center gap-2 font-mono tg-tabular">
-                                <span className={sm.status && sm.status < 400 ? 'text-fg-muted' : 'text-rose-700 font-semibold'}>
+                                <span className={sm.status && sm.status < 400 ? 'text-fg-muted' : 'text-rose-600 font-semibold'}>
                                   HTTP {sm.status || 'ERR'}
                                 </span>
                                 <span>{Number(sm.duration_ms || 0).toFixed(1)}ms</span>
-                                {sm.error && <span className="text-rose-700 max-w-xs truncate">{sm.error}</span>}
+                                {sm.error && <span className="text-rose-600 max-w-xs truncate">{sm.error}</span>}
                                 <button
                                   type="button"
                                   onClick={(e) => {
@@ -1536,7 +1663,7 @@ export function LiveRunView({
                                 <div>
                                   <div className="font-semibold text-fg-muted mb-1">
                                     请求体
-                                    {sm.request_body_truncated && <span className="ml-1.5 text-[11px] font-normal text-amber-700">已截断</span>}
+                                    {sm.request_body_truncated && <span className="ml-1.5 text-[11px] font-normal text-amber-600">已截断</span>}
                                   </div>
                                   <pre className="p-2 rounded tg-code-surface font-mono overflow-auto max-h-36 whitespace-pre-wrap break-all">
                                     {sm.request_body}
@@ -1546,7 +1673,7 @@ export function LiveRunView({
                               <div>
                                 <div className="font-semibold text-fg-muted mb-1">
                                   响应体
-                                  {sm.body_truncated && <span className="ml-1.5 text-[11px] font-normal text-amber-700">已截断</span>}
+                                  {sm.body_truncated && <span className="ml-1.5 text-[11px] font-normal text-amber-600">已截断</span>}
                                 </div>
                                 <pre className="p-2 rounded tg-code-surface font-mono overflow-auto max-h-40 whitespace-pre-wrap break-all">
                                   {sm.body || '(空)'}
@@ -1564,6 +1691,28 @@ export function LiveRunView({
           </div>
         </div>
       )}
+
+      {zoomedMod && (
+        <BottomModuleStrip
+          activeId={zoomedMod}
+          onSelect={(id) => toggleZoomMod(id as 'launcher' | 'telemetry' | 'charts' | 'inspector', null)}
+          onClose={() => setZoomedMod('')}
+          items={[
+            { id: 'launcher', title: '发起配置', metric: showLauncher ? '展开' : '已收起' },
+            ...(run
+              ? [
+                  {
+                    id: 'telemetry',
+                    title: '实时遥测',
+                    metric: latest ? `${(latest.rps || 0).toFixed(1)} QPS` : undefined,
+                  },
+                  { id: 'charts', title: '时序曲线', metric: `${snapshots.length} 点` },
+                  { id: 'inspector', title: '诊断面板', metric: `${latest?.steps?.length || 0} 步` },
+                ]
+              : []),
+          ]}
+        />
+      )}
     </div>
   )
 }
@@ -1577,7 +1726,7 @@ function KPICard({
   accent,
 }: {
   label: string
-  value: string
+  value: ReactNode
   sub: string
   danger?: boolean
   warn?: boolean
@@ -1585,7 +1734,7 @@ function KPICard({
 }) {
   const bar = danger ? 'bg-rose-500' : warn ? 'bg-amber-500' : accent ? 'bg-sky-500' : ''
   return (
-    <div className="relative bg-surface rounded-xl border border-line p-3 shadow-xs overflow-hidden min-w-0">
+    <div className="relative bg-surface/80 rounded-2xl border border-line p-3 overflow-hidden min-w-0 tg-tilt-card shadow-2xs">
       {bar && <span className={`absolute left-0 top-3 bottom-3 w-0.5 rounded-r ${bar}`} />}
       <div className="text-[11px] font-medium text-fg-subtle">{label}</div>
       <div className={`text-base font-bold font-mono tg-tabular mt-0.5 truncate ${danger ? 'text-rose-600' : 'text-fg'}`}>
@@ -1676,7 +1825,7 @@ function LatencyDistributionPanel({
           <select
             value={histStepId}
             onChange={(e) => onChangeStepId(e.target.value)}
-            className="px-2.5 py-1 border border-slate-300 rounded bg-surface text-xs"
+            className="px-2.5 py-1 border border-line-strong rounded bg-surface text-fg text-xs"
           >
             <option value="">全局聚合直方图</option>
             {(histogram?.steps || []).map((st) => (
@@ -1686,7 +1835,7 @@ function LatencyDistributionPanel({
             ))}
           </select>
           {activeLatency && activeLatency.count > 0 && (
-            <span className="font-mono text-slate-600 text-[11px]">
+            <span className="font-mono text-fg-muted text-[11px]">
               样本数 {activeLatency.count} · Mean {activeLatency.mean_ms.toFixed(2)}ms · P50 {activeLatency.p50_ms.toFixed(2)}ms · P95{' '}
               {activeLatency.p95_ms.toFixed(2)}ms · P99 {activeLatency.p99_ms.toFixed(2)}ms · Max {activeLatency.max_ms.toFixed(2)}ms
             </span>
@@ -1695,7 +1844,7 @@ function LatencyDistributionPanel({
         <button
           type="button"
           onClick={onRefresh}
-          className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-slate-300 bg-surface hover:bg-slate-50 text-slate-700"
+          className="inline-flex items-center gap-1 px-2.5 py-1 rounded border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted"
         >
           <RefreshCw className="w-3 h-3" /> 刷新分布
         </button>
@@ -1703,7 +1852,7 @@ function LatencyDistributionPanel({
 
       {/* HDR Histogram Buckets */}
       <div className="space-y-2">
-        <div className="font-semibold text-slate-800">精确响应延迟直方图 (HDR Histogram 分桶)</div>
+        <div className="font-semibold text-fg">精确响应延迟直方图 (HDR Histogram 分桶)</div>
         {activeBuckets.length > 0 ? (
           <div className="space-y-1.5 max-h-72 overflow-y-auto pr-1">
             {activeBuckets.map((b, idx) => {
@@ -1711,16 +1860,16 @@ function LatencyDistributionPanel({
               const share = (b.count / totalBucketCount) * 100
               return (
                 <div key={idx} className="grid grid-cols-12 gap-2 items-center font-mono text-[11px]">
-                  <span className="col-span-3 text-slate-600 truncate">
+                  <span className="col-span-3 text-fg-muted truncate">
                     {b.low_ms.toFixed(2)} ~ {b.high_ms.toFixed(2)} ms
                   </span>
-                  <div className="col-span-7 h-4 bg-slate-100 rounded overflow-hidden">
+                  <div className="col-span-7 h-4 bg-surface-subtle rounded overflow-hidden">
                     <div
                       className="h-full bg-sky-600 rounded-r transition-all"
                       style={{ width: `${Math.max(1, pctWidth)}%` }}
                     />
                   </div>
-                  <span className="col-span-2 text-right text-slate-700">
+                  <span className="col-span-2 text-right text-fg">
                     {b.count} ({share.toFixed(1)}%)
                   </span>
                 </div>
@@ -1734,36 +1883,36 @@ function LatencyDistributionPanel({
               const maxB = Math.max(1, ...activeBands)
               return (
                 <div key={label} className="grid grid-cols-12 gap-2 items-center font-mono text-[11px]">
-                  <span className="col-span-2 text-slate-600">{label}</span>
-                  <div className="col-span-8 h-4 bg-slate-100 rounded overflow-hidden">
+                  <span className="col-span-2 text-fg-muted">{label}</span>
+                  <div className="col-span-8 h-4 bg-surface-subtle rounded overflow-hidden">
                     <div className="h-full bg-sky-500" style={{ width: `${cnt > 0 ? Math.max(1, (cnt / maxB) * 100) : 0}%` }} />
                   </div>
-                  <span className="col-span-2 text-right text-slate-700">{cnt}</span>
+                  <span className="col-span-2 text-right text-fg">{cnt}</span>
                 </div>
               )
             })}
           </div>
         ) : (
-          <p className="text-slate-400">暂无直方图采样数据（运行中请等待首个统计周期写入）。</p>
+          <p className="text-fg-subtle">暂无直方图采样数据（运行中请等待首个统计周期写入）。</p>
         )}
       </div>
 
       {/* Time x Latency Heatmap */}
       <div className="space-y-2">
         <div className="flex items-center justify-between">
-          <span className="font-semibold text-slate-800">时间 × 延迟分桶热力图（纵轴低延迟→高延迟，颜色越深请求密度越高）</span>
-          <span className="text-[11px] text-slate-400 font-mono">{heatSnaps.length} 个时间片</span>
+          <span className="font-semibold text-fg">时间 × 延迟分桶热力图（纵轴低延迟→高延迟，颜色越深请求密度越高）</span>
+          <span className="text-[11px] text-fg-subtle font-mono">{heatSnaps.length} 个时间片</span>
         </div>
         {heatSnaps.length === 0 ? (
-          <p className="text-slate-400">暂无带分桶数据的实时快照。</p>
+          <p className="text-fg-subtle">暂无带分桶数据的实时快照。</p>
         ) : (
-          <div className="overflow-x-auto border border-slate-200 rounded-lg p-3 bg-slate-50/50">
+          <div className="overflow-x-auto border border-line rounded-lg p-3 bg-surface-subtle">
             <div className="min-w-[560px] space-y-1">
               {[...FIXED_BAND_LABELS].reverse().map((label, revIdx) => {
                 const bandIdx = FIXED_BAND_LABELS.length - 1 - revIdx
                 return (
                   <div key={label} className="flex items-center gap-2">
-                    <span className="w-20 shrink-0 text-right font-mono text-[10px] text-slate-500">{label}</span>
+                    <span className="w-20 shrink-0 text-right font-mono text-[10px] text-fg-subtle">{label}</span>
                     <div className="flex-1 grid gap-0.5" style={{ gridTemplateColumns: `repeat(${heatSnaps.length}, minmax(6px, 1fr))` }}>
                       {heatSnaps.map((snap, sIdx) => {
                         const cnt = snap.latency_buckets?.[bandIdx] || 0
@@ -1806,14 +1955,14 @@ function PhasesBreakdownPanel({ latest }: { latest?: SnapshotView | null }) {
     <div className="space-y-4">
       <div className="space-y-2">
         <div className="flex flex-wrap items-center justify-between gap-2">
-          <span className="font-semibold text-slate-800">五段网络耗时分解（最近采样窗口均值 ms）</span>
-          {totalMs > 0 && <span className="font-mono text-slate-600">五段均值合计：{totalMs.toFixed(3)} ms</span>}
+          <span className="font-semibold text-fg">五段网络耗时分解（最近采样窗口均值 ms）</span>
+          {totalMs > 0 && <span className="font-mono text-fg-muted">五段均值合计：{totalMs.toFixed(3)} ms</span>}
         </div>
         {!globalPhases || totalMs <= 0 ? (
-          <p className="text-slate-400">暂无阶段耗时分解数据（长连接复用后 DNS/Connect/TLS 通常为 0ms）。</p>
+          <p className="text-fg-subtle">暂无阶段耗时分解数据（长连接复用后 DNS/Connect/TLS 通常为 0ms）。</p>
         ) : (
           <div className="space-y-2">
-            <div className="h-6 rounded-lg overflow-hidden flex border border-slate-200 bg-slate-100">
+            <div className="h-6 rounded-lg overflow-hidden flex border border-line bg-surface-subtle">
               {REQUEST_PHASES.map((p) => {
                 const ms = globalPhases[p.key]?.avg_ms || 0
                 if (ms <= 0) return null
@@ -1836,9 +1985,9 @@ function PhasesBreakdownPanel({ latest }: { latest?: SnapshotView | null }) {
                 return (
                   <div key={p.key} className="inline-flex items-center gap-1.5 font-mono">
                     <span className="w-2.5 h-2.5 rounded-sm inline-block" style={{ backgroundColor: p.color }} />
-                    <span className="text-slate-700 font-sans">{p.label}:</span>
-                    <span className="font-semibold text-slate-900">{pv ? `${pv.avg_ms.toFixed(3)} ms` : '0.000 ms'}</span>
-                    <span className="text-slate-400">({pv?.count || 0})</span>
+                    <span className="text-fg-muted font-sans">{p.label}:</span>
+                    <span className="font-semibold text-fg">{pv ? `${pv.avg_ms.toFixed(3)} ms` : '0.000 ms'}</span>
+                    <span className="text-fg-subtle">({pv?.count || 0})</span>
                   </div>
                 )
               })}
@@ -1848,9 +1997,9 @@ function PhasesBreakdownPanel({ latest }: { latest?: SnapshotView | null }) {
       </div>
 
       {steps.length > 0 && (
-        <div className="overflow-x-auto border border-slate-200 rounded-lg">
+        <div className="overflow-x-auto border border-line rounded-lg">
           <table className="w-full text-left border-collapse">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-500">
+            <thead className="bg-surface-subtle border-b border-line text-fg-subtle">
               <tr>
                 <th className="px-3 py-1.5">步骤</th>
                 {REQUEST_PHASES.map((p) => (
@@ -1860,14 +2009,14 @@ function PhasesBreakdownPanel({ latest }: { latest?: SnapshotView | null }) {
                 ))}
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100 font-mono">
+            <tbody className="divide-y divide-line font-mono">
               {steps.map((st, idx) => (
                 <tr key={idx}>
-                  <td className="px-3 py-1.5 font-sans font-semibold text-slate-800">{st.name || st.id}</td>
+                  <td className="px-3 py-1.5 font-sans font-semibold text-fg">{st.name || st.id}</td>
                   {REQUEST_PHASES.map((p) => {
                     const pv = st.phases?.[p.key]
                     return (
-                      <td key={p.key} className="px-3 py-1.5 text-slate-700">
+                      <td key={p.key} className="px-3 py-1.5 text-fg-muted">
                         {pv ? `${pv.avg_ms.toFixed(2)} (${pv.count})` : '-'}
                       </td>
                     )
@@ -1907,11 +2056,11 @@ function NodesMetricsPanel({
         </div>
       )}
       {nodes.length === 0 ? (
-        <p className="text-slate-400">当前运行快照暂未包含分节点拆解明细（等待下一次快照推送）。</p>
+        <p className="text-fg-subtle">当前运行快照暂未包含分节点拆解明细（等待下一次快照推送）。</p>
       ) : (
-        <div className="overflow-x-auto border border-slate-200 rounded-lg">
+        <div className="overflow-x-auto border border-line rounded-lg">
           <table className="w-full text-left border-collapse">
-            <thead className="bg-slate-50 border-b border-slate-200 text-slate-500">
+            <thead className="bg-surface-subtle border-b border-line text-fg-subtle">
               <tr>
                 <th className="px-3 py-1.5">节点名称</th>
                 <th className="px-3 py-1.5">标签 / 权重</th>
@@ -1923,20 +2072,20 @@ function NodesMetricsPanel({
                 <th className="px-3 py-1.5">上行 / 下行</th>
               </tr>
             </thead>
-            <tbody className="divide-y divide-slate-100 font-mono">
+            <tbody className="divide-y divide-line font-mono">
               {nodes.map((nd) => {
                 const live = agents.find((a) => a.id === nd.agent_id)
                 const labels = live?.labels ? Object.entries(live.labels).map(([k, v]) => `${k}=${v}`).join(', ') : ''
                 return (
                   <tr key={nd.agent_id}>
-                    <td className="px-3 py-1.5 font-sans font-semibold text-slate-800">
+                    <td className="px-3 py-1.5 font-sans font-semibold text-fg">
                       <div>{nd.agent_name || nd.agent_id}</div>
-                      <div className="text-[10px] font-mono text-slate-400">{nd.agent_id}</div>
+                      <div className="text-[10px] font-mono text-fg-subtle">{nd.agent_id}</div>
                     </td>
                     <td className="px-3 py-1.5 text-[11px]">
                       <div>{labels || '无标签'}</div>
                       {live && (
-                        <div className="text-slate-500">
+                        <div className="text-fg-subtle">
                           权重 {live.weight} · 占比 {((live.load_share || 0) * 100).toFixed(1)}%
                         </div>
                       )}
@@ -1945,8 +2094,8 @@ function NodesMetricsPanel({
                     <td className="px-3 py-1.5">
                       {nd.active_vus} / {nd.active_conns}
                     </td>
-                    <td className="px-3 py-1.5 font-semibold text-sky-800">{nd.rps.toFixed(1)}</td>
-                    <td className={`px-3 py-1.5 ${nd.error_rate > 0 ? 'text-rose-700 font-semibold' : ''}`}>
+                    <td className="px-3 py-1.5 font-semibold text-tidal">{nd.rps.toFixed(1)}</td>
+                    <td className={`px-3 py-1.5 ${nd.error_rate > 0 ? 'text-rose-600 font-semibold' : ''}`}>
                       {(nd.error_rate * 100).toFixed(2)}%
                     </td>
                     <td className="px-3 py-1.5">

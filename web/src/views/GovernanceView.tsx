@@ -29,6 +29,8 @@ import {
   Users,
   X,
 } from 'lucide-react'
+import { RollingNumber } from '../components/DropletFilter'
+import { LiquidCapsule } from '../components/LiquidCapsule'
 import { api, APIError } from '../lib/api'
 import { copyText, downloadText, fileStamp, toCSV } from '../lib/download'
 import type {
@@ -260,6 +262,7 @@ function Field({ label, children, className = '' }: { label: ReactNode; children
 export function GovernanceView({ currentUser, onToast }: Props) {
   const isAdmin = currentUser.role === 'admin'
   const [subTab, setSubTab] = useState<SubTab>(isAdmin ? 'users' : 'security')
+  const govTabsRef = useRef<HTMLDivElement>(null)
   const confirm = useArmedConfirm()
   const { copied, mark: markCopied } = useCopied()
 
@@ -587,9 +590,15 @@ export function GovernanceView({ currentUser, onToast }: Props) {
   ]
 
   return (
-    <div className="flex-1 overflow-y-auto tg-scroller bg-canvas p-5 space-y-4 text-xs">
-      <div className="tg-telemetry-strip rounded-xl px-3 py-2.5 shadow-xs flex flex-wrap items-center justify-between gap-3">
-        <div role="tablist" aria-label="系统治理页签" className="tg-tablist items-center gap-1 bg-white/5 p-1 rounded-lg">
+    <div className="flex-1 overflow-y-auto tg-scroller bg-transparent p-2.5 pb-[72px] space-y-3 text-xs">
+      <div className="tg-accent-card px-3.5 py-2.5 flex flex-wrap items-center justify-between gap-3">
+        <div
+          ref={govTabsRef}
+          role="tablist"
+          aria-label="系统治理页签"
+          className="relative tg-tablist items-center gap-1 bg-surface-subtle/80 border border-line p-1 rounded-xl"
+        >
+          <LiquidCapsule containerRef={govTabsRef} activeId={subTab} />
           {tabs
             .filter((t) => t.show)
             .map((t) => {
@@ -601,28 +610,27 @@ export function GovernanceView({ currentUser, onToast }: Props) {
                   type="button"
                   role="tab"
                   aria-selected={selected}
+                  data-liq-id={t.id}
                   onClick={() => setSubTab(t.id)}
-                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md font-medium whitespace-nowrap transition-colors ${
-                    selected
-                      ? 'bg-white/15 text-white font-semibold ring-1 ring-white/25'
-                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                  className={`relative z-10 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-medium whitespace-nowrap transition-colors ${
+                    selected ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
-                  <Icon className={`w-3.5 h-3.5 ${selected ? 'text-sky-300' : ''}`} /> {t.label}
+                  <Icon className={`w-3.5 h-3.5 ${selected ? 'text-tidal' : ''}`} /> {t.label}
                 </button>
               )
             })}
         </div>
-        <span className="text-[11px] text-slate-400 font-mono">
+        <span className="text-[11px] text-fg-subtle font-mono">
           {currentUser.username} · {currentUser.role}
         </span>
       </div>
 
       {subTab === 'users' && isAdmin && (
-        <section aria-label="用户与角色" className="bg-surface rounded-xl border border-line shadow-xs">
+        <section aria-label="用户与角色" className="tg-glass-card">
           <form
             onSubmit={handleCreateUser}
-            className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end p-3 border-b border-line bg-surface-subtle rounded-t-xl"
+            className="grid grid-cols-1 md:grid-cols-12 gap-2 items-end p-3 border-b border-line bg-surface-subtle/60"
           >
             <Field label="用户名" className="md:col-span-3">
               <input
@@ -877,7 +885,7 @@ export function GovernanceView({ currentUser, onToast }: Props) {
       )}
 
       {subTab === 'security' && (
-        <form onSubmit={handleSavePolicy} className="bg-surface rounded-xl border border-line shadow-xs p-4 space-y-4">
+        <form onSubmit={handleSavePolicy} className="tg-glass-card p-4 space-y-4">
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             <fieldset className="space-y-3 border border-line rounded-lg p-3 min-w-0">
               <legend className="font-semibold text-fg px-1.5">出站目标白名单</legend>
@@ -1014,7 +1022,7 @@ export function GovernanceView({ currentUser, onToast }: Props) {
               <span className="text-fg-muted">
                 工具开关{' '}
                 <span className="tg-tabular font-mono text-fg font-semibold">
-                  {enabledCount}/{tools.length}
+                  <RollingNumber value={enabledCount} />/{tools.length}
                 </span>
               </span>
               {isAdmin && tools.length > 0 && (
@@ -1101,8 +1109,8 @@ export function GovernanceView({ currentUser, onToast }: Props) {
       )}
 
       {subTab === 'metrics' && (
-        <div className="space-y-4">
-          <section aria-label="Prometheus" className="bg-surface rounded-xl border border-line p-4 shadow-xs space-y-3">
+        <div className="space-y-3">
+          <section aria-label="Prometheus" className="tg-glass-card p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="flex items-center gap-2 min-w-0">
                 <span className="font-semibold text-fg">Prometheus</span>
@@ -1128,7 +1136,7 @@ export function GovernanceView({ currentUser, onToast }: Props) {
             )}
           </section>
 
-          <form onSubmit={handleSaveSink} className="bg-surface rounded-xl border border-line p-4 shadow-xs space-y-3">
+          <form onSubmit={handleSaveSink} className="tg-glass-card p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-semibold text-fg">实时指标外推</h3>
               <label className="inline-flex items-center gap-2 cursor-pointer text-fg">
@@ -1276,7 +1284,7 @@ export function GovernanceView({ currentUser, onToast }: Props) {
       )}
 
       {subTab === 'audit' && isAdmin && (
-        <section aria-label="审计日志" className="bg-surface rounded-xl border border-line shadow-xs">
+        <section aria-label="审计日志" className="tg-glass-card">
           <div className="p-3 border-b border-line space-y-2.5">
             <div className="flex flex-wrap items-center gap-2">
               <search className="relative flex-1 min-w-[220px] max-w-md">
@@ -1296,7 +1304,7 @@ export function GovernanceView({ currentUser, onToast }: Props) {
                 />
               </search>
               <span className="tg-tabular text-fg-subtle font-mono text-[11px]">
-                {visibleLogs.length} / {auditLogs.length}
+                <RollingNumber value={visibleLogs.length} /> / {auditLogs.length}
               </span>
               <div className="ml-auto flex items-center gap-1.5">
                 <button type="button" disabled={auditLoading} onClick={() => void loadAudit()} className={ghostBtn}>
@@ -1327,7 +1335,7 @@ export function GovernanceView({ currentUser, onToast }: Props) {
                     } ${f.mono ? 'font-mono' : 'font-medium'}`}
                   >
                     {f.label}
-                    <span className={`tg-tabular font-mono ${active ? 'text-sky-100' : 'text-fg-subtle'}`}>
+                    <span className={`tg-tabular font-mono ${active ? 'text-[#e0f2fe]' : 'text-fg-subtle'}`}>
                       {filterCounts[f.id] ?? 0}
                     </span>
                   </button>

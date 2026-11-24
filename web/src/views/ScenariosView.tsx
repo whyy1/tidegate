@@ -43,10 +43,13 @@ import {
   type LucideIcon,
 } from 'lucide-react'
 import { CodeEditor, type CodeSnippet } from '../components/CodeEditor'
+import { RollingNumber } from '../components/DropletFilter'
 import { KeyValueEditor } from '../components/KeyValueEditor'
 import { LoadConfigEditor } from '../components/LoadConfigEditor'
+import { BottomModuleStrip, ModuleZoomButton } from '../components/ModuleStage'
 import { api, APIError } from '../lib/api'
 import { copyText } from '../lib/download'
+import { flipFromRect } from '../lib/glassPhysics'
 import { useNativeDialog } from '../lib/useNativeDialog'
 import type {
   DataFile,
@@ -724,6 +727,34 @@ export function ScenariosView({
   const [stopOnError, setStopOnError] = useState(false)
   const [previewModal, setPreviewModal] = useState<FilePreview | null>(null)
   const previewRef = useNativeDialog(previewModal !== null, () => setPreviewModal(null))
+  const [zoomedMod, setZoomedMod] = useState<'' | 'list' | 'steps' | 'load'>('')
+  const listPaneRef = useRef<HTMLElement>(null)
+  const stepsPaneRef = useRef<HTMLElement>(null)
+  const loadPaneRef = useRef<HTMLElement>(null)
+
+  const paneRefFor = (id: 'list' | 'steps' | 'load') => {
+    if (id === 'list') return listPaneRef.current
+    if (id === 'steps') return stepsPaneRef.current
+    return loadPaneRef.current
+  }
+
+  const toggleZoomMod = (id: 'list' | 'steps' | 'load', el?: HTMLElement | null) => {
+    const rect = (el ?? paneRefFor(id))?.getBoundingClientRect() ?? null
+    setZoomedMod((cur) => {
+      const next = cur === id ? '' : id
+      requestAnimationFrame(() => flipFromRect(paneRefFor(id), rect))
+      return next
+    })
+  }
+
+  useEffect(() => {
+    if (!zoomedMod) return
+    const onKey = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape') setZoomedMod('')
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [zoomedMod])
 
   const loadAll = async (selectId?: string) => {
     try {
@@ -944,28 +975,40 @@ export function ScenariosView({
   }
 
   const stripBtn =
-    'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-white/20 bg-white/10 hover:bg-white/20 text-slate-100 font-medium disabled:opacity-45'
+    'inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium disabled:opacity-45'
 
   return (
     <StepEditorContext.Provider value={stepCtx}>
-      <div className="flex flex-1 min-h-0 bg-canvas">
+      <div className={`flex flex-1 min-h-0 gap-2.5 ${zoomedMod ? 'pb-[116px]' : 'pb-[64px]'}`}>
         {/* Left Sidebar: Scenarios + Data Files */}
-        <aside className="w-72 bg-surface-subtle border-r border-line flex flex-col shrink-0">
-          <div className="p-3 border-b border-line flex items-center justify-between">
+        <aside
+          ref={listPaneRef}
+          className={`tg-glass-card ${
+            zoomedMod && zoomedMod !== 'list' ? 'hidden' : 'flex flex-col shrink-0'
+          } ${zoomedMod === 'list' ? 'flex-1 min-w-0' : 'w-72'}`}
+        >
+          <div className="p-3 border-b border-line flex items-center justify-between gap-2">
             <span className="text-xs font-semibold text-fg inline-flex items-center gap-1.5">
               场景
-              <span className="px-1.5 py-0.5 rounded-full bg-surface border border-line text-fg-muted text-[10px] font-mono tg-tabular">
-                {scenarios.length}
-              </span>
+              <RollingNumber
+                value={scenarios.length}
+                className="px-1.5 py-0.5 rounded-full bg-surface-subtle border border-line text-fg-muted text-[10px] font-mono"
+              />
             </span>
-            <button
-              type="button"
-              disabled={!canWrite}
-              onClick={() => void selectScenario('new')}
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-sky-600 hover:bg-sky-solid text-white text-xs font-medium disabled:opacity-45"
-            >
-              <Plus className="w-3.5 h-3.5" /> 新建场景
-            </button>
+            <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                disabled={!canWrite}
+                onClick={() => void selectScenario('new')}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-sky-600 hover:bg-sky-solid text-white text-xs font-medium disabled:opacity-45"
+              >
+                <Plus className="w-3.5 h-3.5" /> 新建场景
+              </button>
+              <ModuleZoomButton
+                expanded={zoomedMod === 'list'}
+                onToggle={() => toggleZoomMod('list', listPaneRef.current)}
+              />
+            </div>
           </div>
 
           <div className="flex-1 overflow-y-auto tg-scroller p-2 space-y-1">
@@ -973,7 +1016,7 @@ export function ScenariosView({
               <div
                 key={sc.id}
                 className={`group flex items-center justify-between gap-1 px-2 py-1.5 rounded-lg text-xs ${
-                  selectedId === sc.id ? 'bg-sky-100 text-sky-950 font-semibold' : 'text-fg-muted hover:bg-surface-hover'
+                  selectedId === sc.id ? 'bg-sky-500/15 text-tidal font-semibold' : 'text-fg-muted hover:bg-surface-hover'
                 }`}
               >
                 <button
@@ -1008,7 +1051,7 @@ export function ScenariosView({
           </div>
 
           {/* Data Files Panel */}
-          <div className="border-t border-line p-3 bg-surface space-y-2 max-h-64 flex flex-col">
+          <div className="border-t border-line p-3 bg-surface-subtle/40 space-y-2 max-h-64 flex flex-col">
             <div className="flex items-center justify-between">
               <span className="text-xs font-semibold text-fg flex items-center gap-1.5">
                 <Database className="w-3.5 h-3.5 text-tidal" /> 数据文件
@@ -1084,8 +1127,16 @@ export function ScenariosView({
         </aside>
 
         {/* Main Scenario Builder */}
-        <main className="flex-1 min-w-0 overflow-y-auto tg-scroller bg-[var(--tg-canvas)] p-5 space-y-5 text-xs">
-          <div className="tg-telemetry-strip rounded-xl border border-slate-800 p-4 shadow-xs flex flex-wrap items-center justify-between gap-3">
+        <main
+          className={`flex-1 min-w-0 overflow-y-auto tg-scroller bg-transparent space-y-3 text-xs pr-0.5 ${
+            zoomedMod === 'list' ? 'hidden' : ''
+          }`}
+        >
+          <div
+            className={`tg-accent-card p-4 flex flex-wrap items-center justify-between gap-3 ${
+              zoomedMod ? 'hidden' : ''
+            }`}
+          >
             <div className="flex flex-wrap items-center gap-3 flex-1 min-w-[260px]">
               <input
                 type="text"
@@ -1094,13 +1145,13 @@ export function ScenariosView({
                 value={draft.name || ''}
                 onChange={(e) => updateDraft({ name: e.target.value })}
                 placeholder="场景名称"
-                className="px-3 py-1.5 border border-white/20 rounded-lg font-semibold text-sm text-white placeholder:text-slate-300 bg-white/10 focus:border-sky-400 focus:outline-none min-w-[220px]"
+                className="px-3 py-1.5 border border-line-strong rounded-lg font-semibold text-sm text-fg placeholder:text-fg-subtle bg-surface focus:border-sky-500 focus:outline-none min-w-[220px]"
               />
               <select
                 aria-label="场景默认环境"
                 value={draft.environment_id || ''}
                 onChange={(e) => updateDraft({ environment_id: e.target.value })}
-                className="px-2.5 py-1.5 border border-white/20 rounded-lg bg-white/10 text-white text-xs [&>option]:bg-slate-900 [&>option]:text-slate-100"
+                className="px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg text-xs [&>option]:bg-surface [&>option]:text-fg"
               >
                 <option value="">跟随顶部环境</option>
                 {environments.map((env) => (
@@ -1110,8 +1161,8 @@ export function ScenariosView({
                 ))}
               </select>
               {dirty && (
-                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-400/15 border border-amber-400/30 text-amber-300 text-[11px] font-medium">
-                  <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+                <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-amber-50 border border-amber-300 text-amber-800 text-[11px] font-medium">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
                   未保存
                 </span>
               )}
@@ -1125,23 +1176,23 @@ export function ScenariosView({
                   className={stripBtn}
                   title="导出 k6 脚本"
                 >
-                  <Download className="w-3.5 h-3.5 text-sky-300" /> k6
+                  <Download className="w-3.5 h-3.5 text-tidal" /> k6
                 </a>
               )}
-              <div className="inline-flex items-stretch rounded-lg border border-white/20 bg-white/10 overflow-hidden">
+              <div className="inline-flex items-stretch rounded-lg border border-line-strong bg-surface overflow-hidden">
                 <button
                   type="button"
                   disabled={!canWrite || dryRunning}
                   onClick={() => void handleDryRun()}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 hover:bg-white/15 text-slate-100 font-medium disabled:opacity-45"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 hover:bg-surface-hover text-fg font-medium disabled:opacity-45"
                 >
-                  <FlaskConical className="w-3.5 h-3.5 text-sky-300" />
+                  <FlaskConical className="w-3.5 h-3.5 text-tidal" />
                   {dryRunning ? '试跑中…' : '试跑'}
                 </button>
                 <label
                   title="遇到失败步骤立即停止"
-                  className={`inline-flex items-center gap-1.5 px-2.5 border-l border-white/15 text-slate-200 select-none ${
-                    !canWrite || dryRunning ? 'opacity-45 cursor-not-allowed' : 'cursor-pointer hover:bg-white/10'
+                  className={`inline-flex items-center gap-1.5 px-2.5 border-l border-line text-fg-muted select-none ${
+                    !canWrite || dryRunning ? 'opacity-45 cursor-not-allowed' : 'cursor-pointer hover:bg-surface-hover'
                   }`}
                 >
                   <input
@@ -1157,7 +1208,7 @@ export function ScenariosView({
                 type="button"
                 disabled={!canWrite || saving}
                 onClick={() => void handleSave()}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-sky-600 hover:bg-sky-solid border border-sky-400/30 text-white font-medium disabled:opacity-45"
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-primary hover:bg-primary-hover text-white font-medium disabled:opacity-45"
               >
                 <Save className="w-3.5 h-3.5" /> 保存
               </button>
@@ -1173,7 +1224,7 @@ export function ScenariosView({
                   }
                   onLaunchScenario(draft.id)
                 }}
-                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-slate-950 font-semibold disabled:opacity-45"
+                className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg bg-amber-500 hover:bg-amber-600 text-[#1f1300] font-semibold disabled:opacity-45"
               >
                 <Rocket className="w-3.5 h-3.5" /> 启动压测
               </button>
@@ -1181,13 +1232,13 @@ export function ScenariosView({
           </div>
 
           {/* Scenario Variables & Data Binding */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-            <section className="bg-surface rounded-xl border border-line p-4 space-y-2.5">
+          <div className={`grid grid-cols-1 lg:grid-cols-2 gap-3 ${zoomedMod ? 'hidden' : ''}`}>
+            <section className="tg-glass-card tg-tilt-card p-4 space-y-2.5">
               <h3 className="font-semibold text-fg">场景变量</h3>
               <KeyValueEditor items={draft.variables || []} onChange={(next) => updateDraft({ variables: next })} compact />
             </section>
 
-            <section className="bg-surface rounded-xl border border-line p-4 space-y-2.5">
+            <section className="tg-glass-card tg-tilt-card p-4 space-y-2.5">
               <div className="flex items-center justify-between">
                 <h3 className="font-semibold text-fg">数据源</h3>
                 <button
@@ -1269,23 +1320,46 @@ export function ScenariosView({
           </div>
 
           {/* Steps Sequence */}
-          <section className="bg-surface rounded-xl border border-line p-4 space-y-3">
+          <section
+            ref={stepsPaneRef}
+            className={`tg-glass-card !overflow-visible p-4 space-y-3 ${
+              zoomedMod && zoomedMod !== 'steps' ? 'hidden' : ''
+            }`}
+          >
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h3 className="font-semibold text-fg inline-flex items-center gap-1.5">
                 步骤编排
-                <span className="px-1.5 py-0.5 rounded-full bg-surface-subtle border border-line text-fg-muted text-[10px] font-mono tg-tabular">
-                  {totalSteps}
-                </span>
+                <RollingNumber
+                  value={totalSteps}
+                  className="px-1.5 py-0.5 rounded-full bg-surface-subtle border border-line text-fg-muted text-[10px] font-mono"
+                />
               </h3>
-              <AddStepMenu label="添加步骤" variant="primary" align="right" allowControl onAdd={addRootStep} />
+              <div className="flex items-center gap-2">
+                <AddStepMenu label="添加步骤" variant="primary" align="right" allowControl onAdd={addRootStep} />
+                <ModuleZoomButton
+                  expanded={zoomedMod === 'steps'}
+                  onToggle={() => toggleZoomMod('steps', stepsPaneRef.current)}
+                />
+              </div>
             </div>
 
             <ScenarioStepListEditor steps={steps} onChange={(nextSteps) => updateDraft({ steps: nextSteps })} depth={0} />
           </section>
 
           {/* Load Profile + SLA Thresholds */}
-          <section className="bg-surface rounded-xl border border-line p-4 space-y-2">
-            <h3 className="font-semibold text-fg">负载与阈值</h3>
+          <section
+            ref={loadPaneRef}
+            className={`tg-glass-card p-4 space-y-2 ${
+              zoomedMod && zoomedMod !== 'load' ? 'hidden' : ''
+            }`}
+          >
+            <div className="flex items-center justify-between gap-2">
+              <h3 className="font-semibold text-fg">负载与阈值</h3>
+              <ModuleZoomButton
+                expanded={zoomedMod === 'load'}
+                onToggle={() => toggleZoomMod('load', loadPaneRef.current)}
+              />
+            </div>
             <LoadConfigEditor
               load={draft.load || { mode: 'vus', stages: [{ duration: '0s', target: 10 }, { duration: '30s', target: 10 }] }}
               onChange={(nextLoad) => updateDraft({ load: nextLoad })}
@@ -1296,8 +1370,8 @@ export function ScenariosView({
           </section>
 
           {/* Functional Dry-Run Result */}
-          {dryResult && (
-            <section className="bg-surface rounded-xl border border-line p-4 space-y-3">
+          {dryResult && !zoomedMod && (
+            <section className="tg-glass-card p-4 space-y-3">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="flex items-center gap-2 font-semibold text-sm">
                   {dryResult.passed ? (
@@ -1394,6 +1468,23 @@ export function ScenariosView({
             </>
           )}
         </dialog>
+
+        {zoomedMod && (
+          <BottomModuleStrip
+            activeId={zoomedMod}
+            onSelect={(id) => toggleZoomMod(id as 'list' | 'steps' | 'load', null)}
+            onClose={() => setZoomedMod('')}
+            items={[
+              { id: 'list', title: '场景与数据', metric: `${scenarios.length} 场景` },
+              { id: 'steps', title: '步骤编排', metric: `${totalSteps} 步` },
+              {
+                id: 'load',
+                title: '负载与阈值',
+                metric: draft.load?.mode === 'rate' ? 'QPS' : 'VU',
+              },
+            ]}
+          />
+        )}
       </div>
     </StepEditorContext.Provider>
   )

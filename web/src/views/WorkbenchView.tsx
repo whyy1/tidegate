@@ -32,13 +32,17 @@ import { AuthEditor } from '../components/AuthEditor'
 import { CodeEditor } from '../components/CodeEditor'
 import { CollectionRunnerModal } from '../components/CollectionRunnerModal'
 import { CurlModal, type CurlModalTab } from '../components/CurlModal'
+import { DropletFilter, RollingNumber } from '../components/DropletFilter'
 import { FolderModal } from '../components/FolderModal'
 import { ImportModal } from '../components/ImportModal'
 import { KeyValueEditor } from '../components/KeyValueEditor'
+import { LiquidCapsule } from '../components/LiquidCapsule'
+import { BottomModuleStrip, ModuleZoomButton } from '../components/ModuleStage'
 import { ResponsePanel } from '../components/ResponsePanel'
 import { SaveAPIModal } from '../components/SaveAPIModal'
 import { VariableInput } from '../components/VariableInput'
 import { api, APIError } from '../lib/api'
+import { flipFromRect } from '../lib/glassPhysics'
 import type {
   API,
   APIFieldDoc,
@@ -361,6 +365,41 @@ export function WorkbenchView({
   const [dragNodeId, setDragNodeId] = useState<string>('')
   const [grpcCatalog, setGrpcCatalog] = useState<GRPCSchemaCatalog | null>(null)
   const [grpcDiscoverBusy, setGrpcDiscoverBusy] = useState(false)
+  const [protoFilter, setProtoFilter] = useState<'all' | 'http' | 'grpc' | 'ws'>('all')
+  const [zoomedMod, setZoomedMod] = useState<'directory' | 'request' | 'response' | null>(null)
+  const treePaneRef = useRef<HTMLElement | null>(null)
+  const reqPaneRef = useRef<HTMLDivElement | null>(null)
+  const respPaneRef = useRef<HTMLDivElement | null>(null)
+  const reqTabsRef = useRef<HTMLDivElement | null>(null)
+
+  const toggleZoomMod = (mod: 'directory' | 'request' | 'response', fromEl: HTMLElement | null) => {
+    const fromRect = fromEl?.getBoundingClientRect() || null
+    setZoomedMod((cur) => {
+      const next = cur === mod ? null : mod
+      window.requestAnimationFrame(() => {
+        if (!next) return
+        const targetEl =
+          next === 'directory'
+            ? treePaneRef.current
+            : next === 'request'
+              ? reqPaneRef.current
+              : respPaneRef.current
+        flipFromRect(targetEl, fromRect)
+      })
+      return next
+    })
+  }
+
+  useEffect(() => {
+    if (!isActive || !zoomedMod) return
+    const onEsc = (e: KeyboardEvent) => {
+      if (e.key === 'Escape' && !document.querySelector('dialog[open]')) {
+        setZoomedMod(null)
+      }
+    }
+    window.addEventListener('keydown', onEsc)
+    return () => window.removeEventListener('keydown', onEsc)
+  }, [isActive, zoomedMod])
 
   const activeTab = tabs.find((t) => t.tabKey === activeTabKey) || tabs[0]
 
@@ -804,26 +843,41 @@ export function WorkbenchView({
     }
   }
 
+  const matchesProto = (n: TreeNode): boolean => {
+    if (protoFilter === 'all') return true
+    const m = (n.method || '').toUpperCase()
+    if (protoFilter === 'grpc') return m === 'GRPC'
+    if (protoFilter === 'ws') return m === 'WS' || m === 'SSE'
+    return m !== 'GRPC' && m !== 'WS' && m !== 'SSE'
+  }
+
   const filterTree = (nodes: TreeNode[]): TreeNode[] => {
     const kw = search.trim().toLowerCase()
-    if (!kw) return nodes
+    if (!kw && protoFilter === 'all') return nodes
     const out: TreeNode[] = []
     for (const n of nodes) {
       if (n.type === 'folder') {
         const kids = filterTree(n.children || [])
-        if (n.name.toLowerCase().includes(kw) || kids.length > 0) {
+        if ((kw && n.name.toLowerCase().includes(kw) && protoFilter === 'all') || kids.length > 0) {
           out.push({ ...n, children: kids })
         }
       } else if (
-        n.name.toLowerCase().includes(kw) ||
-        (n.url || '').toLowerCase().includes(kw) ||
-        (n.method || '').toLowerCase().includes(kw)
+        matchesProto(n) &&
+        (!kw ||
+          n.name.toLowerCase().includes(kw) ||
+          (n.url || '').toLowerCase().includes(kw) ||
+          (n.method || '').toLowerCase().includes(kw))
       ) {
         out.push(n)
       }
     }
     return out
   }
+
+  const countLeafAPIs = (nodes: TreeNode[]): number =>
+    nodes.reduce((sum, n) => sum + (n.type === 'folder' ? countLeafAPIs(n.children || []) : 1), 0)
+  const visibleTree = useMemo(() => filterTree(tree.children), [tree.children, search, protoFilter])
+  const visibleLeafCount = useMemo(() => countLeafAPIs(visibleTree), [visibleTree])
 
   const nodeActionBtn = 'p-1 rounded text-fg-subtle hover:bg-surface hover:text-fg focus-visible:outline-2 focus-visible:outline-sky-500'
 
@@ -853,7 +907,7 @@ export function WorkbenchView({
   const renderTreeNodes = (nodes: TreeNode[], parentId = '', depth = 0) => {
     return nodes.map((node, idx) => {
       if (node.type === 'folder') {
-        const isCollapsed = Boolean(collapsed[node.id]) && !search.trim()
+        const isCollapsed = Boolean(collapsed[node.id]) && !search.trim() && protoFilter === 'all'
         const armed = confirmDeleteId === node.id
         const toggleFolder = () => setCollapsed((c) => ({ ...c, [node.id]: !c[node.id] }))
         return (
@@ -1204,11 +1258,41 @@ export function WorkbenchView({
     'p-1.5 rounded text-fg-subtle hover:text-fg hover:bg-surface-hover disabled:opacity-40 disabled:pointer-events-none shrink-0'
 
   return (
-    <div className="flex flex-1 min-h-0 bg-canvas">
+    <div className={`flex flex-1 min-h-0 gap-2.5 ${zoomedMod ? 'pb-[116px]' : 'pb-[64px]'}`}>
       {/* Left API Tree */}
-      {!treeCollapsed && (
-        <aside className="w-[272px] bg-surface border-r border-line flex flex-col shrink-0">
-          <div className="p-2 border-b border-line space-y-2">
+      {((!treeCollapsed && !zoomedMod) || zoomedMod === 'directory') && (
+        <aside
+          ref={treePaneRef}
+          className={`relative z-20 tg-glass-card !overflow-visible flex flex-col shrink-0 ${
+            zoomedMod === 'directory' ? 'flex-1 min-w-0' : 'w-[272px]'
+          }`}
+        >
+          <div className="relative z-20 p-2.5 border-b border-line space-y-2">
+            <div className="flex items-center justify-between gap-1.5">
+              <DropletFilter
+                size="sm"
+                ariaLabel="按协议筛选接口"
+                value={protoFilter}
+                onChange={(v) => setProtoFilter(v as typeof protoFilter)}
+                options={[
+                  { value: 'all', label: '全部', dotClass: 'bg-sky-500' },
+                  { value: 'http', label: 'HTTP', dotClass: 'bg-emerald-500' },
+                  { value: 'grpc', label: 'gRPC', dotClass: 'bg-indigo-500' },
+                  { value: 'ws', label: 'WS/SSE', dotClass: 'bg-amber-500' },
+                ]}
+              />
+              <div className="flex items-center gap-1.5 shrink-0">
+                <RollingNumber
+                  value={visibleLeafCount}
+                  suffix=" 项"
+                  className="text-[11px] font-mono text-fg-subtle"
+                />
+                <ModuleZoomButton
+                  expanded={zoomedMod === 'directory'}
+                  onToggle={() => toggleZoomMod('directory', treePaneRef.current)}
+                />
+              </div>
+            </div>
             <search className="relative">
               <Search className="w-3.5 h-3.5 text-fg-subtle absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
               <input
@@ -1222,14 +1306,14 @@ export function WorkbenchView({
                 autoCorrect="off"
                 autoCapitalize="none"
                 spellCheck={false}
-                className="w-full pl-8 pr-2.5 py-1.5 text-xs bg-surface-subtle text-fg border border-line rounded-md focus:bg-surface focus:border-sky-500 focus:outline-none"
+                className="w-full pl-8 pr-2.5 py-1.5 text-xs bg-surface-subtle text-fg border border-line rounded-lg focus:bg-surface focus:border-sky-500 focus:outline-none"
               />
             </search>
             <div className="grid grid-cols-3 gap-1 text-[11px]">
               <button
                 type="button"
                 onClick={() => addScratchTab()}
-                className="inline-flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-md bg-primary hover:bg-primary-hover text-white font-medium"
+                className="inline-flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg bg-primary hover:bg-primary-hover text-white font-medium"
               >
                 <FilePlus className="w-3.5 h-3.5 shrink-0" /> 新建
               </button>
@@ -1237,7 +1321,7 @@ export function WorkbenchView({
                 type="button"
                 disabled={!canWrite}
                 onClick={() => setImportOpen(true)}
-                className="inline-flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-md border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium disabled:opacity-45"
+                className="inline-flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium disabled:opacity-45"
               >
                 <Import className="w-3.5 h-3.5 shrink-0 text-tidal" /> 导入
               </button>
@@ -1245,7 +1329,7 @@ export function WorkbenchView({
                 type="button"
                 disabled={!canWrite}
                 onClick={() => setRunnerModal({ open: true, folderId: '' })}
-                className="inline-flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-md border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium disabled:opacity-45"
+                className="inline-flex items-center justify-center gap-1 py-1.5 px-1.5 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium disabled:opacity-45"
                 title="批量测试全部接口"
               >
                 <ListChecks className="w-3.5 h-3.5 shrink-0 text-emerald-600" /> 批量测试
@@ -1253,7 +1337,7 @@ export function WorkbenchView({
             </div>
           </div>
 
-          <div className="flex items-center justify-between px-3 pt-2 pb-1 text-[11px]">
+          <div className="relative z-10 flex items-center justify-between px-3 pt-2 pb-1 text-[11px]">
             <span className="text-fg-subtle font-medium">目录</span>
             {canWrite && (
               <button
@@ -1269,7 +1353,7 @@ export function WorkbenchView({
           </div>
 
           <div
-            className="flex-1 overflow-y-auto tg-scroller px-1.5 pb-1.5 space-y-px"
+            className="relative z-10 flex-1 overflow-y-auto tg-scroller px-1.5 pb-2 space-y-px"
             onDragOver={(e) => e.preventDefault()}
             onDrop={(e) => {
               if (e.target === e.currentTarget && dragNodeId) {
@@ -1277,19 +1361,21 @@ export function WorkbenchView({
               }
             }}
           >
-            {tree.children.length === 0 ? (
-              <div className="text-center py-8 px-3 text-xs text-fg-subtle">暂无接口</div>
+            {visibleTree.length === 0 ? (
+              <div className="text-center py-8 px-3 text-xs text-fg-subtle">暂无匹配接口</div>
             ) : (
-              renderTreeNodes(filterTree(tree.children))
+              renderTreeNodes(visibleTree)
             )}
           </div>
         </aside>
       )}
 
       {/* Main Editor + Split Response Area */}
-      <main className="flex-1 min-w-0 flex flex-col bg-surface">
+      <main className={`flex-1 min-w-0 flex flex-col gap-2.5 ${zoomedMod === 'directory' ? 'hidden' : ''}`}>
+        {/* Floating Glass Chrome Card: Multi-Tabs + URL Bar */}
+        <div className="tg-glass-card shrink-0 flex flex-col">
         {/* Multi-Tabs Bar + View Controls */}
-        <div className="flex items-end justify-between gap-2 px-2 pt-1.5 bg-surface-subtle border-b border-line shrink-0">
+        <div className="relative z-10 flex items-end justify-between gap-2 px-2.5 pt-2 bg-surface-subtle border-b border-line shrink-0">
           <div className="flex items-end gap-1 overflow-x-auto min-w-0 flex-1 [scrollbar-width:none]">
             <div className="flex items-center gap-0.5 mb-1 shrink-0">
               <button
@@ -1427,7 +1513,7 @@ export function WorkbenchView({
         </div>
 
         {/* URL & Actions Bar */}
-        <div className="px-3 py-2.5 border-b border-line space-y-2 bg-surface shrink-0">
+        <div className="relative z-10 px-3 py-2.5 space-y-2 shrink-0">
           <div className="flex items-center gap-2 text-xs min-w-0">
             <input
               type="text"
@@ -1595,26 +1681,43 @@ export function WorkbenchView({
             </button>
           </div>
         </div>
+        </div>
 
         {/* Resizable Split Request Config & Response Inspector */}
         <div
           ref={splitBoxRef}
-          className={`flex-1 min-h-0 flex ${splitMode === 'horizontal' ? 'flex-row' : 'flex-col'} ${
+          className={`flex-1 min-h-0 flex gap-2.5 ${splitMode === 'horizontal' ? 'flex-row' : 'flex-col'} ${
             resizingSplit ? 'select-none' : ''
           }`}
         >
           {/* Left / Top: Request Composer Pane */}
           <div
+            ref={reqPaneRef}
             style={
-              splitMode === 'horizontal'
-                ? { width: `${splitPct}%` }
-                : { height: `${splitPct}%` }
+              zoomedMod === 'request'
+                ? undefined
+                : splitMode === 'horizontal'
+                  ? { width: `${splitPct}%` }
+                  : { height: `${splitPct}%` }
             }
-            className="tg-split-pane flex flex-col min-h-0 min-w-0 shrink-0 overflow-hidden"
+            className={`tg-glass-card tg-split-pane flex-col min-h-0 min-w-0 shrink-0 ${
+              zoomedMod === 'response' ? 'hidden' : zoomedMod === 'request' ? 'flex flex-1' : 'flex'
+            }`}
           >
             {/* Request Config Sub-tabs */}
-            <div className="px-2 border-b border-line flex items-center justify-between gap-2 bg-surface-subtle shrink-0 min-w-0">
-              <div role="tablist" aria-label="请求配置页签" className="tg-tablist flex-1 min-w-0 pr-1 gap-0.5 text-xs font-medium">
+            <div className="relative z-10 px-2.5 py-1 border-b border-line flex items-center justify-between gap-2 bg-surface-subtle shrink-0 min-w-0">
+              <div
+                ref={reqTabsRef}
+                role="tablist"
+                aria-label="请求配置页签"
+                className="relative tg-tablist flex-1 min-w-0 pr-1 gap-0.5 text-xs font-medium py-0.5"
+              >
+                <LiquidCapsule
+                  containerRef={reqTabsRef}
+                  activeId={reqSubTab}
+                  orientation="horizontal"
+                  className="rounded-lg"
+                />
                 {(
                   [
                     {
@@ -1661,17 +1764,18 @@ export function WorkbenchView({
                   return (
                     <button
                       key={st.id}
+                      data-liq-id={st.id}
                       type="button"
                       role="tab"
                       aria-selected={selected}
                       onClick={() => setReqSubTab(st.id)}
-                      className={`tg-tab inline-flex items-center gap-1 px-2 py-2 transition-colors ${
-                        selected ? 'text-tidal' : 'text-fg-muted hover:text-fg'
+                      className={`relative z-10 inline-flex items-center gap-1 px-2 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
+                        selected ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
                       }`}
                     >
                       <span>{st.label}</span>
                       {st.count > 0 && (
-                        <span className="tg-tabular px-1 py-0 rounded-full bg-sky-100 text-sky-800 text-[10px] font-mono">
+                        <span className="tg-tabular px-1 py-0 rounded-full bg-sky-500/15 text-tidal text-[10px] font-mono">
                           {st.count}
                         </span>
                       )}
@@ -1680,11 +1784,12 @@ export function WorkbenchView({
                 })}
               </div>
 
-              {reqSubTab === 'headers' && (
-                <button
-                  type="button"
-                  onClick={() => void handleToggleEffectivePreview()}
-                  className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-medium ${
+              <div className="flex items-center gap-1.5 shrink-0">
+                {reqSubTab === 'headers' && (
+                  <button
+                    type="button"
+                    onClick={() => void handleToggleEffectivePreview()}
+                    className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded border text-[11px] font-medium ${
                     activeTab.showEffective
                       ? 'bg-sky-100 border-sky-300 text-sky-800'
                       : 'bg-surface border-line-strong text-fg-muted hover:bg-surface-hover'
@@ -1693,9 +1798,14 @@ export function WorkbenchView({
                   <Eye className="w-3 h-3" /> 生效预览
                 </button>
               )}
+              <ModuleZoomButton
+                expanded={zoomedMod === 'request'}
+                onToggle={() => toggleZoomMod('request', reqPaneRef.current)}
+              />
+              </div>
             </div>
 
-            <div className="flex-1 min-h-0 overflow-y-auto tg-scroller p-4 text-xs space-y-4">
+            <div className="relative z-10 flex-1 min-h-0 overflow-y-auto tg-scroller p-4 text-xs space-y-4">
             {reqSubTab === 'params' && (
               <div className="space-y-4">
                 {(req.path_params?.length || 0) > 0 && (
@@ -2845,34 +2955,41 @@ export function WorkbenchView({
           </div>
 
           {/* Draggable & Keyboard-Accessible Split Separator */}
-          <div
-            role="separator"
-            tabIndex={0}
-            aria-orientation={splitMode === 'horizontal' ? 'vertical' : 'horizontal'}
-            aria-label="拖拽或按方向键调整请求与响应分屏比例"
-            aria-valuenow={Math.round(splitPct)}
-            aria-valuemin={28}
-            aria-valuemax={74}
-            onPointerDown={(e) => {
-              e.preventDefault()
-              setResizingSplit(true)
-            }}
-            onKeyDown={(e) => {
-              if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+          {!zoomedMod && (
+            <div
+              role="separator"
+              tabIndex={0}
+              aria-orientation={splitMode === 'horizontal' ? 'vertical' : 'horizontal'}
+              aria-label="拖拽或按方向键调整请求与响应分屏比例"
+              aria-valuenow={Math.round(splitPct)}
+              aria-valuemin={28}
+              aria-valuemax={74}
+              onPointerDown={(e) => {
                 e.preventDefault()
-                updateSplitPct(splitPct - 4)
-              } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
-                e.preventDefault()
-                updateSplitPct(splitPct + 4)
-              }
-            }}
-            className={`shrink-0 bg-[var(--tg-border)] hover:bg-sky-500 focus:bg-sky-600 focus:outline-none transition-colors flex items-center justify-center ${
-              splitMode === 'horizontal' ? 'w-1.5 cursor-col-resize' : 'h-1.5 cursor-row-resize'
-            }`}
-          />
+                setResizingSplit(true)
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+                  e.preventDefault()
+                  updateSplitPct(splitPct - 4)
+                } else if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+                  e.preventDefault()
+                  updateSplitPct(splitPct + 4)
+                }
+              }}
+              className={`shrink-0 rounded-full bg-white/40 dark:bg-sky-400/20 hover:bg-sky-500 focus:bg-sky-600 focus:outline-none transition-colors flex items-center justify-center ${
+                splitMode === 'horizontal' ? 'w-1.5 cursor-col-resize' : 'h-1.5 cursor-row-resize'
+              }`}
+            />
+          )}
 
-          {/* Right / Bottom: Response Telemetry Inspector */}
-          <div className="tg-split-pane flex-1 min-w-0 min-h-0 flex flex-col overflow-hidden">
+          {/* Right / Bottom: Deep-Sea Response Waterfall Anchor Card */}
+          <div
+            ref={respPaneRef}
+            className={`tg-split-pane min-w-0 min-h-0 flex-col ${
+              zoomedMod === 'request' ? 'hidden' : 'flex flex-1'
+            }`}
+          >
             <ResponsePanel
               projectId={projectId}
               activeEnvId={activeEnvId}
@@ -2882,6 +2999,8 @@ export function WorkbenchView({
               autoSyncTempVars={autoSyncTempVars}
               fileBaseName={activeTab.api.name}
               activeHistoryId={activeTab.historyId}
+              zoomed={zoomedMod === 'response'}
+              onToggleZoom={() => toggleZoomMod('response', respPaneRef.current)}
               onSaveExample={canWrite ? saveResponseAsExample : undefined}
               onToggleAutoSync={setAutoSyncTempVars}
               onPickExtractJSONPath={addExtractFromJSON}
@@ -2912,6 +3031,25 @@ export function WorkbenchView({
           </div>
         </div>
       </main>
+
+      {isActive && zoomedMod && (
+        <BottomModuleStrip
+          activeId={zoomedMod}
+          onSelect={(id) => toggleZoomMod(id as 'directory' | 'request' | 'response', null)}
+          onClose={() => setZoomedMod(null)}
+          items={[
+            { id: 'directory', title: '接口目录', metric: `${visibleLeafCount} 项` },
+            { id: 'request', title: '请求编排', metric: requestVerb(activeTab.api.request) },
+            {
+              id: 'response',
+              title: '响应瀑布',
+              metric: activeTab.debugResp?.result
+                ? `${activeTab.debugResp.result.status || 'ERR'} · ${activeTab.debugResp.result.timing.total_ms.toFixed(1)}ms`
+                : '待发送',
+            },
+          ]}
+        />
+      )}
 
       <ImportModal
         open={importOpen}
