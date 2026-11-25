@@ -1137,7 +1137,7 @@ export function ScenariosView({
           }`}
         >
           <div
-            className={`tg-accent-card p-4 flex flex-wrap items-center justify-between gap-3 ${
+            className={`tg-accent-card !overflow-visible p-4 flex flex-wrap items-center justify-between gap-3 ${
               zoomedMod ? 'hidden' : ''
             }`}
           >

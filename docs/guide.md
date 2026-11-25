@@ -99,7 +99,7 @@ services:
 1. 在 Tidegate 端配置：
    - `TIDEGATE_TLS_SELF_SIGNED=false`（当由反代终结 HTTPS 时）
    - `TIDEGATE_PUBLIC_URL=https://tidegate.example.com`（自动加入可信 Origin 并修正外网展示地址）
-   - `TIDEGATE_TRUSTED_PROXIES=127.0.0.1/8,10.0.0.0/8`（可信代理 IP/CIDR、`loopback` 或 `private`）
+   - `TIDEGATE_TRUSTED_PROXIES=127.0.0.1/8,10.0.0.0/8`（可信代理 IP/CIDR 或 `loopback`）
    - 若反代与 Tidegate 之间走内网明文 HTTP，可设置 `TIDEGATE_ALLOW_INSECURE_REMOTE=true`（公网入口仍必须为 HTTPS）。
 2. 反代需透传 `X-Forwarded-Proto`、`X-Forwarded-Host`、`X-Forwarded-For` 与 **WebSocket Upgrade** 头：
 
@@ -146,7 +146,7 @@ tidegate.example.com {
 
 ## 4. 管理员账密同步、忘记密码与 2FA 扫码绑定
 
-Tidegate 支持**启动声明式环境变量同步**与**命令行重置**两种运维通道（登录页点击 **忘记密码？** 亦可直接一键复制以下对应命令）：
+Tidegate 支持**启动声明式环境变量同步**与**命令行重置**两种运维通道：
 
 ### 方式一：环境变量启动同步（推荐 Docker / 容器编排）
 
@@ -200,7 +200,7 @@ docker exec -it tidegate-controller \
 | `TIDEGATE_ALLOW_INSECURE_REMOTE` | `--allow-insecure-remote` | `false` | 允许非本机通过明文 HTTP 登录（仅推荐反代内网使用） |
 | `TIDEGATE_PUBLIC_URL` | `--public-url` | `""` | 对外访问完整地址（如 `https://tidegate.example.com`） |
 | `TIDEGATE_ALLOWED_ORIGINS` | `--allowed-origins` | `""` | 额外允许的浏览器 Origin 列表（逗号分隔） |
-| `TIDEGATE_TRUSTED_PROXIES` | `--trusted-proxies` | `""` | 可信反代 IP/CIDR 或 `loopback`/`private`（逗号分隔） |
+| `TIDEGATE_TRUSTED_PROXIES` | `--trusted-proxies` | `""` | 可信反代 IP/CIDR 或 `loopback`（逗号分隔） |
 | `TIDEGATE_ADMIN_USER` | `--admin-user` | `admin` | 自动初始化或启动同步的管理员用户名 |
 | `TIDEGATE_ADMIN_PASSWORD` | `--admin-password` | `""` | 管理员初始化或重启同步明文密码 |
 | `TIDEGATE_ADMIN_PASSWORD_FILE` | `--admin-password-file` | `""` | 管理员密码文件路径（如 Docker Secrets） |

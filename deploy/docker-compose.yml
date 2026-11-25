@@ -17,27 +17,61 @@ services:
     volumes:
       - tidegate-data:/data
     environment:
+      # ── 基础存储与网络监听 ──
+      # 数据目录（存放 tidegate.db、master.key、YAML 项目与 tls/；容器卷挂载于 /data，二进制默认 ./data）
       TIDEGATE_DATA: /data
+      # HTTP / WebSocket / MCP 监听地址（host:port；二进制默认 127.0.0.1:8080，容器需 0.0.0.0:8080）
       TIDEGATE_LISTEN: 0.0.0.0:8080
+      # 集群 mTLS gRPC 监听地址（host:port；二进制默认 127.0.0.1:7443，容器需 0.0.0.0:7443）
       TIDEGATE_CLUSTER_LISTEN: 0.0.0.0:7443
+      # 启动后不自动打开浏览器（容器/无桌面环境设 true，默认 false）
+      TIDEGATE_NO_OPEN: "true"
+      # 禁用内置本机发压节点子进程（仅作纯控制端调度外部 agent 时设 true，默认 false）
+      # TIDEGATE_NO_LOCAL_AGENT: "false"
+      # 默认 HTTP 发压客户端引擎：fast（默认，高性能）或 std（标准库 net/http）
+      # TIDEGATE_CLIENT: fast
+
+      # ── TLS / HTTPS 证书 ──
+      # 自动在 <TIDEGATE_DATA>/tls 生成并持久化自签名证书（true/false；不可与 TIDEGATE_TLS_CERT/KEY 同时启用）
       TIDEGATE_TLS_SELF_SIGNED: ${TIDEGATE_TLS_SELF_SIGNED:-true}
+      # 自定义 PEM 证书与私钥路径（例：/data/tls/cert.pem 与 /data/tls/key.pem；须成对配置并设 TIDEGATE_TLS_SELF_SIGNED=false）
       TIDEGATE_TLS_CERT: ${TIDEGATE_TLS_CERT:-}
       TIDEGATE_TLS_KEY: ${TIDEGATE_TLS_KEY:-}
-      TIDEGATE_NO_OPEN: "true"
-      # 管理员初始化与重启声明式改密（密码与库不一致时自动同步；留空则在首次启动打印一次性初始化码）：
+
+      # ── 管理员初始化与密码重置说明 ──
+      # 方式 1（容器环境变量重启同步）：设置 TIDEGATE_ADMIN_PASSWORD（≥10位）或 TIDEGATE_ADMIN_PASSWORD_FILE，
+      #   可选 TIDEGATE_ADMIN_RESET_TOTP=true，执行 `docker compose up -d --force-recreate tidegate` 重启即覆盖库内密码并吊销旧会话。
+      #   同步完成后清空/移除该变量，后续在页面修改的密码才能在重启后保留。
+      # 方式 2（CLI 离线/容器内重置）：
+      #   容器内：docker exec -it tidegate-controller tidegate reset-password --data /data --user admin --password '<新密码>' --reset-totp
+      #   二进制：tidegate reset-password --data ./data --user admin --password '<新密码>' --reset-totp
+      #   （注：reset-password 仅读取 TIDEGATE_DATA 与 TIDEGATE_ADMIN_USER 或 CLI 参数）
       TIDEGATE_ADMIN_USER: ${TIDEGATE_ADMIN_USER:-admin}
       TIDEGATE_ADMIN_PASSWORD: ${TIDEGATE_ADMIN_PASSWORD:-}
+      # 从文件读取管理员密码（如 Docker Secret `/run/secrets/admin_pw`，优先级低于 TIDEGATE_ADMIN_PASSWORD）
       TIDEGATE_ADMIN_PASSWORD_FILE: ${TIDEGATE_ADMIN_PASSWORD_FILE:-}
+      # 启动时清空指定管理员 2FA/TOTP 绑定及恢复码（true/false，重置后建议改回 false）
       TIDEGATE_ADMIN_RESET_TOTP: ${TIDEGATE_ADMIN_RESET_TOTP:-false}
-      # 反向代理与外部访问（若置于 Nginx/Caddy HTTPS 之后，设 TIDEGATE_TLS_SELF_SIGNED=false 并在 command 使用 serve）：
+
+      # ── 反向代理与外部访问安全 ──
+      # 外部访问 URL（例：https://tidegate.example.com），自动注册允许的 Origin 与 Host
       TIDEGATE_PUBLIC_URL: ${TIDEGATE_PUBLIC_URL:-}
+      # 可信反代 IP/CIDR 或预设 loopback（逗号分隔，例：loopback,172.18.0.0/16,10.0.0.0/8）
       TIDEGATE_TRUSTED_PROXIES: ${TIDEGATE_TRUSTED_PROXIES:-}
+      # 额外允许的浏览器 Origin（逗号分隔，例：https://ops.example.com:8443）
       TIDEGATE_ALLOWED_ORIGINS: ${TIDEGATE_ALLOWED_ORIGINS:-}
+      # 允许非本机明文 HTTP 登录（true/false，仅限已由可信反代终结 TLS 时使用，默认 false）
       TIDEGATE_ALLOW_INSECURE_REMOTE: ${TIDEGATE_ALLOW_INSECURE_REMOTE:-false}
-      # 分布式集群与 Vault 主密钥：
+
+      # ── 分布式集群与 Vault 密钥 ──
+      # 对外公告给远程发压节点的控制端地址（host:port，例：192.168.1.10:7443 或 tidegate.example.com:7443）
       TIDEGATE_CLUSTER_PUBLIC_ADDR: ${TIDEGATE_CLUSTER_PUBLIC_ADDR:-}
+      # 集群节点加入令牌（静态或引导令牌，例：openssl rand -hex 24）
       TIDEGATE_CLUSTER_TOKEN: ${TIDEGATE_CLUSTER_TOKEN:-}
+      # Vault AES-256-GCM 主密钥（64位十六进制或32字节 Base64，优先级高于密钥文件；留空则自动读取/生成 TIDEGATE_MASTER_KEY_FILE）
       TIDEGATE_MASTER_KEY: ${TIDEGATE_MASTER_KEY:-}
+      # 主密钥文件路径（默认 <TIDEGATE_DATA>/master.key）
+      # TIDEGATE_MASTER_KEY_FILE: /data/master.key
     restart: unless-stopped
 
   tidegate-agent:
@@ -55,13 +89,25 @@ services:
     # network_mode: host
     # 启用 --profile cluster 前请先设置环境变量 TIDEGATE_CLUSTER_TOKEN=<强随机令牌>
     environment:
+      # 控制器集群 gRPC 地址（host:port，例：tidegate:7443 或 192.168.1.10:7443）
       TIDEGATE_JOIN: tidegate:7443
+      # 集群加入令牌（须与控制端 TIDEGATE_CLUSTER_TOKEN 或 UI 签发令牌一致；已有持久化节点证书后可留空重连）
       TIDEGATE_TOKEN: ${TIDEGATE_CLUSTER_TOKEN:-}
+      # 节点在控制台显示的名称（默认取主机名）
       TIDEGATE_NAME: docker-agent-1
       # 推荐生产环境持久化 mTLS 节点证书并绑定 CA 指纹与调度标签：
+      # mTLS 节点证书持久化目录（注意 read_only 容器下须挂载可写卷，例：/data/agent-certs）
       # TIDEGATE_CERT_DIR: /data/agent-certs
+      # 控制器 Cluster CA 的 64 位 SHA-256 十六进制指纹（防止 MITM）
       # TIDEGATE_CA_FINGERPRINT: <控制台显示的64位CA_SHA256指纹>
+      # 节点调度标签（逗号分隔 key=value，用于场景 node_selector 匹配）
       # TIDEGATE_LABELS: zone=docker,tier=default
+      # 临时运行目录（若未设 TIDEGATE_CERT_DIR，证书默认存放在 <work-dir>/certs）
+      # TIDEGATE_WORK_DIR: /tmp/tidegate-agent
+      # HTTP 发压客户端引擎：fast（默认）或 std
+      # TIDEGATE_CLIENT: fast
+      # 禁用集群 mTLS 改用明文 gRPC（true/false，仅测试环境使用，默认 false）
+      # TIDEGATE_AGENT_INSECURE: "false"
     depends_on:
       - tidegate
     restart: unless-stopped

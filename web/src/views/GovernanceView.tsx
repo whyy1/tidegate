@@ -751,7 +751,7 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
       {subTab === 'users' && isAdmin && (
         <div className="space-y-3">
           {/* Provision New Account + Immediate Project ACL Assignment */}
-          <section aria-label="开通新账号" className="tg-glass-card p-4 space-y-3">
+          <section aria-label="开通新账号" className="tg-glass-card !overflow-visible p-4 space-y-3">
             <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="font-semibold text-sm text-fg flex items-center gap-1.5">
                 <UserPlus className="w-4 h-4 text-tidal" /> 开通新账号并分配项目权限
@@ -965,23 +965,26 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                                 </button>
                               </div>
                             ) : (
-                              <select
+                              <GlassSelect
+                                ariaLabel={`${u.username} 的角色`}
                                 value={u.role}
-                                aria-label={`${u.username} 的角色`}
-                                onChange={(e) => {
-                                  const nextRole = e.target.value as UserRole
+                                className="min-w-[140px] max-w-[200px]"
+                                menuClassName="w-56"
+                                onChange={(val) => {
+                                  const nextRole = val as UserRole
+                                  if (nextRole === u.role) return
                                   if (u.role === 'admin' && nextRole !== 'admin') {
                                     setPendingDemote({ user: u, nextRole })
                                     return
                                   }
                                   void applyRoleChange(u, nextRole)
                                 }}
-                                className="tg-select px-2 py-1 border border-line-strong bg-surface text-fg font-mono"
-                              >
-                                <option value="admin">admin</option>
-                                <option value="member">member</option>
-                                <option value="viewer">viewer</option>
-                              </select>
+                                options={[
+                                  { value: 'admin', label: 'admin', description: '系统管理员' },
+                                  { value: 'member', label: 'member', description: '编辑与压测' },
+                                  { value: 'viewer', label: 'viewer', description: '全站只读' },
+                                ]}
+                              />
                             )}
                           </td>
                           <td className="px-3 py-2">
@@ -1764,7 +1767,7 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                   disabled={!isAdmin}
                   value={sink.type || 'influxdb'}
                   onChange={(e) => setSink({ ...sink, type: e.target.value })}
-                  className={inputCls}
+                  className={`tg-select ${inputCls}`}
                 >
                   <option value="influxdb">InfluxDB Line Protocol</option>
                   <option value="prometheus_pushgateway">Prometheus Pushgateway</option>

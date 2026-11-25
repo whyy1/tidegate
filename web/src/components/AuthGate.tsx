@@ -1,20 +1,14 @@
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import {
   AlertTriangle,
-  ArrowLeft,
-  Boxes,
-  Check,
-  Copy,
   Eye,
   EyeOff,
   KeyRound,
   Lock,
   ShieldCheck,
-  Terminal,
   User as UserIcon,
 } from 'lucide-react'
 import { api, APIError } from '../lib/api'
-import { copyText } from '../lib/download'
 import { useGlassStagePhysics } from '../lib/glassPhysics'
 import type { SetupStatus, User } from '../lib/types'
 import { ThemeToggle } from './ThemeToggle'
@@ -97,52 +91,6 @@ const METRIC_CARDS = [
   { label: '发压内存峰值', value: '37.3 MB', delta: '仅 k6 的 1/4' },
 ]
 
-function CommandCard({
-  icon: Icon,
-  title,
-  tag,
-  command,
-}: {
-  icon: typeof Terminal
-  title: string
-  tag: string
-  command: string
-}) {
-  const [copied, setCopied] = useState(false)
-  useEffect(() => {
-    if (!copied) return
-    const t = window.setTimeout(() => setCopied(false), 1600)
-    return () => window.clearTimeout(t)
-  }, [copied])
-  return (
-    <section className="rounded-xl border border-line overflow-hidden">
-      <header className="flex items-center gap-2 px-3.5 py-2.5 bg-surface-subtle border-b border-line">
-        <Icon className="w-4 h-4 text-tidal shrink-0" />
-        <h3 className="min-w-0 flex-1 truncate text-[13px] font-semibold text-fg">{title}</h3>
-        <span className="shrink-0 rounded border border-line px-1.5 py-px font-mono text-[10px] text-fg-subtle">{tag}</span>
-      </header>
-      <div className="tg-code-surface relative">
-        <pre className="m-0 overflow-x-hidden px-3.5 py-3 pr-12 font-mono text-[12px] leading-relaxed text-sky-100 whitespace-pre-wrap break-words">
-          {command}
-        </pre>
-        <button
-          type="button"
-          onClick={async () => setCopied(await copyText(command))}
-          aria-label={copied ? '已复制' : `复制：${title}`}
-          title={copied ? '已复制' : '复制'}
-          className={`absolute right-2 top-2 inline-flex h-7 w-7 items-center justify-center rounded-md border transition-colors ${
-            copied
-              ? 'border-emerald-400/40 bg-emerald-400/15 text-emerald-300'
-              : 'border-white/10 bg-white/5 text-slate-300 hover:bg-white/15 hover:text-white'
-          }`}
-        >
-          {copied ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
-        </button>
-      </div>
-    </section>
-  )
-}
-
 /* ---------- Gate ---------- */
 
 const inputCls =
@@ -152,7 +100,6 @@ const iconCls = 'w-4 h-4 text-fg-subtle absolute left-3 top-3 pointer-events-non
 
 export function AuthGate({ status, onAuthenticated }: Props) {
   const isSetup = status.setup_required
-  const [view, setView] = useState<'auth' | 'reset'>('auth')
   const [gateRPS, setGateRPS] = useState(32768)
   const [activePain, setActivePain] = useState<string>('unity')
   const [code, setCode] = useState('')
@@ -167,7 +114,6 @@ export function AuthGate({ status, onAuthenticated }: Props) {
   const [insecureTransport, setInsecureTransport] = useState(false)
   const totpInputRef = useRef<HTMLInputElement>(null)
   const firstFieldRef = useRef<HTMLInputElement>(null)
-  const backRef = useRef<HTMLButtonElement>(null)
   const authStageRef = useRef<HTMLDivElement>(null)
   useGlassStagePhysics(authStageRef)
 
@@ -189,10 +135,6 @@ export function AuthGate({ status, onAuthenticated }: Props) {
   useEffect(() => {
     if (totpStep) totpInputRef.current?.focus()
   }, [totpStep])
-
-  useEffect(() => {
-    if (view === 'reset') backRef.current?.focus()
-  }, [view])
 
   const tideGeometry = useMemo(() => computeTidePaths(gateRPS), [gateRPS])
   const currentPain = PAIN_ITEMS.find((p) => p.id === activePain) || PAIN_ITEMS[0]
@@ -243,25 +185,6 @@ export function AuthGate({ status, onAuthenticated }: Props) {
     }
   }
 
-  const dockerCmd = [
-    "TIDEGATE_ADMIN_PASSWORD='<新密码>' \\",
-    'TIDEGATE_ADMIN_RESET_TOTP=true \\',
-    'docker compose -f deploy/docker-compose.yml up -d \\',
-    '  --force-recreate tidegate',
-  ].join('\n')
-  const cliCmd = [
-    'docker exec -it tidegate-controller \\',
-    '  tidegate reset-password --data /data \\',
-    '  --user admin \\',
-    "  --password '<新密码>' --reset-totp",
-    '',
-    '# 非容器部署',
-    'tidegate reset-password --data ./data \\',
-    '  --user admin \\',
-    "  --password '<新密码>' --reset-totp",
-  ].join('\n')
-
-  const isDockerRuntime = status.runtime === 'docker'
   const transport = status.tls ? 'HTTPS' : 'HTTP'
 
   return (
@@ -391,13 +314,7 @@ export function AuthGate({ status, onAuthenticated }: Props) {
               <div className="flex items-center gap-2.5 min-w-0">
                 <img src="/favicon.svg" alt="" className="h-8 w-8 rounded-lg lg:hidden" />
                 <h2 className="text-lg font-extrabold tracking-tight text-fg truncate">
-                  {view === 'reset'
-                    ? '管理员凭据重置'
-                    : isSetup
-                      ? '初始化管理员'
-                      : totpStep
-                        ? '双因素验证'
-                        : '账号登录'}
+                  {isSetup ? '初始化管理员' : totpStep ? '双因素验证' : '账号登录'}
                 </h2>
               </div>
               <div className="flex items-center gap-2 shrink-0">
@@ -413,8 +330,7 @@ export function AuthGate({ status, onAuthenticated }: Props) {
               </div>
             </div>
 
-            {view === 'auth' ? (
-              <div key="auth" className="relative z-10 tg-swap-in">
+            <div className="relative z-10 tg-swap-in">
                 {totpStep && !isSetup && (
                   <div className="mb-4 flex items-center justify-between rounded-xl border border-line bg-surface-subtle px-3 py-2 text-xs">
                     <span className="flex min-w-0 items-center gap-1.5">
@@ -506,20 +422,7 @@ export function AuthGate({ status, onAuthenticated }: Props) {
                           <label htmlFor="tg-auth-password" className="text-xs font-semibold text-fg-muted">
                             密码
                           </label>
-                          {isSetup ? (
-                            <span className="tg-tabular font-mono text-[11px] text-fg-subtle">≥ 10</span>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setError('')
-                                setView('reset')
-                              }}
-                              className="rounded text-xs font-medium text-tidal hover:underline focus-visible:outline-2 focus-visible:outline-sky-500"
-                            >
-                              忘记密码？
-                            </button>
-                          )}
+                          {isSetup && <span className="tg-tabular font-mono text-[11px] text-fg-subtle">≥ 10</span>}
                         </div>
                         <div className="relative">
                           <Lock className={iconCls} />
@@ -603,33 +506,7 @@ export function AuthGate({ status, onAuthenticated }: Props) {
                     {submitting ? '验证中…' : isSetup ? '完成初始化' : totpStep ? '验证并登录' : '进入工作台'}
                   </button>
                 </form>
-              </div>
-            ) : (
-              <div key="reset" className="relative z-10 tg-swap-in">
-                <button
-                  ref={backRef}
-                  type="button"
-                  onClick={() => setView('auth')}
-                  className="mb-4 -ml-1 inline-flex items-center gap-1.5 rounded-md px-1 py-0.5 text-xs font-medium text-fg-muted hover:text-fg focus-visible:outline-2 focus-visible:outline-sky-500"
-                >
-                  <ArrowLeft className="h-3.5 w-3.5" />
-                  返回登录
-                </button>
-                <div className="space-y-3.5">
-                  {isDockerRuntime ? (
-                    <>
-                      <CommandCard icon={Boxes} title="容器重启同步（推荐）" tag="TIDEGATE_ADMIN_PASSWORD" command={dockerCmd} />
-                      <CommandCard icon={Terminal} title="容器内命令行重置" tag="docker exec" command={cliCmd} />
-                    </>
-                  ) : (
-                    <>
-                      <CommandCard icon={Terminal} title="命令行离线重置（当前为二进制部署）" tag="reset-password" command={cliCmd} />
-                      <CommandCard icon={Boxes} title="如使用 Docker 部署" tag="TIDEGATE_ADMIN_PASSWORD" command={dockerCmd} />
-                    </>
-                  )}
-                </div>
-              </div>
-            )}
+            </div>
           </div>
 
           <footer className="border-t border-line pt-3.5 text-xs text-fg-muted space-y-1.5">
