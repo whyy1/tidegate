@@ -41,7 +41,7 @@ interface Props {
 }
 
 const chipCls =
-  'inline-flex h-7 items-center gap-1.5 rounded-full border border-line bg-surface-subtle px-2.5 text-xs text-fg-muted hover:bg-surface-hover hover:text-fg transition-colors'
+  'h-7 items-center gap-1.5 rounded-full border border-line bg-surface-subtle px-2.5 text-xs text-fg-muted hover:bg-surface-hover hover:text-fg transition-colors'
 
 const ROLE_BADGE: Record<string, string> = {
   admin: '管理员',
@@ -90,8 +90,8 @@ export function TopBar({
   ]
 
   return (
-    <header className="relative z-30 h-11 shrink-0 rounded-[18px] border border-line bg-surface/78 backdrop-blur-xl px-3 shadow-[0_12px_30px_-18px_var(--tg-shadow),inset_0_1px_0_var(--tg-specular)] flex items-center justify-between gap-2.5">
-      <div className="flex items-center gap-2 min-w-0">
+    <header className="relative z-30 h-11 shrink-0 rounded-[18px] border border-line bg-surface/78 backdrop-blur-xl px-2 sm:px-3 shadow-[0_12px_30px_-18px_var(--tg-shadow),inset_0_1px_0_var(--tg-specular)] flex items-center justify-between gap-1.5 sm:gap-2.5">
+      <div className="flex items-center gap-1 sm:gap-2 min-w-0 flex-1">
         <h1 className="hidden xl:block shrink-0 pr-1 text-[13px] font-bold text-fg">{VIEW_LABEL[activeTab]}</h1>
         <span aria-hidden="true" className="hidden xl:block h-4 w-px bg-line-strong" />
 
@@ -105,7 +105,7 @@ export function TopBar({
             options={projectOptions}
             onChange={onSelectProject}
             icon={<FolderKanban className="w-3.5 h-3.5 text-sky-600" />}
-            className="max-w-[180px]"
+            className="max-w-[84px] sm:max-w-[180px] min-w-0"
             footerAction={{
               label: '项目管理与新建…',
               icon: <Plus className="w-3.5 h-3.5" />,
@@ -117,7 +117,7 @@ export function TopBar({
             onClick={onOpenProjectModal}
             aria-label="项目管理"
             title="项目管理"
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-line bg-surface-subtle text-fg-subtle hover:bg-surface-hover hover:text-fg transition-colors"
+            className="hidden sm:inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-line bg-surface-subtle text-fg-subtle hover:bg-surface-hover hover:text-fg transition-colors"
           >
             <FolderCog className="h-3.5 w-3.5" />
           </button>
@@ -137,7 +137,7 @@ export function TopBar({
                 aria-hidden="true"
               />
             }
-            className="max-w-[165px]"
+            className="max-w-[80px] sm:max-w-[165px] min-w-0"
             footerAction={{
               label: '环境配置与变量…',
               icon: <Layers className="w-3.5 h-3.5" />,
@@ -157,7 +157,7 @@ export function TopBar({
             onClick={onOpenEnvModal}
             aria-label="环境管理"
             title="环境管理"
-            className="inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-line bg-surface-subtle text-fg-subtle hover:bg-surface-hover hover:text-fg transition-colors"
+            className="hidden sm:inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full border border-line bg-surface-subtle text-fg-subtle hover:bg-surface-hover hover:text-fg transition-colors"
           >
             <Layers className="h-3.5 w-3.5" />
           </button>
@@ -175,17 +175,17 @@ export function TopBar({
         )}
       </div>
 
-      <div className="flex items-center gap-1.5 shrink-0">
+      <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
         {activeRunId && activeTab !== 'run' && (
           <button
             type="button"
             onClick={() => onChangeTab('run')}
             title="打开实时压测"
-            className="inline-flex h-7 items-center gap-1.5 rounded-full border border-emerald-300 bg-emerald-50 px-2.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 transition-colors"
+            className="inline-flex h-7 items-center gap-1.5 rounded-full border border-emerald-300 bg-emerald-50 px-2 sm:px-2.5 text-xs font-semibold text-emerald-800 hover:bg-emerald-100 transition-colors"
           >
             <span className="h-2 w-2 rounded-full bg-emerald-500 animate-pulse" />
             <Play className="h-3 w-3 fill-current" />
-            运行中
+            <span className="hidden sm:inline">运行中</span>
           </button>
         )}
 
@@ -199,7 +199,7 @@ export function TopBar({
           type="button"
           onClick={() => onChangeTab('agents')}
           title={linkState === 'ok' ? '遥测已连接' : linkState === 'idle' ? '无在线节点' : '遥测重连中'}
-          className={`tg-tabular ${chipCls}`}
+          className={`tg-tabular hidden sm:inline-flex ${chipCls}`}
         >
           <span
             className={`h-2 w-2 rounded-full ${

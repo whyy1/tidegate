@@ -3,6 +3,7 @@ import {
   useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -71,6 +72,7 @@ interface Props {
   activeEnvId: string
   tempVars: Record<string, string>
   canWrite?: boolean
+  isActive?: boolean
   onLaunchScenario: (scenarioId: string) => void
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
   /** Jump to the API workbench with the given API selected. The button is hidden when omitted. */
@@ -293,28 +295,124 @@ function useStepCtx(): StepCtx {
   return ctx
 }
 
-/** Close a floating panel on outside pointer-down and on Escape. */
-function useDismiss(open: boolean, wrapRef: RefObject<HTMLElement | null>, onDismiss: (refocus: boolean) => void) {
+/** Close a floating panel on outside pointer-down, focus-out, and Escape (capture phase). */
+function useDismiss(
+  open: boolean,
+  wrapRef: RefObject<HTMLElement | null>,
+  onDismiss: (refocus: boolean) => void,
+  panelRef?: RefObject<HTMLElement | null>
+) {
   const cb = useRef(onDismiss)
   cb.current = onDismiss
   useEffect(() => {
     if (!open) return
+    const isInside = (target: Node | null) =>
+      Boolean(target && (wrapRef.current?.contains(target) || panelRef?.current?.contains(target)))
     const onDown = (e: PointerEvent) => {
-      if (!wrapRef.current?.contains(e.target as Node)) cb.current(false)
+      if (!isInside(e.target as Node | null)) cb.current(false)
+    }
+    const onFocusIn = (e: FocusEvent) => {
+      if (!isInside(e.target as Node | null)) cb.current(false)
     }
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key === 'Escape') {
+        e.preventDefault()
         e.stopPropagation()
         cb.current(true)
       }
     }
-    document.addEventListener('pointerdown', onDown)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('pointerdown', onDown, true)
+    document.addEventListener('focusin', onFocusIn, true)
+    document.addEventListener('keydown', onKey, true)
     return () => {
-      document.removeEventListener('pointerdown', onDown)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('pointerdown', onDown, true)
+      document.removeEventListener('focusin', onFocusIn, true)
+      document.removeEventListener('keydown', onKey, true)
     }
-  }, [open, wrapRef])
+  }, [open, wrapRef, panelRef])
+}
+
+/** Promote a popover="manual" panel into Top-Layer and keep it viewport-clamped near its trigger. */
+function useTopLayerPopover(
+  open: boolean,
+  triggerRef: RefObject<HTMLElement | null>,
+  panelRef: RefObject<HTMLElement | null>,
+  onClose: () => void,
+  align: 'left' | 'right' = 'left',
+  repositionKey?: unknown
+) {
+  const onCloseRef = useRef(onClose)
+  onCloseRef.current = onClose
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const el = panelRef.current
+    if (!el) return
+
+    if (typeof el.showPopover === 'function') {
+      try {
+        if (!el.matches(':popover-open')) el.showPopover()
+      } catch {
+        // popover unsupported or already promoted
+      }
+    }
+
+    const updatePosition = () => {
+      const trigger = triggerRef.current
+      const panel = panelRef.current
+      if (!trigger || !panel) return
+      const tr = trigger.getBoundingClientRect()
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      if (tr.bottom < 0 || tr.top > vh || tr.right < 0 || tr.left > vw) {
+        onCloseRef.current()
+        return
+      }
+      const gap = 6
+      const margin = 8
+      panel.style.maxHeight = ''
+      const pr = panel.getBoundingClientRect()
+      const spaceBelow = vh - tr.bottom - margin
+      const spaceAbove = tr.top - margin
+      const flipUp = spaceBelow < pr.height + gap && spaceAbove > spaceBelow
+      const avail = flipUp ? spaceAbove : spaceBelow
+      const maxH = Math.max(0, Math.floor(avail - gap))
+      panel.style.maxHeight = `${maxH}px`
+
+      const updatedPr = panel.getBoundingClientRect()
+      const top = flipUp
+        ? Math.max(margin, tr.top - gap - updatedPr.height)
+        : Math.min(tr.bottom + gap, Math.max(margin, vh - margin - updatedPr.height))
+      const desiredLeft = align === 'right' ? tr.right - updatedPr.width : tr.left
+      const maxLeft = Math.max(margin, vw - margin - updatedPr.width)
+      const left = Math.min(Math.max(margin, desiredLeft), maxLeft)
+
+      panel.style.top = `${Math.round(top)}px`
+      panel.style.left = `${Math.round(left)}px`
+      panel.style.transformOrigin = `${flipUp ? 'bottom' : 'top'} ${align === 'right' ? 'right' : 'left'}`
+    }
+
+    const onScroll = (e: Event) => {
+      const target = e.target as Node | null
+      if (target && panelRef.current?.contains(target)) return
+      updatePosition()
+    }
+
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', onScroll, true)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', onScroll, true)
+      if (typeof el.hidePopover === 'function') {
+        try {
+          if (el.matches(':popover-open')) el.hidePopover()
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }, [open, align, repositionKey])
 }
 
 /** Inline two-step delete: first click arms ("确认删除？"), second click within 3s executes; blur/timeout resets. */
@@ -406,7 +504,8 @@ function AddStepMenu({
     setQuery('')
     if (refocus) triggerRef.current?.focus()
   }
-  useDismiss(open, wrapRef, close)
+  useDismiss(open, wrapRef, close, menuRef)
+  useTopLayerPopover(open, triggerRef, menuRef, () => close(false), align, view)
 
   useEffect(() => {
     if (!open) return
@@ -491,11 +590,12 @@ function AddStepMenu({
         <div
           ref={menuRef}
           id={menuId}
+          popover="manual"
           role="menu"
           aria-label={label}
           onKeyDown={onMenuKey}
-          className={`tg-glass-popover absolute z-30 top-full mt-1.5 ${align === 'right' ? 'right-0' : 'left-0'} ${
-            view === 'api' ? 'w-80' : 'w-44'
+          className={`tg-glass-popover fixed inset-auto m-0 z-50 flex flex-col overflow-hidden ${
+            view === 'api' ? 'w-80 max-w-[calc(100vw-1rem)]' : 'w-44'
           } p-1.5 text-xs`}
         >
           {view === 'root' ? (
@@ -554,7 +654,7 @@ function AddStepMenu({
                   />
                 </search>
               </div>
-              <div className="max-h-64 overflow-y-auto tg-scroller">
+              <div className="min-h-0 flex-1 max-h-64 overflow-y-auto tg-scroller">
                 {filtered.length === 0 ? (
                   <div className="px-2 py-3 text-center text-fg-subtle">无匹配接口</div>
                 ) : (
@@ -603,11 +703,18 @@ function ColumnPeek({
   const [copied, setCopied] = useState('')
   const wrapRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
   const panelId = useId()
-  useDismiss(open, wrapRef, (refocus) => {
-    setOpen(false)
-    if (refocus) triggerRef.current?.focus()
-  })
+  useDismiss(
+    open,
+    wrapRef,
+    (refocus) => {
+      setOpen(false)
+      if (refocus) triggerRef.current?.focus()
+    },
+    panelRef
+  )
+  useTopLayerPopover(open, triggerRef, panelRef, () => setOpen(false), 'right', `${state.loading}:${state.cols.length}:${state.error}`)
 
   useEffect(() => {
     setOpen(false)
@@ -661,10 +768,12 @@ function ColumnPeek({
       </button>
       {open && (
         <div
+          ref={panelRef}
           id={panelId}
+          popover="manual"
           role="dialog"
           aria-label={`${file} 字段`}
-          className="tg-glass-popover absolute z-30 right-0 top-full mt-1.5 w-72 p-2.5 space-y-2"
+          className="tg-glass-popover fixed inset-auto m-0 z-50 flex flex-col overflow-hidden w-72 max-w-[calc(100vw-1rem)] p-2.5 space-y-2"
         >
           <div className="flex items-center gap-2 min-w-0">
             <span className="font-mono text-fg truncate min-w-0 flex-1">{file}</span>
@@ -712,6 +821,7 @@ export function ScenariosView({
   activeEnvId,
   tempVars,
   canWrite = true,
+  isActive = true,
   onLaunchScenario,
   onToast,
   onEditAPI,
@@ -731,10 +841,23 @@ export function ScenariosView({
   const [zoomedMod, setZoomedMod] = useState<'' | 'list' | 'steps' | 'load'>('')
   const [exportMenuOpen, setExportMenuOpen] = useState(false)
   const exportWrapRef = useRef<HTMLDivElement>(null)
+  const exportTriggerRef = useRef<HTMLButtonElement>(null)
+  const exportMenuRef = useRef<HTMLDivElement>(null)
+  const loadSeqRef = useRef(0)
+  const refreshSeqRef = useRef(0)
   const listPaneRef = useRef<HTMLElement>(null)
   const stepsPaneRef = useRef<HTMLElement>(null)
   const loadPaneRef = useRef<HTMLElement>(null)
-  useDismiss(exportMenuOpen, exportWrapRef, () => setExportMenuOpen(false))
+  useDismiss(
+    exportMenuOpen,
+    exportWrapRef,
+    (refocus) => {
+      setExportMenuOpen(false)
+      if (refocus) exportTriggerRef.current?.focus()
+    },
+    exportMenuRef
+  )
+  useTopLayerPopover(exportMenuOpen, exportTriggerRef, exportMenuRef, () => setExportMenuOpen(false), 'right')
 
   const paneRefFor = (id: 'list' | 'steps' | 'load') => {
     if (id === 'list') return listPaneRef.current
@@ -752,46 +875,89 @@ export function ScenariosView({
   }
 
   useEffect(() => {
-    if (!zoomedMod) return
+    if (!isActive || !zoomedMod) return
     const onKey = (e: globalThis.KeyboardEvent) => {
-      if (e.key === 'Escape') setZoomedMod('')
+      if (e.key === 'Escape' && !document.querySelector('dialog[open]')) setZoomedMod('')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
-  }, [zoomedMod])
+  }, [isActive, zoomedMod])
 
   const loadAll = async (selectId?: string) => {
+    const seq = ++loadSeqRef.current
+    ++refreshSeqRef.current
     try {
       const [scList, tree, flList] = await Promise.all([
         api.listScenarios(projectId),
         api.getTree(projectId),
         api.listFiles(projectId),
       ])
+      if (seq !== loadSeqRef.current) return
       setScenarios(scList)
       setApis(flattenAPIs(tree.children || []))
       setFiles(flList)
 
-      const targetId = selectId || selectedId || scList[0]?.id || ''
-      if (targetId && scList.some((s) => s.id === targetId)) {
+      const candidateId = selectId !== undefined ? selectId : selectedId
+      const targetId = candidateId && scList.some((s) => s.id === candidateId) ? candidateId : scList[0]?.id || ''
+      if (targetId) {
         const full = await api.getScenario(projectId, targetId)
+        if (seq !== loadSeqRef.current) return
         setSelectedId(full.id)
         setDraft(full)
         setDirty(false)
-      } else if (scList.length === 0) {
+      } else {
         setSelectedId('new')
         setDraft(blankScenario(activeEnvId))
         setDirty(false)
       }
     } catch (err) {
+      if (seq !== loadSeqRef.current) return
       onToast('error', err instanceof APIError ? err.message : '加载场景数据失败')
     }
   }
 
   useEffect(() => {
     setSelectedId('')
+    setDraft(blankScenario(activeEnvId))
+    setDirty(false)
     setDryResult(null)
-    void loadAll()
+    setZoomedMod('')
+    setExportMenuOpen(false)
+    void loadAll('')
   }, [projectId])
+
+  const isActiveRef = useRef(isActive)
+  isActiveRef.current = isActive
+  const canWriteRef = useRef(canWrite)
+  canWriteRef.current = canWrite
+  const dirtyRef = useRef(dirty)
+  dirtyRef.current = dirty
+  const wasActiveRef = useRef(isActive)
+  const prevProjectIdRef = useRef(projectId)
+
+  useEffect(() => {
+    const prevActive = wasActiveRef.current
+    const prevPid = prevProjectIdRef.current
+    wasActiveRef.current = isActive
+    prevProjectIdRef.current = projectId
+    if (!isActive || !projectId || prevPid !== projectId || prevActive) return
+    const seq = ++refreshSeqRef.current
+    void (async () => {
+      try {
+        const [tree, flList, scList] = await Promise.all([
+          api.getTree(projectId),
+          api.listFiles(projectId),
+          !dirtyRef.current ? api.listScenarios(projectId) : Promise.resolve(null),
+        ])
+        if (seq !== refreshSeqRef.current) return
+        setApis(flattenAPIs(tree.children || []))
+        setFiles(flList)
+        if (scList) setScenarios(scList)
+      } catch {
+        // silent background refresh when returning to scenarios tab
+      }
+    })()
+  }, [isActive, projectId])
 
   const selectScenario = async (id: string) => {
     setDryResult(null)
@@ -856,6 +1022,7 @@ export function ScenariosView({
   saveRef.current = handleSave
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
+      if (!isActiveRef.current || !canWriteRef.current || document.querySelector('dialog[open]')) return
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault()
         void saveRef.current()
@@ -917,9 +1084,7 @@ export function ScenariosView({
   const dataFiles = files.filter((f) => isDataFile(f.name))
   const totalSteps = useMemo(() => collectStepOptions(steps).length, [steps])
 
-  // Leaving for the workbench unmounts this view: persist pending edits first.
-  const dirtyRef = useRef(dirty)
-  dirtyRef.current = dirty
+  // Persist pending edits before jumping to the workbench.
   const editAPIRef = useRef(onEditAPI)
   editAPIRef.current = onEditAPI
   const hasEditAPI = Boolean(onEditAPI)
@@ -1178,10 +1343,21 @@ export function ScenariosView({
               {draft.id && selectedId !== 'new' && (
                 <div ref={exportWrapRef} className="relative">
                   <button
+                    ref={exportTriggerRef}
                     type="button"
                     aria-expanded={exportMenuOpen}
                     aria-haspopup="listbox"
                     onClick={() => setExportMenuOpen((v) => !v)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                        e.preventDefault()
+                        if (!exportMenuOpen) setExportMenuOpen(true)
+                        requestAnimationFrame(() => {
+                          const opts = exportMenuRef.current?.querySelectorAll<HTMLElement>('[role="option"]')
+                          if (opts?.length) opts[e.key === 'ArrowUp' ? opts.length - 1 : 0].focus()
+                        })
+                      }
+                    }}
                     className={stripBtn}
                     title="导出场景定义（Tidegate 原生 YAML/JSON 或 k6 脚本）"
                   >
@@ -1191,9 +1367,27 @@ export function ScenariosView({
                   </button>
                   {exportMenuOpen && (
                     <div
+                      ref={exportMenuRef}
+                      popover="manual"
                       role="listbox"
                       aria-label="选择场景导出格式"
-                      className="tg-glass-popover absolute right-0 top-full mt-1.5 z-40 w-64 p-1.5 space-y-0.5 text-xs"
+                      onKeyDown={(e) => {
+                        if (e.key === 'Tab') {
+                          setExportMenuOpen(false)
+                          return
+                        }
+                        if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
+                        const opts = Array.from(exportMenuRef.current?.querySelectorAll<HTMLElement>('[role="option"]') || [])
+                        if (!opts.length) return
+                        e.preventDefault()
+                        const cur = opts.indexOf(document.activeElement as HTMLElement)
+                        let next = 0
+                        if (e.key === 'ArrowDown') next = cur < 0 ? 0 : (cur + 1) % opts.length
+                        else if (e.key === 'ArrowUp') next = cur <= 0 ? opts.length - 1 : cur - 1
+                        else if (e.key === 'End') next = opts.length - 1
+                        opts[next]?.focus()
+                      }}
+                      className="tg-glass-popover fixed inset-auto m-0 z-50 w-64 max-w-[calc(100vw-1rem)] overflow-y-auto tg-scroller p-1.5 space-y-0.5 text-xs"
                     >
                       {(
                         [
@@ -1226,7 +1420,7 @@ export function ScenariosView({
                           )}
                           download
                           onClick={() => setExportMenuOpen(false)}
-                          className="flex items-start justify-between gap-2 px-2.5 py-2 rounded-xl hover:bg-surface-hover text-fg transition-colors"
+                          className="flex items-start justify-between gap-2 px-2.5 py-2 rounded-xl hover:bg-surface-hover focus:bg-surface-hover focus:outline-none text-fg transition-colors"
                         >
                           <div className="min-w-0">
                             <div className="font-semibold text-fg">{opt.title}</div>
@@ -1343,7 +1537,7 @@ export function ScenariosView({
                           aria-label="数据文件"
                           value={ds.file}
                           onChange={(e) => updateDS({ file: e.target.value })}
-                          className="flex-1 min-w-0 px-2 py-1 border border-line-strong rounded font-mono bg-surface text-fg"
+                          className="tg-select flex-1 min-w-0 px-2 py-1 border border-line-strong rounded font-mono bg-surface text-fg"
                         >
                           <option value="">选择文件</option>
                           {ds.file && !dataFiles.some((f) => f.name === ds.file) && (
@@ -1359,7 +1553,7 @@ export function ScenariosView({
                           aria-label="读取方式"
                           value={ds.mode || 'sequential'}
                           onChange={(e) => updateDS({ mode: e.target.value as DataSource['mode'] })}
-                          className="w-24 px-1.5 py-1 border border-line-strong rounded bg-surface text-fg"
+                          className="tg-select w-28 px-1.5 py-1 border border-line-strong rounded bg-surface text-fg"
                         >
                           <option value="sequential">顺序循环</option>
                           <option value="random">随机读取</option>
@@ -1475,7 +1669,7 @@ export function ScenariosView({
         {/* File Preview Dialog */}
         <dialog
           ref={previewRef}
-          {...({ closedby: 'closerequest' } as Record<string, string>)}
+          {...({ closedby: 'any' } as Record<string, string>)}
           aria-labelledby="tg-file-preview-title"
           className="tg-dialog w-[min(48rem,calc(100vw-2rem))] max-h-[86dvh]"
         >
@@ -1820,7 +2014,7 @@ function ScenarioStepListEditor({
                         else if (t === 'uniform') updateStep({ think: { type: 'uniform', min: '500ms', max: '1500ms' } })
                         else updateStep({ think: { type: 'normal', mean: '800ms', stddev: '200ms', min: '100ms', max: '3s' } })
                       }}
-                      className={`${fieldCls} px-1.5`}
+                      className={`tg-select ${fieldCls} px-1.5`}
                     >
                       <option value="">无思考时间</option>
                       <option value="fixed">思考 · 固定</option>
@@ -1897,7 +2091,7 @@ function ScenarioStepListEditor({
                         on_error: (e.target.value || undefined) as '' | 'continue' | 'abort_iteration' | 'abort_vu' | undefined,
                       })
                     }
-                    className={`${fieldCls} px-1.5`}
+                    className={`tg-select ${fieldCls} px-1.5`}
                   >
                     <option value="">失败 · 默认</option>
                     <option value="continue">失败 · 继续</option>

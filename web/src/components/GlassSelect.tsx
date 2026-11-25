@@ -51,11 +51,13 @@ export function GlassSelect({
   const rootRef = useRef<HTMLDivElement>(null)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const menuRef = useRef<HTMLDivElement>(null)
+  const footerBtnRef = useRef<HTMLButtonElement>(null)
+  const keyboardScrollRef = useRef(false)
   const listId = useId()
   const [highlightIdx, setHighlightIdx] = useState(-1)
 
-  const latestRef = useRef({ options, value })
-  latestRef.current = { options, value }
+  const latestRef = useRef({ options, value, footerAction })
+  latestRef.current = { options, value, footerAction }
 
   const selected = options.find((o) => o.value === value)
 
@@ -64,8 +66,16 @@ export function GlassSelect({
     const { options: opts, value: val } = latestRef.current
     const selectedIdx = opts.findIndex((o) => o.value === val && !o.disabled)
     const idx = selectedIdx >= 0 ? selectedIdx : opts.findIndex((o) => !o.disabled)
+    keyboardScrollRef.current = true
     setHighlightIdx(idx)
   }, [open])
+
+  useEffect(() => {
+    if (!open || highlightIdx < 0 || !keyboardScrollRef.current) return
+    keyboardScrollRef.current = false
+    const optEl = menuRef.current?.querySelector<HTMLElement>(`[data-opt-idx="${highlightIdx}"]`)
+    optEl?.scrollIntoView({ block: 'nearest' })
+  }, [open, highlightIdx])
 
   useEffect(() => {
     if (disabled && open) setOpen(false)
@@ -96,6 +106,17 @@ export function GlassSelect({
         setOpen(false)
         triggerRef.current?.focus()
       } else if (e.key === 'Tab') {
+        const hasFooter = Boolean(latestRef.current.footerAction && footerBtnRef.current)
+        if (hasFooter && !e.shiftKey && document.activeElement === triggerRef.current) {
+          e.preventDefault()
+          footerBtnRef.current?.focus()
+          return
+        }
+        if (hasFooter && e.shiftKey && document.activeElement === footerBtnRef.current) {
+          e.preventDefault()
+          triggerRef.current?.focus()
+          return
+        }
         if (menuRef.current?.contains(document.activeElement)) {
           triggerRef.current?.focus()
         }
@@ -112,12 +133,12 @@ export function GlassSelect({
         setOpen(false)
       }
     }
-    document.addEventListener('pointerdown', onPointerDown)
-    document.addEventListener('focusin', onFocusIn)
+    document.addEventListener('pointerdown', onPointerDown, true)
+    document.addEventListener('focusin', onFocusIn, true)
     document.addEventListener('keydown', onKeyDown, true)
     return () => {
-      document.removeEventListener('pointerdown', onPointerDown)
-      document.removeEventListener('focusin', onFocusIn)
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      document.removeEventListener('focusin', onFocusIn, true)
       document.removeEventListener('keydown', onKeyDown, true)
     }
   }, [open])
@@ -158,7 +179,7 @@ export function GlassSelect({
       const spaceAbove = tr.top - margin
       const flipUp = spaceBelow < mr.height + gap && spaceAbove > spaceBelow
       const avail = flipUp ? spaceAbove : spaceBelow
-      const maxH = Math.max(120, Math.floor(avail - gap))
+      const maxH = Math.max(0, Math.min(320, Math.floor(avail - gap)))
       menu.style.maxHeight = `${maxH}px`
 
       const updatedMr = menu.getBoundingClientRect()
@@ -173,12 +194,18 @@ export function GlassSelect({
       menu.style.transformOrigin = `${flipUp ? 'bottom' : 'top'} ${left < tr.left ? 'right' : 'left'}`
     }
 
+    const onScroll = (e: Event) => {
+      const target = e.target as Node | null
+      if (target && menuRef.current?.contains(target)) return
+      updatePosition()
+    }
+
     updatePosition()
     window.addEventListener('resize', updatePosition)
-    window.addEventListener('scroll', updatePosition, true)
+    window.addEventListener('scroll', onScroll, true)
     return () => {
       window.removeEventListener('resize', updatePosition)
-      window.removeEventListener('scroll', updatePosition, true)
+      window.removeEventListener('scroll', onScroll, true)
       if (typeof el.hidePopover === 'function') {
         try {
           if (el.matches(':popover-open')) el.hidePopover()
@@ -201,6 +228,7 @@ export function GlassSelect({
     for (let step = 0; step < options.length; step++) {
       next = (next + delta + options.length) % options.length
       if (!options[next].disabled) {
+        keyboardScrollRef.current = true
         setHighlightIdx(next)
         return
       }
@@ -227,7 +255,7 @@ export function GlassSelect({
 
   const triggerClasses =
     variant === 'pill'
-      ? 'inline-flex items-center gap-1.5 rounded-full border border-line bg-surface-subtle hover:bg-surface-hover px-3 py-1 text-xs font-medium text-fg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40'
+      ? 'inline-flex max-w-full items-center gap-1.5 rounded-full border border-line bg-surface-subtle hover:bg-surface-hover px-3 py-1 text-xs font-medium text-fg transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-500/40'
       : 'inline-flex items-center justify-between gap-2 w-full rounded-[10px] border border-line-strong bg-surface hover:bg-surface-subtle px-2.5 py-1.5 text-xs text-fg transition-colors focus:outline-none focus-visible:border-sky-500 focus-visible:ring-2 focus-visible:ring-sky-500/20'
 
   return (
@@ -240,7 +268,7 @@ export function GlassSelect({
           setOpen(false)
         }
       }}
-      className={`relative ${variant === 'pill' ? 'inline-block' : 'w-full'} ${className}`}
+      className={`relative ${variant === 'pill' ? 'inline-block max-w-full' : 'w-full'} ${className}`}
     >
       <button
         ref={triggerRef}
@@ -289,6 +317,7 @@ export function GlassSelect({
                 return (
                   <button
                     key={opt.value}
+                    data-opt-idx={idx}
                     type="button"
                     tabIndex={-1}
                     role="option"
@@ -328,6 +357,7 @@ export function GlassSelect({
           {footerAction && (
             <div className="mt-1 pt-1 border-t border-line shrink-0">
               <button
+                ref={footerBtnRef}
                 type="button"
                 onClick={() => {
                   setOpen(false)

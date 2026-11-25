@@ -85,15 +85,25 @@ export function ProjectModal({
   const [aclRestricted, setAclRestricted] = useState(false)
   const [aclUsers, setAclUsers] = useState<User[]>([])
   const [aclRoles, setAclRoles] = useState<Record<number, ProjectAccessRole>>({})
+  const wasOpenRef = useRef(false)
 
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      wasOpenRef.current = false
+      return
+    }
+    if (wasOpenRef.current) return
+    wasOpenRef.current = true
     setQuery('')
     setMode(projects.length > 0 ? 'project' : 'create')
     setSelectedId(activeProject?.id || projects[0]?.id || '')
     setRightTab('basic')
+    setNewName('')
+    setNewDesc('')
+    setArchiveFile(null)
+    setArchiveName('')
     setConfirmDelete(false)
-  }, [open, activeProject?.id, projects.length])
+  }, [open, activeProject?.id, projects])
 
   const selectedProject = useMemo(
     () => projects.find((p) => p.id === selectedId) || activeProject || null,
@@ -106,7 +116,7 @@ export function ProjectModal({
     setDesc(selectedProject.description || '')
     setVars(selectedProject.variables || [])
     setConfirmDelete(false)
-  }, [open, selectedProject])
+  }, [open, selectedProject?.id, selectedProject?.version])
 
   useEffect(() => {
     if (!open || mode !== 'project' || rightTab !== 'acl' || !isAdmin || !selectedProject) return
@@ -444,7 +454,10 @@ export function ProjectModal({
                         <input
                           type="file"
                           accept=".tidegate,.zip"
-                          onChange={(e) => setArchiveFile(e.target.files?.[0] || null)}
+                          onChange={(e) => {
+                            setArchiveFile(e.target.files?.[0] || null)
+                            e.currentTarget.value = ''
+                          }}
                           className="sr-only"
                         />
                       </label>
@@ -679,6 +692,7 @@ export function ProjectModal({
                           <fieldset className="min-w-0">
                             <legend className="font-medium text-fg-muted mb-1.5">项目全局变量（所有环境继承）</legend>
                             <KeyValueEditor
+                              resetKey={selectedProject.id}
                               items={vars}
                               onChange={setVars}
                               keyPlaceholder="变量名"

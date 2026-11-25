@@ -97,6 +97,8 @@ export function CommandPalette({
 }: Props) {
   const dialogRef = useNativeDialog(open, onClose)
   const inputRef = useRef<HTMLInputElement | null>(null)
+  const listRef = useRef<HTMLDivElement | null>(null)
+  const keyboardScrollRef = useRef(false)
   const [query, setQuery] = useState('')
   const [selectedIdx, setSelectedIdx] = useState(0)
   const [apis, setApis] = useState<Array<{ id: string; name: string; method: string; url: string; path: string }>>([])
@@ -110,13 +112,23 @@ export function CommandPalette({
   }, [open])
 
   useEffect(() => {
-    if (!open || !projectId) return
+    if (!projectId) {
+      setApis([])
+      setScenarios([])
+      return
+    }
+    if (!open) return
+    let cancelled = false
     void Promise.all([api.getTree(projectId), api.listScenarios(projectId)])
       .then(([tree, scs]) => {
+        if (cancelled) return
         setApis(flattenAPINodes(tree.children || []))
         setScenarios(scs || [])
       })
       .catch(() => undefined)
+    return () => {
+      cancelled = true
+    }
   }, [open, projectId])
 
   const items = useMemo<CommandItem[]>(() => {
@@ -280,6 +292,12 @@ export function CommandPalette({
     setSelectedIdx(0)
   }, [query])
 
+  useEffect(() => {
+    if (!open || !keyboardScrollRef.current) return
+    keyboardScrollRef.current = false
+    listRef.current?.querySelector<HTMLElement>(`[data-cmd-idx="${selectedIdx}"]`)?.scrollIntoView({ block: 'nearest' })
+  }, [open, selectedIdx])
+
   const iconFor = (it: CommandItem) => {
     if (it.id === 'act-new-api') return <FilePlus className="w-4 h-4 text-sky-600 shrink-0" />
     if (it.id === 'act-mcp') return <Bot className="w-4 h-4 text-cyan-600 shrink-0" />
@@ -299,6 +317,21 @@ export function CommandPalette({
       ref={dialogRef}
       {...({ closedby: 'any' } as Record<string, string>)}
       aria-labelledby="tg-cmd-title"
+      onKeyDown={(e) => {
+        if (e.nativeEvent.isComposing || e.keyCode === 229) return
+        if (e.key === 'ArrowDown') {
+          e.preventDefault()
+          keyboardScrollRef.current = true
+          setSelectedIdx((i) => (items.length ? (i + 1) % items.length : 0))
+        } else if (e.key === 'ArrowUp') {
+          e.preventDefault()
+          keyboardScrollRef.current = true
+          setSelectedIdx((i) => (items.length ? (i - 1 + items.length) % items.length : 0))
+        } else if (e.key === 'Enter' && e.target === inputRef.current && items[selectedIdx]) {
+          e.preventDefault()
+          items[selectedIdx].run()
+        }
+      }}
       className="tg-dialog w-[min(36rem,calc(100vw-2rem))] mt-[12vh] overflow-hidden"
     >
       <search className="px-4 py-3 border-b border-line flex items-center gap-2.5">
@@ -315,18 +348,6 @@ export function CommandPalette({
           spellCheck={false}
           value={query}
           onChange={(e) => setQuery(e.target.value)}
-          onKeyDown={(e) => {
-            if (e.key === 'ArrowDown') {
-              e.preventDefault()
-              setSelectedIdx((i) => (items.length ? (i + 1) % items.length : 0))
-            } else if (e.key === 'ArrowUp') {
-              e.preventDefault()
-              setSelectedIdx((i) => (items.length ? (i - 1 + items.length) % items.length : 0))
-            } else if (e.key === 'Enter' && items[selectedIdx]) {
-              e.preventDefault()
-              items[selectedIdx].run()
-            }
-          }}
           placeholder="接口、场景、环境、命令"
           className="flex-1 min-w-0 bg-transparent text-sm text-fg placeholder:text-fg-subtle focus:outline-none"
         />
@@ -340,7 +361,7 @@ export function CommandPalette({
         </button>
       </search>
 
-      <div className="max-h-[55vh] overflow-y-auto tg-scroller divide-y divide-[var(--tg-border)]">
+      <div ref={listRef} className="max-h-[55vh] overflow-y-auto tg-scroller divide-y divide-[var(--tg-border)]">
         {items.length === 0 ? (
           <div className="py-10 text-center text-xs text-fg-subtle">无匹配结果</div>
         ) : (
@@ -349,6 +370,7 @@ export function CommandPalette({
             return (
               <button
                 key={it.id}
+                data-cmd-idx={idx}
                 type="button"
                 onMouseEnter={() => setSelectedIdx(idx)}
                 onClick={it.run}

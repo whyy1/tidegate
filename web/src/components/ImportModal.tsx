@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { AlertTriangle, CheckCircle2, ChevronRight, FileUp, Layers, RefreshCw, X } from 'lucide-react'
 import { api, APIError } from '../lib/api'
 import type { PreviewResult, TreeNode } from '../lib/types'
@@ -40,6 +40,38 @@ export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, on
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [preview, setPreview] = useState<PreviewResult | null>(null)
   const [busy, setBusy] = useState(false)
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const wasOpenRef = useRef(false)
+  const prevProjectRef = useRef(projectId)
+
+  useEffect(() => {
+    const projectChanged = prevProjectRef.current !== projectId
+    prevProjectRef.current = projectId
+    if (!open) {
+      wasOpenRef.current = false
+      if (projectChanged) {
+        setPreview(null)
+        setTextContent('')
+        setSelectedFile(null)
+        setTargetFolderId('')
+        setFormat('auto')
+        setStrategy('merge')
+        setBusy(false)
+      }
+      return
+    }
+    if (!wasOpenRef.current || projectChanged) {
+      wasOpenRef.current = true
+      setPreview(null)
+      setTextContent('')
+      setSelectedFile(null)
+      setTargetFolderId('')
+      setFormat('auto')
+      setStrategy('merge')
+      setBusy(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }, [open, projectId])
 
   const folders = open ? collectFolders(treeNodes) : []
 
@@ -251,11 +283,14 @@ export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, on
                       : '选择文件 (.yaml, .json, .jmx, .har, .tidegate)'}
                   </span>
                   <input
+                    ref={fileInputRef}
                     type="file"
                     accept=".yaml,.yml,.json,.jmx,.xml,.har,.tidegate,.zip,.txt"
                     onChange={(e) => {
-                      setSelectedFile(e.target.files?.[0] || null)
+                      const picked = e.target.files?.[0] || null
+                      setSelectedFile(picked)
                       setPreview(null)
+                      e.currentTarget.value = ''
                     }}
                     className="hidden"
                   />

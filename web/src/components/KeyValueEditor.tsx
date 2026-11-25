@@ -1,10 +1,11 @@
 import { Eye, EyeOff, Lock, Plus, Trash2 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { KeyValue } from '../lib/types'
 
 interface Props {
   items: KeyValue[]
   onChange: (next: KeyValue[]) => void
+  resetKey?: string | number
   keyPlaceholder?: string
   valuePlaceholder?: string
   allowDisable?: boolean
@@ -16,6 +17,7 @@ interface Props {
 export function KeyValueEditor({
   items,
   onChange,
+  resetKey,
   keyPlaceholder = '参数名',
   valuePlaceholder = '值（支持 {{变量}}）',
   allowDisable = true,
@@ -24,6 +26,16 @@ export function KeyValueEditor({
   compact = false,
 }: Props) {
   const [revealed, setRevealed] = useState<Record<number, boolean>>({})
+  const prevLenRef = useRef(items.length)
+  const prevResetRef = useRef(resetKey)
+
+  useEffect(() => {
+    if (prevResetRef.current !== resetKey || items.length < prevLenRef.current || items.length === 0) {
+      setRevealed({})
+    }
+    prevResetRef.current = resetKey
+    prevLenRef.current = items.length
+  }, [resetKey, items.length])
 
   const updateRow = (idx: number, patch: Partial<KeyValue>) => {
     const next = items.map((row, i) => (i === idx ? { ...row, ...patch } : row))
@@ -31,6 +43,7 @@ export function KeyValueEditor({
   }
 
   const removeRow = (idx: number) => {
+    setRevealed({})
     onChange(items.filter((_, i) => i !== idx))
   }
 
@@ -41,7 +54,7 @@ export function KeyValueEditor({
   return (
     <div className="space-y-1.5">
       {items.length > 0 && (
-        <div className="border border-line rounded-md overflow-hidden bg-surface">
+        <div className="border border-line rounded-md overflow-x-auto tg-scroller bg-surface">
           <table className="w-full text-xs border-collapse">
             <thead>
               <tr className="bg-surface-subtle text-fg-muted border-b border-line text-left">

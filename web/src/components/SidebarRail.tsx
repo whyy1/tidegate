@@ -69,8 +69,10 @@ export function SidebarRail({
   return (
     <aside
       aria-label="主导航"
-      className={`tg-glass-card relative shrink-0 flex flex-col select-none transition-[width] duration-200 ease-out ${
-        collapsed ? 'w-[60px]' : 'w-[196px]'
+      className={`tg-glass-card shrink-0 flex flex-col select-none transition-[width] duration-200 ease-out ${
+        collapsed
+          ? 'relative w-[60px]'
+          : 'relative w-[196px] max-sm:fixed max-sm:inset-y-2.5 max-sm:left-2.5 max-sm:z-40 max-sm:bg-surface/95 max-sm:shadow-2xl'
       }`}
     >
       {/* Brand */}
@@ -143,7 +145,7 @@ export function SidebarRail({
       </nav>
 
       {/* Utilities */}
-      <div className="relative z-10 shrink-0 border-t border-line px-2 py-2 space-y-0.5">
+      <div className="relative z-10 shrink-0 border-t border-line px-2 pt-2 pb-16 sm:pb-2 space-y-0.5">
         <button
           type="button"
           onClick={onOpenCommandPalette}

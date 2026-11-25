@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { Check, ClipboardPaste, Copy, FilePlus, Terminal, Wand2, X } from 'lucide-react'
 import { api, APIError } from '../lib/api'
 import { copyText } from '../lib/download'
@@ -73,9 +73,18 @@ export function CurlModal({
   const [copied, setCopied] = useState(false)
   const [pasteText, setPasteText] = useState('')
   const [parsing, setParsing] = useState<'' | 'draft' | 'tab'>('')
+  const wasOpenRef = useRef(false)
 
   useEffect(() => {
-    if (open) setTab(initialTab)
+    if (!open) {
+      wasOpenRef.current = false
+      return
+    }
+    if (!wasOpenRef.current) {
+      wasOpenRef.current = true
+      setPasteText('')
+    }
+    setTab(initialTab)
   }, [open, initialTab])
 
   useEffect(() => {
@@ -224,7 +233,7 @@ export function CurlModal({
                   {loading ? '生成中…' : curlText || '—'}
                 </pre>
               </div>
-              <div className="px-4 py-3 border-t border-line flex justify-end gap-2 text-xs shrink-0">
+              <div className="tg-dialog-footer text-xs">
                 <button
                   type="button"
                   disabled={!curlText || loading}
@@ -262,7 +271,7 @@ export function CurlModal({
                   className="w-full p-3 rounded-lg border tg-code-surface tg-scroller-dark font-mono text-xs leading-relaxed focus:outline-none focus:ring-2 focus:ring-sky-500/40 resize-y"
                 />
               </div>
-              <div className="px-4 py-3 border-t border-line flex flex-wrap justify-end gap-2 text-xs shrink-0">
+              <div className="tg-dialog-footer flex-wrap text-xs">
                 <button
                   type="button"
                   disabled={!pasteText.trim() || parsing !== ''}

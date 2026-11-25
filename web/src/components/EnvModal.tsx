@@ -43,12 +43,18 @@ export function EnvModal({
   const [cloneSource, setCloneSource] = useState('')
   const draftRef = useRef<Draft | null>(null)
   const confirmTimer = useRef<number>(0)
+  const wasOpenRef = useRef(false)
 
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      wasOpenRef.current = false
+      return
+    }
+    if (wasOpenRef.current) return
+    wasOpenRef.current = true
     const targetId = activeEnvId || environments[0]?.id || 'new'
     setSelectedId(targetId)
-  }, [open, activeEnvId, environments.length])
+  }, [open, activeEnvId, environments])
 
   useEffect(() => {
     setConfirmDel(false)
@@ -134,12 +140,13 @@ export function EnvModal({
     window.clearTimeout(confirmTimer.current)
     setBusy(true)
     try {
+      const remaining = environments.filter((e) => e.id !== selectedId)
       await api.deleteEnvironment(projectId, selectedId, version)
       await onEnvironmentsChanged()
-      if (activeEnvId === selectedId) {
+      if (remaining.length === 0) {
         onSelectEnv('')
       }
-      setSelectedId('new')
+      setSelectedId(remaining[0]?.id || 'new')
       onToast('success', '环境已删除')
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '删除环境失败')
@@ -272,7 +279,7 @@ export function EnvModal({
 
                 <fieldset className="min-w-0">
                   <legend className="font-medium text-fg-muted mb-1.5">变量</legend>
-                  <KeyValueEditor items={vars} onChange={setVars} keyPlaceholder="变量名" valuePlaceholder="变量值" />
+                  <KeyValueEditor resetKey={selectedId} items={vars} onChange={setVars} keyPlaceholder="变量名" valuePlaceholder="变量值" />
                 </fieldset>
               </div>
 

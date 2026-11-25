@@ -43,7 +43,7 @@ export function useNativeDialog<T extends HTMLDialogElement = HTMLDialogElement>
       pressedOutside = outside(e)
     }
     const onUp = (e: PointerEvent) => {
-      if (!supportsClosedBy && pressedOutside && outside(e)) dlg.close()
+      if (!supportsClosedBy && dlg.getAttribute('closedby') === 'any' && pressedOutside && outside(e)) dlg.close()
       pressedOutside = false
     }
     dlg.addEventListener('close', onCloseEv)

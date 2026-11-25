@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState, type FormEvent } from 'react'
 import { Pin, Plus, Trash2, X, Zap } from 'lucide-react'
 import { api, APIError } from '../lib/api'
 import type { Environment } from '../lib/types'
@@ -21,6 +21,9 @@ export function TempVarsPopover({
   onToast,
 }: Props) {
   const [open, setOpen] = useState(false)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const triggerRef = useRef<HTMLButtonElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
   const [newKey, setNewKey] = useState('')
   const [newVal, setNewVal] = useState('')
   const [pinning, setPinning] = useState<string>('')
@@ -33,11 +36,92 @@ export function TempVarsPopover({
       setConfirmClear(false)
       return
     }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null
+      if (!target) return
+      if (rootRef.current?.contains(target) || panelRef.current?.contains(target)) return
+      setOpen(false)
     }
-    window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    const onFocusIn = (e: FocusEvent) => {
+      const target = e.target as Node | null
+      if (!target) return
+      if (rootRef.current?.contains(target) || panelRef.current?.contains(target)) return
+      setOpen(false)
+    }
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        if (document.querySelector('dialog[open]') && !panelRef.current?.contains(document.activeElement)) {
+          return
+        }
+        e.preventDefault()
+        e.stopPropagation()
+        setOpen(false)
+        triggerRef.current?.focus()
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    document.addEventListener('focusin', onFocusIn, true)
+    document.addEventListener('keydown', onKey, true)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      document.removeEventListener('focusin', onFocusIn, true)
+      document.removeEventListener('keydown', onKey, true)
+    }
+  }, [open])
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const el = panelRef.current
+    if (!el) return
+
+    if (typeof el.showPopover === 'function') {
+      try {
+        if (!el.matches(':popover-open')) el.showPopover()
+      } catch {
+        // popover unsupported or already promoted
+      }
+    }
+
+    const updatePosition = () => {
+      const trigger = triggerRef.current
+      const panel = panelRef.current
+      if (!trigger || !panel) return
+      const tr = trigger.getBoundingClientRect()
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      const margin = 8
+      const gap = 8
+
+      const pr = panel.getBoundingClientRect()
+      const top = Math.min(tr.bottom + gap, Math.max(margin, vh - margin - pr.height))
+      const maxLeft = Math.max(margin, vw - margin - pr.width)
+      const left = Math.min(Math.max(margin, tr.left), maxLeft)
+
+      panel.style.top = `${Math.round(top)}px`
+      panel.style.left = `${Math.round(left)}px`
+      panel.style.maxHeight = `${Math.max(160, Math.floor(vh - margin * 2))}px`
+    }
+
+    const onScroll = (e: Event) => {
+      const target = e.target as Node | null
+      if (target && panelRef.current?.contains(target)) return
+      updatePosition()
+    }
+
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', onScroll, true)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', onScroll, true)
+      if (typeof el.hidePopover === 'function') {
+        try {
+          if (el.matches(':popover-open')) el.hidePopover()
+        } catch {
+          // ignore
+        }
+      }
+    }
   }, [open])
 
   useEffect(() => {
@@ -88,8 +172,9 @@ export function TempVarsPopover({
   const has = entries.length > 0
 
   return (
-    <div className="relative">
+    <div ref={rootRef} className="relative">
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
@@ -112,12 +197,13 @@ export function TempVarsPopover({
         </span>
       </button>
 
-      {open && <div className="fixed inset-0 z-30" onClick={() => setOpen(false)} />}
       {open && (
         <div
+          ref={panelRef}
+          popover="manual"
           role="dialog"
           aria-label="临时变量"
-          className="tg-glass-popover absolute left-0 top-full z-40 mt-2 w-[min(24rem,calc(100vw-1.5rem))] overflow-hidden text-fg"
+          className="tg-glass-popover fixed inset-auto m-0 z-50 w-[min(24rem,calc(100vw-1rem))] overflow-hidden text-fg flex flex-col"
         >
           <div className="flex items-center justify-between gap-2 border-b border-line bg-surface-subtle px-3.5 py-2">
             <div className="flex items-center gap-2 text-xs font-semibold">
@@ -137,7 +223,7 @@ export function TempVarsPopover({
             </button>
           </div>
 
-          <div className="max-h-72 space-y-1.5 overflow-y-auto p-2.5 text-xs tg-scroller">
+          <div className="min-h-0 flex-1 max-h-72 space-y-1.5 overflow-y-auto p-2.5 text-xs tg-scroller">
             {!has ? (
               <div className="py-5 text-center text-fg-subtle">暂无</div>
             ) : (

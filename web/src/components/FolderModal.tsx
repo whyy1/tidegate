@@ -120,6 +120,7 @@ export function FolderModal({ open, projectId, folder, parentId, onClose, onSave
             <fieldset>
               <legend className="font-medium text-fg-muted mb-1.5">公共请求头</legend>
               <KeyValueEditor
+                resetKey={folder?.id || 'new'}
                 items={headers}
                 onChange={setHeaders}
                 keyPlaceholder="Header 名称"
@@ -133,7 +134,7 @@ export function FolderModal({ open, projectId, folder, parentId, onClose, onSave
             </fieldset>
           </div>
 
-          <footer className="px-5 py-3 border-t border-line flex justify-end gap-2 shrink-0">
+          <footer className="tg-dialog-footer">
             <button
               type="button"
               onClick={onClose}

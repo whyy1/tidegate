@@ -106,19 +106,22 @@ export function App() {
 
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
     try {
+      if (window.innerWidth < 768) return true
       return window.localStorage.getItem('tg.sidebar.collapsed') === '1'
     } catch {
-      return false
+      return typeof window !== 'undefined' ? window.innerWidth < 768 : false
     }
   })
   const [cmdOpen, setCmdOpen] = useState(false)
+  const cmdOpenRef = useRef(false)
+  cmdOpenRef.current = cmdOpen
   const [projectModalOpen, setProjectModalOpen] = useState(false)
   const [envModalOpen, setEnvModalOpen] = useState(false)
   const [accountModalOpen, setAccountModalOpen] = useState(false)
   const [accountInitialTab, setAccountInitialTab] = useState<AccountModalTab>('sessions')
   const [toasts, setToasts] = useState<ToastItem[]>([])
   const stageRef = useRef<HTMLDivElement | null>(null)
-  useGlassStagePhysics(stageRef)
+  useGlassStagePhysics(stageRef, !booting && Boolean(user))
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((cur) => {
@@ -140,6 +143,7 @@ export function App() {
   useEffect(() => {
     const onGlobalKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        if (!cmdOpenRef.current && document.querySelector('dialog[open]')) return
         e.preventDefault()
         setCmdOpen((v) => !v)
         return
@@ -423,6 +427,7 @@ export function App() {
                       activeEnvId={activeEnvId}
                       tempVars={tempVars}
                       canWrite={canWriteProject}
+                      isActive={activeTab === 'scenarios'}
                       onLaunchScenario={(scenarioId) => {
                         setQuickLoadAPI(null)
                         setInspectRunId('')

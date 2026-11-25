@@ -13,8 +13,9 @@ const TILT_BLOCK_SELECTOR =
  * - Adjacent borders glow smoothly before entering (`.tg-glass-card::after` / `.tg-accent-card::after`)
  * - Precision `.tg-tilt-card` surfaces tilt subtly only while directly hovered outside form/chart controls.
  */
-export function useGlassStagePhysics(containerRef: RefObject<HTMLElement | null>) {
+export function useGlassStagePhysics(containerRef: RefObject<HTMLElement | null>, active = true) {
   useEffect(() => {
+    if (!active) return
     const root = containerRef.current
     if (!root) return
 
@@ -109,7 +110,7 @@ export function useGlassStagePhysics(containerRef: RefObject<HTMLElement | null>
       root.removeEventListener('pointerleave', onLeave)
       clearCards()
     }
-  }, [containerRef])
+  }, [containerRef, active])
 }
 
 /**

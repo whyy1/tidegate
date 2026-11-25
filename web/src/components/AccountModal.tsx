@@ -266,9 +266,18 @@ export function AccountModal({
   const systemScheme = useSystemScheme()
   const { copied, copy } = useCopyFlag(useCallback(() => onToast('info', '复制失败，请手动选择文本复制'), [onToast]))
   const { armed, trigger, reset: disarm } = useArm()
+  const wasOpenRef = useRef(false)
+  const sessionsReqRef = useRef(0)
+  const tokensReqRef = useRef(0)
+  const [revokingId, setRevokingId] = useState('')
 
   useEffect(() => {
-    if (!open) return
+    if (!open) {
+      wasOpenRef.current = false
+      return
+    }
+    if (wasOpenRef.current) return
+    wasOpenRef.current = true
     setTab(initialTab)
     setEnrollment(null)
     setTotpConfirmCode('')
@@ -283,6 +292,18 @@ export function AccountModal({
     setCatalogError(false)
     setRestrictTools(false)
     setToolPick([])
+    setCurPwd('')
+    setNewPwd('')
+    setConfirmPwd('')
+    setShowPwd(false)
+    setTokName('')
+    setTokScopes([])
+    setTokProjectIDs([])
+    setTokCustomDays('')
+    setTokMcpMaxVUs('')
+    setTokMcpMaxDur('')
+    setTokRatePerMin('')
+    setRevokingId('')
   }, [open, initialTab])
 
   useEffect(() => {
@@ -290,25 +311,32 @@ export function AccountModal({
   }, [user.role])
 
   const loadSessions = useCallback(async () => {
+    const seq = ++sessionsReqRef.current
     setLoading(true)
     try {
       const res = await api.listSessions()
+      if (seq !== sessionsReqRef.current) return
       setSessions(res.sessions || [])
     } catch (err) {
+      if (seq !== sessionsReqRef.current) return
       onToast('error', err instanceof APIError ? err.message : '读取会话列表失败')
     } finally {
-      setLoading(false)
+      if (seq === sessionsReqRef.current) setLoading(false)
     }
   }, [onToast])
 
   const loadTokens = useCallback(async () => {
+    const seq = ++tokensReqRef.current
     setLoadingTokens(true)
     try {
-      setTokens(await api.listAPITokens())
+      const list = await api.listAPITokens()
+      if (seq !== tokensReqRef.current) return
+      setTokens(list)
     } catch (err) {
+      if (seq !== tokensReqRef.current) return
       onToast('error', err instanceof APIError ? err.message : '读取 API 令牌失败')
     } finally {
-      setLoadingTokens(false)
+      if (seq === tokensReqRef.current) setLoadingTokens(false)
     }
   }, [onToast])
 
@@ -538,6 +566,7 @@ export function AccountModal({
   }
 
   const handleRevokeToken = async (tok: APIToken) => {
+    setRevokingId(`token:${tok.id}`)
     try {
       await api.revokeAPIToken(tok.id)
       onToast('success', `已吊销令牌「${tok.name}」`)
@@ -545,6 +574,8 @@ export function AccountModal({
       await loadTokens()
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '吊销 API 令牌失败')
+    } finally {
+      setRevokingId((cur) => (cur === `token:${tok.id}` ? '' : cur))
     }
   }
 
@@ -611,6 +642,7 @@ export function AccountModal({
   }
 
   const handleRevokeSession = async (s: SessionItem) => {
+    setRevokingId(`session:${s.id}`)
     try {
       await api.revokeSession(s.id)
       onToast('success', s.current ? '已注销当前会话' : '已踢出该设备会话')
@@ -622,6 +654,8 @@ export function AccountModal({
       }
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '注销会话失败')
+    } finally {
+      setRevokingId((cur) => (cur === `session:${s.id}` ? '' : cur))
     }
   }
 
@@ -663,18 +697,20 @@ export function AccountModal({
 
   const dangerBtn = (id: string, label: string, confirmLabel: string, run: () => void) => {
     const isArmed = armed === id
+    const isBusy = revokingId === id
     return (
       <button
         type="button"
+        disabled={isBusy}
         onClick={() => trigger(id, run)}
         onBlur={() => isArmed && disarm()}
-        className={`shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-md border font-medium transition-colors ${
+        className={`shrink-0 inline-flex items-center gap-1 px-2.5 py-1 rounded-md border font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed ${
           isArmed
             ? 'border-rose-600 bg-rose-600 hover:bg-rose-solid text-white'
             : 'border-rose-200 text-rose-700 hover:bg-rose-50'
         }`}
       >
-        <Trash2 className="w-3.5 h-3.5" /> {isArmed ? confirmLabel : label}
+        <Trash2 className="w-3.5 h-3.5" /> {isBusy ? '处理中…' : isArmed ? confirmLabel : label}
       </button>
     )
   }
@@ -1715,7 +1751,7 @@ export function AccountModal({
             )}
           </div>
 
-          <footer className="px-5 py-3 border-t border-line bg-surface-subtle flex items-center justify-between text-xs">
+          <footer className="tg-dialog-footer justify-between text-xs">
             <button
               type="button"
               onClick={() => void handleLogout()}

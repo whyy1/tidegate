@@ -82,15 +82,30 @@ export function CollectionRunnerModal({
   const [expandedStepId, setExpandedStepId] = useState('')
   const [copied, setCopied] = useState(false)
   const copiedTimer = useRef<number | undefined>(undefined)
+  const wasOpenRef = useRef(false)
+  const prevProjectRef = useRef(projectId)
 
   const folderChoices = useMemo(() => collectFolderChoices(treeNodes), [treeNodes])
 
   useEffect(() => {
-    if (open) {
-      setFolderId(initialFolderId || '')
-      setEnvId(initialEnvId || '')
+    const projectChanged = prevProjectRef.current !== projectId
+    prevProjectRef.current = projectId
+    if (!open) {
+      wasOpenRef.current = false
+      if (projectChanged) {
+        setResult(null)
+        setExpandedStepId('')
+      }
+      return
     }
-  }, [open, initialFolderId, initialEnvId])
+    if (!wasOpenRef.current || projectChanged) {
+      wasOpenRef.current = true
+      setResult(null)
+      setExpandedStepId('')
+    }
+    setFolderId(initialFolderId || '')
+    setEnvId(initialEnvId || '')
+  }, [open, projectId, initialFolderId, initialEnvId])
 
   useEffect(() => () => window.clearTimeout(copiedTimer.current), [])
 
@@ -147,6 +162,8 @@ export function CollectionRunnerModal({
       aria-labelledby="tg-collection-runner-title"
       className="tg-dialog w-[min(56rem,calc(100vw-2rem))] max-h-[86dvh]"
     >
+      {open && (
+        <>
       <header className="tg-dialog-header">
         <h2 id="tg-collection-runner-title" className="text-sm font-semibold text-fg">
           批量测试
@@ -172,7 +189,7 @@ export function CollectionRunnerModal({
               name="runner-scope"
               value={folderId}
               onChange={(e) => setFolderId(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-line-strong bg-surface text-fg"
+              className="tg-select w-full px-2.5 py-1.5 rounded border border-line-strong bg-surface text-fg"
             >
               <option value="">整个项目</option>
               {folderChoices.map((fc) => (
@@ -191,7 +208,7 @@ export function CollectionRunnerModal({
               name="runner-env"
               value={envId}
               onChange={(e) => setEnvId(e.target.value)}
-              className="w-full px-2.5 py-1.5 rounded border border-line-strong bg-surface text-fg"
+              className="tg-select w-full px-2.5 py-1.5 rounded border border-line-strong bg-surface text-fg"
             >
               <option value="">不使用环境</option>
               {environments.map((ev) => (
@@ -405,6 +422,8 @@ export function CollectionRunnerModal({
           关闭
         </button>
       </footer>
+        </>
+      )}
     </dialog>
   )
 }

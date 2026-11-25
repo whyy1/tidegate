@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ClipboardEventHandler, type KeyboardEvent } from 'react'
+import { useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type ClipboardEventHandler, type KeyboardEvent } from 'react'
 import type { ResolvedVariable } from '../lib/types'
 
 interface Props {
@@ -12,8 +12,8 @@ interface Props {
 }
 
 const sourceBadge: Record<ResolvedVariable['source'], { label: string; cls: string }> = {
-  override: { label: '临时', cls: 'bg-amber-100 text-amber-800 border-amber-200' },
-  environment: { label: '环境', cls: 'bg-sky-100 text-sky-800 border-sky-200' },
+  override: { label: '临时', cls: 'bg-amber-500/15 text-amber-700 border-amber-500/30' },
+  environment: { label: '环境', cls: 'bg-sky-500/15 text-tidal border-sky-500/30' },
   project: { label: '项目', cls: 'bg-surface-subtle text-fg-muted border-line' },
 }
 
@@ -26,7 +26,11 @@ export function VariableInput({
   className = '',
   disabled = false,
 }: Props) {
+  const rootRef = useRef<HTMLDivElement>(null)
   const inputRef = useRef<HTMLInputElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const keyboardScrollRef = useRef(false)
+  const listId = useId()
   const [cursor, setCursor] = useState(0)
   const [focused, setFocused] = useState(false)
   const [dismissedAt, setDismissedAt] = useState<string | null>(null)
@@ -45,6 +49,9 @@ export function VariableInput({
     }
   }, [value, cursor])
 
+  const matchRef = useRef(match)
+  matchRef.current = match
+
   const candidates = useMemo(() => {
     if (!match) return []
     const q = match.prefix
@@ -57,6 +64,122 @@ export function VariableInput({
   useEffect(() => {
     setSelectedIdx(0)
   }, [match?.prefix])
+
+  useEffect(() => {
+    if (!open || !keyboardScrollRef.current) return
+    keyboardScrollRef.current = false
+    const activeEl = menuRef.current?.querySelector<HTMLElement>(`[data-var-idx="${selectedIdx}"]`)
+    activeEl?.scrollIntoView({ block: 'nearest' })
+  }, [open, selectedIdx])
+
+  useEffect(() => {
+    if (!open) return
+    const onPointerDown = (e: PointerEvent) => {
+      const target = e.target as Node | null
+      if (!target) return
+      if (rootRef.current?.contains(target) || menuRef.current?.contains(target)) return
+      setFocused(false)
+    }
+    const onFocusIn = (e: FocusEvent) => {
+      const target = e.target as Node | null
+      if (!target) return
+      if (rootRef.current?.contains(target) || menuRef.current?.contains(target)) return
+      setFocused(false)
+    }
+    const onWindowBlur = () => setFocused(false)
+    const onKeyDown = (e: globalThis.KeyboardEvent) => {
+      if (e.key === 'Escape' && !e.isComposing) {
+        e.preventDefault()
+        e.stopPropagation()
+        if (matchRef.current) setDismissedAt(matchRef.current.tokenKey)
+      }
+    }
+    document.addEventListener('pointerdown', onPointerDown, true)
+    document.addEventListener('focusin', onFocusIn, true)
+    document.addEventListener('keydown', onKeyDown, true)
+    window.addEventListener('blur', onWindowBlur)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      document.removeEventListener('focusin', onFocusIn, true)
+      document.removeEventListener('keydown', onKeyDown, true)
+      window.removeEventListener('blur', onWindowBlur)
+    }
+  }, [open])
+
+  useLayoutEffect(() => {
+    if (!open) return
+    const el = menuRef.current
+    if (!el) return
+
+    if (typeof el.showPopover === 'function') {
+      try {
+        if (!el.matches(':popover-open')) el.showPopover()
+      } catch {
+        // popover unsupported or already promoted
+      }
+    }
+
+    const updatePosition = () => {
+      const anchor = inputRef.current
+      const menu = menuRef.current
+      if (!anchor || !menu) return
+      const tr = anchor.getBoundingClientRect()
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      if (tr.bottom < 0 || tr.top > vh || tr.right < 0 || tr.left > vw) {
+        setFocused(false)
+        return
+      }
+      const gap = 4
+      const margin = 8
+      const availWidth = Math.max(160, vw - margin * 2)
+      const desiredWidth = Math.min(availWidth, Math.max(Math.round(tr.width), 280))
+
+      menu.style.width = `${desiredWidth}px`
+      menu.style.maxWidth = `${availWidth}px`
+      menu.style.maxHeight = ''
+
+      const mr = menu.getBoundingClientRect()
+      const spaceBelow = vh - tr.bottom - margin
+      const spaceAbove = tr.top - margin
+      const flipUp = spaceBelow < mr.height + gap && spaceAbove > spaceBelow
+      const avail = flipUp ? spaceAbove : spaceBelow
+      const maxH = Math.max(0, Math.min(264, Math.floor(avail - gap)))
+      menu.style.maxHeight = `${maxH}px`
+
+      const updatedMr = menu.getBoundingClientRect()
+      const top = flipUp
+        ? Math.max(margin, tr.top - gap - updatedMr.height)
+        : Math.min(tr.bottom + gap, Math.max(margin, vh - margin - updatedMr.height))
+      const maxLeft = Math.max(margin, vw - margin - updatedMr.width)
+      const left = Math.min(Math.max(margin, tr.left), maxLeft)
+
+      menu.style.top = `${Math.round(top)}px`
+      menu.style.left = `${Math.round(left)}px`
+      menu.style.transformOrigin = `${flipUp ? 'bottom' : 'top'} ${left < tr.left ? 'right' : 'left'}`
+    }
+
+    const onScroll = (e: Event) => {
+      const target = e.target as Node | null
+      if (target && menuRef.current?.contains(target)) return
+      updatePosition()
+    }
+
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', onScroll, true)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', onScroll, true)
+      if (typeof el.hidePopover === 'function') {
+        try {
+          if (el.matches(':popover-open')) el.hidePopover()
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }, [open, candidates.length])
 
   const applyCandidate = (name: string) => {
     if (!match) return
@@ -94,9 +217,11 @@ export function VariableInput({
 
     if (e.key === 'ArrowDown') {
       e.preventDefault()
+      keyboardScrollRef.current = true
       setSelectedIdx((i) => (i + 1) % candidates.length)
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
+      keyboardScrollRef.current = true
       setSelectedIdx((i) => (i - 1 + candidates.length) % candidates.length)
     } else if (e.key === 'Enter' || e.key === 'Tab') {
       e.preventDefault()
@@ -110,7 +235,7 @@ export function VariableInput({
   }
 
   return (
-    <div className="relative flex-1 min-w-0">
+    <div ref={rootRef} className="relative flex-1 min-w-0">
       <input
         ref={inputRef}
         type="text"
@@ -119,12 +244,12 @@ export function VariableInput({
         spellCheck={false}
         autoCapitalize="off"
         autoCorrect="off"
+        aria-autocomplete="list"
+        aria-expanded={open}
+        aria-controls={open ? listId : undefined}
         onFocus={() => {
           setFocused(true)
           syncCursor()
-        }}
-        onBlur={() => {
-          window.setTimeout(() => setFocused(false), 120)
         }}
         onClick={syncCursor}
         onKeyUp={syncCursor}
@@ -142,42 +267,49 @@ export function VariableInput({
 
       {open && (
         <div
+          ref={menuRef}
+          id={listId}
+          popover="manual"
           role="listbox"
           aria-label="变量模板自动补全"
-          className="absolute left-0 right-0 top-full mt-1 z-40 rounded-lg border border-line bg-surface shadow-xl max-h-60 overflow-y-auto tg-scroller divide-y divide-line"
+          onMouseDown={(e) => e.preventDefault()}
+          className="tg-glass-popover fixed inset-auto m-0 z-50 flex flex-col overflow-hidden text-xs"
         >
-          <div className="px-2.5 py-1 bg-surface-subtle text-[10px] text-fg-subtle flex items-center justify-end">
+          <div className="px-2.5 py-1 bg-surface-subtle border-b border-line text-[10px] text-fg-subtle flex items-center justify-end shrink-0">
             <span className="tg-tabular">{candidates.length} 项</span>
           </div>
-          {candidates.map((v, idx) => {
-            const badge = sourceBadge[v.source] || sourceBadge.project
-            const active = idx === selectedIdx
-            return (
-              <button
-                key={`${v.source}:${v.name}`}
-                type="button"
-                role="option"
-                aria-selected={active}
-                onMouseDown={(e) => {
-                  e.preventDefault()
-                  applyCandidate(v.name)
-                }}
-                className={`w-full text-left px-2.5 py-1.5 flex items-center justify-between gap-2 text-xs transition-colors ${
-                  active ? 'bg-sky-50 text-sky-900' : 'hover:bg-surface-hover text-fg'
-                }`}
-              >
-                <div className="flex items-center gap-2 min-w-0">
-                  <code className="font-mono font-semibold text-sky-700 truncate">{`{{${v.name}}}`}</code>
-                  <span className={`px-1.5 py-px rounded border text-[10px] shrink-0 ${badge.cls}`}>
-                    {badge.label}
+          <div className="min-h-0 flex-1 max-h-60 overflow-y-auto tg-scroller divide-y divide-line p-1">
+            {candidates.map((v, idx) => {
+              const badge = sourceBadge[v.source] || sourceBadge.project
+              const active = idx === selectedIdx
+              return (
+                <button
+                  key={`${v.source}:${v.name}`}
+                  data-var-idx={idx}
+                  type="button"
+                  tabIndex={-1}
+                  role="option"
+                  aria-selected={active}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onMouseEnter={() => setSelectedIdx(idx)}
+                  onClick={() => applyCandidate(v.name)}
+                  className={`w-full text-left px-2.5 py-1.5 rounded-xl flex items-center justify-between gap-2 text-xs transition-colors ${
+                    active ? 'bg-sky-500/15 text-tidal' : 'hover:bg-surface-hover text-fg'
+                  }`}
+                >
+                  <div className="flex items-center gap-2 min-w-0">
+                    <code className="font-mono font-semibold text-tidal truncate">{`{{${v.name}}}`}</code>
+                    <span className={`px-1.5 py-px rounded border text-[10px] shrink-0 ${badge.cls}`}>
+                      {badge.label}
+                    </span>
+                  </div>
+                  <span className="font-mono text-[11px] text-fg-subtle truncate max-w-[220px]">
+                    {v.secret ? '******' : v.value || '（空值）'}
                   </span>
-                </div>
-                <span className="font-mono text-[11px] text-fg-subtle truncate max-w-[220px]">
-                  {v.secret ? '******' : v.value || '（空值）'}
-                </span>
-              </button>
-            )
-          })}
+                </button>
+              )
+            })}
+          </div>
         </div>
       )}
     </div>

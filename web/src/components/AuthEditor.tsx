@@ -9,7 +9,7 @@ interface Props {
 const inputCls =
   'w-full px-2.5 py-1.5 border border-line-strong rounded-md bg-surface text-fg font-mono text-xs focus:border-sky-500 focus:outline-none'
 const selectCls =
-  'w-full px-2.5 py-1.5 border border-line-strong rounded-md bg-surface text-fg text-xs focus:border-sky-500 focus:outline-none'
+  'tg-select w-full px-2.5 py-1.5 border border-line-strong rounded-md bg-surface text-fg text-xs focus:border-sky-500 focus:outline-none'
 const labelCls = 'block text-fg-muted font-medium mb-1'
 const idProps = { autoComplete: 'off', autoCorrect: 'off', autoCapitalize: 'none', spellCheck: false } as const
 

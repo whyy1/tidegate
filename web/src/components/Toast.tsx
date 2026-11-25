@@ -44,7 +44,7 @@ export function ToastContainer({
         <div
           key={t.id}
           role={t.kind === 'error' ? 'alert' : 'status'}
-          className={`flex items-start gap-2.5 rounded-lg border bg-surface px-3.5 py-2.5 text-sm shadow-lg ${
+          className={`flex items-start gap-2.5 rounded-lg border bg-surface/95 backdrop-blur-md px-3.5 py-2.5 text-sm shadow-lg ${
             t.kind === 'error'
               ? 'border-rose-200 text-rose-800'
               : t.kind === 'success'

@@ -58,7 +58,7 @@ function fmtDuration(sec: number): string {
 
 const inputCls =
   'w-full px-2 py-1 border border-line-strong rounded bg-surface text-fg font-mono tg-tabular focus:border-sky-500 focus:outline-none'
-const selectCls = 'w-full px-2 py-1 border border-line-strong rounded bg-surface text-fg focus:border-sky-500 focus:outline-none'
+const selectCls = 'tg-select w-full px-2 py-1 border border-line-strong rounded bg-surface text-fg focus:border-sky-500 focus:outline-none'
 const fieldLabelCls = 'block text-fg-muted mb-1'
 
 export function LoadConfigEditor({ load, onChange, http, onHTTPChange, stepOptions = [], compact = false }: Props) {
@@ -340,12 +340,12 @@ export function LoadConfigEditor({ load, onChange, http, onHTTPChange, stepOptio
           const updateTh = (patch: Partial<Threshold>) =>
             setThresholds(thresholds.map((row, i) => (i === idx ? { ...row, ...patch } : row)))
           return (
-            <div key={idx} className="grid grid-cols-12 gap-1.5 items-center p-2 rounded border border-line bg-surface">
+            <div key={idx} className="grid grid-cols-2 sm:grid-cols-[minmax(8.5rem,1.4fr)_5rem_minmax(4.5rem,1fr)_minmax(6rem,1fr)_auto_4.5rem_auto] gap-1.5 items-center p-2 rounded border border-line bg-surface">
               <select
                 aria-label="指标"
                 value={th.metric}
                 onChange={(e) => updateTh({ metric: e.target.value })}
-                className={`col-span-3 ${selectCls}`}
+                className={selectCls}
               >
                 <option value="p95_ms">P95 延迟 ms</option>
                 <option value="p99_ms">P99 延迟 ms</option>
@@ -360,7 +360,7 @@ export function LoadConfigEditor({ load, onChange, http, onHTTPChange, stepOptio
                 aria-label="比较符"
                 value={th.op || (th.metric === 'rps' ? '>=' : '<=')}
                 onChange={(e) => updateTh({ op: e.target.value as Threshold['op'] })}
-                className={`col-span-1 ${selectCls} font-mono px-1.5`}
+                className={`${selectCls} font-mono px-1.5`}
               >
                 <option value="<=">&lt;=</option>
                 <option value="<">&lt;</option>
@@ -374,14 +374,14 @@ export function LoadConfigEditor({ load, onChange, http, onHTTPChange, stepOptio
                 min={0}
                 value={th.value}
                 onChange={(e) => updateTh({ value: Number(e.target.value) || 0 })}
-                className={`col-span-2 ${inputCls}`}
+                className={inputCls}
               />
               {stepOptions.length > 0 ? (
                 <select
                   aria-label="作用范围"
                   value={th.step || ''}
                   onChange={(e) => updateTh({ step: e.target.value || undefined })}
-                  className={`col-span-2 ${selectCls} px-1.5`}
+                  className={`${selectCls} px-1.5`}
                 >
                   <option value="">全局</option>
                   {stepOptions.map((so) => (
@@ -400,10 +400,10 @@ export function LoadConfigEditor({ load, onChange, http, onHTTPChange, stepOptio
                   autoCapitalize="none"
                   spellCheck={false}
                   onChange={(e) => updateTh({ step: e.target.value || undefined })}
-                  className={`col-span-2 ${inputCls}`}
+                  className={inputCls}
                 />
               )}
-              <label className="col-span-2 inline-flex items-center gap-1 text-fg-muted cursor-pointer">
+              <label className="inline-flex items-center gap-1 text-fg-muted cursor-pointer whitespace-nowrap">
                 <input
                   type="checkbox"
                   checked={Boolean(th.abort_on_fail)}
@@ -422,14 +422,14 @@ export function LoadConfigEditor({ load, onChange, http, onHTTPChange, stepOptio
                 autoCapitalize="none"
                 spellCheck={false}
                 onChange={(e) => updateTh({ grace_period: e.target.value || undefined })}
-                className={`col-span-1 ${inputCls} px-1.5 disabled:opacity-40`}
+                className={`${inputCls} px-1.5 disabled:opacity-40`}
               />
               <button
                 type="button"
                 title="删除阈值"
                 aria-label="删除阈值"
                 onClick={() => setThresholds(thresholds.filter((_, i) => i !== idx))}
-                className="col-span-1 justify-self-end p-1 text-fg-subtle hover:text-rose-600"
+                className="justify-self-end p-1 text-fg-subtle hover:text-rose-600"
               >
                 <Trash2 className="w-3.5 h-3.5" />
               </button>

@@ -66,11 +66,12 @@ export function GlassDock({
         aria-label="快捷停靠栏"
         onPointerMove={handlePointerMove}
         onPointerLeave={resetMag}
-        className="tg-dock-bar rounded-2xl px-2.5 py-1.5 flex items-end gap-1.5"
+        className="tg-dock-bar rounded-2xl px-1.5 sm:px-2.5 py-1.5 flex items-end gap-1 sm:gap-1.5"
       >
-        {DOCK_ITEMS.map(({ id, label, icon: Icon }) => {
+        {DOCK_ITEMS.map(({ id, label, icon: Icon }, idx) => {
           const active = activeTab === id
           const pulsing = id === 'run' && Boolean(activeRunId)
+          const tipAlign = idx === 0 ? 'left-0 [--tg-tip-x:0px]' : 'left-1/2'
           return (
             <button
               key={id}
@@ -79,13 +80,13 @@ export function GlassDock({
               aria-label={label}
               aria-current={active ? 'page' : undefined}
               onClick={() => onChangeTab(id)}
-              className={`tg-dock-btn relative h-9 w-9 rounded-xl border inline-flex items-center justify-center ${
+              className={`tg-dock-btn relative shrink-0 h-8 w-8 max-[400px]:h-7 max-[400px]:w-7 sm:h-9 sm:w-9 rounded-xl border inline-flex items-center justify-center ${
                 active
                   ? 'bg-gradient-to-br from-sky-500 to-sky-700 text-white border-sky-300/60 shadow-[0_8px_18px_-5px_rgb(2_132_199/0.55)]'
                   : 'bg-surface/85 border-line text-fg hover:text-tidal'
               }`}
             >
-              <span className="tg-dock-tip pointer-events-none absolute bottom-[calc(100%+10px)] left-1/2 rounded-full border border-line bg-surface/95 px-2.5 py-0.5 text-[11px] font-semibold text-fg whitespace-nowrap shadow-md">
+              <span className={`tg-dock-tip pointer-events-none absolute bottom-[calc(100%+10px)] ${tipAlign} rounded-full border border-line bg-surface/95 px-2.5 py-0.5 text-[11px] font-semibold text-fg whitespace-nowrap shadow-md`}>
                 {label}
               </span>
               <Icon className="h-4 w-4" />
@@ -99,14 +100,14 @@ export function GlassDock({
           )
         })}
 
-        <span aria-hidden="true" className="mx-0.5 h-6 w-px bg-line-strong self-center" />
+        <span aria-hidden="true" className="mx-0.5 h-6 w-px bg-line-strong self-center shrink-0" />
 
         <button
           type="button"
           data-dock-btn
           aria-label="命令面板 Ctrl+K"
           onClick={onOpenCommandPalette}
-          className="tg-dock-btn relative h-9 w-9 rounded-xl border border-line bg-surface/85 text-fg hover:text-tidal inline-flex items-center justify-center"
+          className="tg-dock-btn relative shrink-0 h-8 w-8 max-[400px]:h-7 max-[400px]:w-7 sm:h-9 sm:w-9 rounded-xl border border-line bg-surface/85 text-fg hover:text-tidal inline-flex items-center justify-center"
         >
           <span className="tg-dock-tip pointer-events-none absolute bottom-[calc(100%+10px)] left-1/2 rounded-full border border-line bg-surface/95 px-2.5 py-0.5 text-[11px] font-semibold text-fg whitespace-nowrap shadow-md">
             检索 Ctrl+K
@@ -119,9 +120,9 @@ export function GlassDock({
           data-dock-btn
           aria-label="MCP 接入"
           onClick={onOpenMCP}
-          className="tg-dock-btn relative h-9 w-9 rounded-xl border border-line bg-surface/85 text-cyan-600 dark:text-cyan-300 hover:bg-surface-hover inline-flex items-center justify-center"
+          className="tg-dock-btn relative shrink-0 h-8 w-8 max-[400px]:h-7 max-[400px]:w-7 sm:h-9 sm:w-9 rounded-xl border border-line bg-surface/85 text-cyan-600 dark:text-cyan-300 hover:bg-surface-hover inline-flex items-center justify-center"
         >
-          <span className="tg-dock-tip pointer-events-none absolute bottom-[calc(100%+10px)] left-1/2 rounded-full border border-line bg-surface/95 px-2.5 py-0.5 text-[11px] font-semibold text-fg whitespace-nowrap shadow-md">
+          <span className="tg-dock-tip pointer-events-none absolute bottom-[calc(100%+10px)] right-0 [--tg-tip-x:0px] rounded-full border border-line bg-surface/95 px-2.5 py-0.5 text-[11px] font-semibold text-fg whitespace-nowrap shadow-md">
             MCP 接入
           </span>
           <Bot className="h-4 w-4" />

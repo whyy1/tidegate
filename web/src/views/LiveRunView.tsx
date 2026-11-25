@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react'
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react'
 import type uPlot from 'uplot'
 import {
   Activity,
@@ -225,6 +225,8 @@ export function LiveRunView({
   const inspectorRef = useRef<HTMLDivElement>(null)
   const detailTabsRef = useRef<HTMLDivElement>(null)
   const moreRef = useRef<HTMLDivElement>(null)
+  const moreTriggerRef = useRef<HTMLButtonElement>(null)
+  const moreMenuRef = useRef<HTMLDivElement>(null)
 
   const modRefFor = (id: 'launcher' | 'telemetry' | 'charts' | 'inspector') => {
     if (id === 'launcher') return launcherRef.current
@@ -250,7 +252,7 @@ export function LiveRunView({
       return
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setZoomedMod('')
+      if (e.key === 'Escape' && !document.querySelector('dialog[open]')) setZoomedMod('')
     }
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
@@ -264,17 +266,97 @@ export function LiveRunView({
 
   useEffect(() => {
     if (!moreOpen) return
+    const isInside = (target: Node | null) =>
+      Boolean(target && (moreRef.current?.contains(target) || moreMenuRef.current?.contains(target)))
     const onDown = (e: PointerEvent) => {
-      if (moreRef.current && !moreRef.current.contains(e.target as Node)) setMoreOpen(false)
+      if (!isInside(e.target as Node | null)) setMoreOpen(false)
+    }
+    const onFocusIn = (e: FocusEvent) => {
+      if (!isInside(e.target as Node | null)) setMoreOpen(false)
     }
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setMoreOpen(false)
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        setMoreOpen(false)
+        moreTriggerRef.current?.focus()
+      }
     }
-    document.addEventListener('pointerdown', onDown)
-    document.addEventListener('keydown', onKey)
+    document.addEventListener('pointerdown', onDown, true)
+    document.addEventListener('focusin', onFocusIn, true)
+    document.addEventListener('keydown', onKey, true)
     return () => {
-      document.removeEventListener('pointerdown', onDown)
-      document.removeEventListener('keydown', onKey)
+      document.removeEventListener('pointerdown', onDown, true)
+      document.removeEventListener('focusin', onFocusIn, true)
+      document.removeEventListener('keydown', onKey, true)
+    }
+  }, [moreOpen])
+
+  useLayoutEffect(() => {
+    if (!moreOpen) return
+    const el = moreMenuRef.current
+    if (!el) return
+
+    if (typeof el.showPopover === 'function') {
+      try {
+        if (!el.matches(':popover-open')) el.showPopover()
+      } catch {
+        // popover unsupported or already promoted
+      }
+    }
+
+    const updatePosition = () => {
+      const trigger = moreTriggerRef.current
+      const menu = moreMenuRef.current
+      if (!trigger || !menu) return
+      const tr = trigger.getBoundingClientRect()
+      const vw = window.innerWidth
+      const vh = window.innerHeight
+      if (tr.bottom < 0 || tr.top > vh || tr.right < 0 || tr.left > vw) {
+        setMoreOpen(false)
+        return
+      }
+      const gap = 4
+      const margin = 8
+      menu.style.maxHeight = ''
+      const mr = menu.getBoundingClientRect()
+      const spaceBelow = vh - tr.bottom - margin
+      const spaceAbove = tr.top - margin
+      const flipUp = spaceBelow < mr.height + gap && spaceAbove > spaceBelow
+      const avail = flipUp ? spaceAbove : spaceBelow
+      menu.style.maxHeight = `${Math.max(0, Math.floor(avail - gap))}px`
+
+      const updatedMr = menu.getBoundingClientRect()
+      const top = flipUp
+        ? Math.max(margin, tr.top - gap - updatedMr.height)
+        : Math.min(tr.bottom + gap, Math.max(margin, vh - margin - updatedMr.height))
+      const maxLeft = Math.max(margin, vw - margin - updatedMr.width)
+      const left = Math.min(Math.max(margin, tr.right - updatedMr.width), maxLeft)
+
+      menu.style.top = `${Math.round(top)}px`
+      menu.style.left = `${Math.round(left)}px`
+      menu.style.transformOrigin = `${flipUp ? 'bottom' : 'top'} right`
+    }
+
+    const onScroll = (e: Event) => {
+      const target = e.target as Node | null
+      if (target && moreMenuRef.current?.contains(target)) return
+      updatePosition()
+    }
+
+    updatePosition()
+    window.addEventListener('resize', updatePosition)
+    window.addEventListener('scroll', onScroll, true)
+    return () => {
+      window.removeEventListener('resize', updatePosition)
+      window.removeEventListener('scroll', onScroll, true)
+      if (typeof el.hidePopover === 'function') {
+        try {
+          if (el.matches(':popover-open')) el.hidePopover()
+        } catch {
+          // ignore
+        }
+      }
     }
   }, [moreOpen])
 
@@ -293,21 +375,28 @@ export function LiveRunView({
     return Number((txBps / 1e6).toFixed(2))
   }
 
-  const loadHistogram = async (id: string) => {
+  const hydrateSeqRef = useRef(0)
+
+  const loadHistogram = async (id: string, seq = hydrateSeqRef.current) => {
     try {
-      setHistogram(await api.runHistogram(id))
+      const hist = await api.runHistogram(id)
+      if (seq !== hydrateSeqRef.current) return
+      setHistogram(hist)
     } catch {
+      if (seq !== hydrateSeqRef.current) return
       setHistogram(null)
     }
   }
 
   const hydrateRun = async (id: string) => {
+    const seq = ++hydrateSeqRef.current
     try {
       const [detail, snaps, smps] = await Promise.all([
         api.getRun(id),
         api.runSnapshots(id),
         api.runSamples(id, { limit: 200 }),
       ])
+      if (seq !== hydrateSeqRef.current) return
       setRun(detail)
       setSeriesState({
         snapshots: snaps,
@@ -316,7 +405,7 @@ export function LiveRunView({
       setAlerts(detail.alerts || [])
       setSamples(smps)
       setHistStepId('')
-      void loadHistogram(id)
+      void loadHistogram(id, seq)
       if (snaps.length > 0 && snaps[snaps.length - 1].target > 0) {
         targetSyncedRef.current = true
         setTargetInput(String(snaps[snaps.length - 1].target))
@@ -327,6 +416,7 @@ export function LiveRunView({
         wsClient.subscribe(detail.id)
       }
     } catch (err) {
+      if (seq !== hydrateSeqRef.current) return
       onToast('error', err instanceof APIError ? err.message : '读取压测运行详情失败')
     }
   }
@@ -336,6 +426,23 @@ export function LiveRunView({
   }, [activeEnvId])
 
   useEffect(() => {
+    let cancelled = false
+    wsClient.unsubscribe()
+    setSelectedScenarioId('')
+    setSelectedApiId('')
+    setMixItems([])
+    setRun(null)
+    setEstimate(null)
+    setSeriesState({ snapshots: [], nicTxMbps: [] })
+    setAlerts([])
+    setSamples([])
+    setHistogram(null)
+    setHistStepId('')
+    setZoomedMod('')
+    setMoreOpen(false)
+    targetSyncedRef.current = false
+    setTargetInput('10')
+
     const loadMeta = async () => {
       try {
         const [scList, tree, recentRuns] = await Promise.all([
@@ -343,11 +450,12 @@ export function LiveRunView({
           api.getTree(projectId),
           api.listRuns(projectId, 5, 0),
         ])
+        if (cancelled) return
         setScenarios(scList)
         const flat = flattenAPIs(tree.children || [])
         setApis(flat)
-        if (!selectedScenarioId && scList.length > 0) setSelectedScenarioId(scList[0].id)
-        if (!selectedApiId && flat.length > 0) setSelectedApiId(flat[0].id)
+        if (scList.length > 0) setSelectedScenarioId(scList[0].id)
+        if (flat.length > 0) setSelectedApiId(flat[0].id)
 
         if (inspectRunId) {
           setShowLauncher(false)
@@ -367,6 +475,8 @@ export function LiveRunView({
           } else {
             await hydrateRun(recentRuns[0].id)
           }
+        } else {
+          setShowLauncher(true)
         }
       } catch {
         // ignore initial load hiccup
@@ -374,6 +484,8 @@ export function LiveRunView({
     }
     void loadMeta()
     return () => {
+      cancelled = true
+      ++hydrateSeqRef.current
       wsClient.unsubscribe()
     }
   }, [projectId])
@@ -782,9 +894,10 @@ export function LiveRunView({
 
               {sourceType === 'scenario' && (
                 <select
+                  aria-label="压测场景"
                   value={selectedScenarioId}
                   onChange={(e) => setSelectedScenarioId(e.target.value)}
-                  className="px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg min-w-[200px]"
+                  className="tg-select px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg min-w-[200px]"
                 >
                   <option value="">选择场景...</option>
                   {scenarios.map((sc) => (
@@ -797,9 +910,10 @@ export function LiveRunView({
 
               {sourceType === 'api' && (
                 <select
+                  aria-label="目标接口"
                   value={selectedApiId}
                   onChange={(e) => setSelectedApiId(e.target.value)}
-                  className="px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg min-w-[220px]"
+                  className="tg-select px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg min-w-[220px]"
                 >
                   <option value="">选择接口...</option>
                   {apis.map((a) => (
@@ -811,9 +925,10 @@ export function LiveRunView({
               )}
 
               <select
+                aria-label="覆盖环境"
                 value={envOverrideId}
                 onChange={(e) => setEnvOverrideId(e.target.value)}
-                className="px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg"
+                className="tg-select px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg"
               >
                 <option value="">环境：使用默认 / 无环境</option>
                 {environments.map((env) => (
@@ -862,13 +977,14 @@ export function LiveRunView({
                         {mixItems.map((it, idx) => (
                           <div key={idx} className="grid grid-cols-12 gap-2 items-center">
                             <select
+                              aria-label="混合场景"
                               value={it.scenario_id}
                               onChange={(e) =>
                                 setMixItems((prev) =>
                                   prev.map((row, j) => (j === idx ? { ...row, scenario_id: e.target.value } : row))
                                 )
                               }
-                              className="col-span-6 px-2 py-1 border border-line-strong rounded bg-surface text-fg"
+                              className="tg-select col-span-6 px-2 py-1 border border-line-strong rounded bg-surface text-fg"
                             >
                               <option value="">选择场景...</option>
                               {scenarios.map((sc) => (
@@ -975,7 +1091,7 @@ export function LiveRunView({
                   name="node_failure_policy"
                   value={nodeFailurePolicy}
                   onChange={(e) => setNodeFailurePolicy(e.target.value as 'redistribute' | 'abort')}
-                  className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface text-fg"
+                  className="tg-select w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface text-fg"
                 >
                   <option value="redistribute">自动重平衡到剩余节点</option>
                   <option value="abort">任一节点掉线即中止</option>
@@ -1191,10 +1307,21 @@ export function LiveRunView({
                       </a>
                       <div ref={moreRef} className="relative">
                         <button
+                          ref={moreTriggerRef}
                           type="button"
                           aria-haspopup="menu"
                           aria-expanded={moreOpen}
                           onClick={() => setMoreOpen((v) => !v)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+                              e.preventDefault()
+                              if (!moreOpen) setMoreOpen(true)
+                              requestAnimationFrame(() => {
+                                const items = moreMenuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]')
+                                if (items?.length) items[e.key === 'ArrowUp' ? items.length - 1 : 0].focus()
+                              })
+                            }
+                          }}
                           className="inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg"
                         >
                           <Download className="w-3.5 h-3.5 text-fg-muted" /> 更多格式
@@ -1202,8 +1329,27 @@ export function LiveRunView({
                         </button>
                         {moreOpen && (
                           <div
+                            ref={moreMenuRef}
+                            popover="manual"
                             role="menu"
-                            className="absolute right-0 top-full mt-1 z-30 min-w-36 py-1 rounded-xl border border-line bg-surface shadow-xl"
+                            aria-label="更多导出格式"
+                            onKeyDown={(e) => {
+                              if (e.key === 'Tab') {
+                                setMoreOpen(false)
+                                return
+                              }
+                              if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(e.key)) return
+                              const items = Array.from(moreMenuRef.current?.querySelectorAll<HTMLElement>('[role="menuitem"]') || [])
+                              if (!items.length) return
+                              e.preventDefault()
+                              const cur = items.indexOf(document.activeElement as HTMLElement)
+                              let next = 0
+                              if (e.key === 'ArrowDown') next = cur < 0 ? 0 : (cur + 1) % items.length
+                              else if (e.key === 'ArrowUp') next = cur <= 0 ? items.length - 1 : cur - 1
+                              else if (e.key === 'End') next = items.length - 1
+                              items[next]?.focus()
+                            }}
+                            className="tg-glass-popover fixed inset-auto m-0 z-50 min-w-36 overflow-y-auto tg-scroller p-1 text-xs space-y-0.5"
                           >
                             {MORE_FORMATS.map((ex) => (
                               <a
@@ -1212,7 +1358,7 @@ export function LiveRunView({
                                 href={api.exportRunURL(run.id, ex.fmt)}
                                 download
                                 onClick={() => setMoreOpen(false)}
-                                className="flex items-center gap-2 px-3 py-1.5 text-fg hover:bg-surface-hover"
+                                className="flex items-center gap-2 rounded-xl px-3 py-1.5 text-fg hover:bg-surface-hover focus:bg-surface-hover focus:outline-none"
                               >
                                 <Download className="w-3.5 h-3.5 text-fg-subtle" /> {ex.label}
                               </a>
@@ -1823,9 +1969,10 @@ function LatencyDistributionPanel({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-3">
           <select
+            aria-label="选择延迟直方图步骤"
             value={histStepId}
             onChange={(e) => onChangeStepId(e.target.value)}
-            className="px-2.5 py-1 border border-line-strong rounded bg-surface text-fg text-xs"
+            className="tg-select px-2.5 py-1 border border-line-strong rounded bg-surface text-fg text-xs"
           >
             <option value="">全局聚合直方图</option>
             {(histogram?.steps || []).map((st) => (

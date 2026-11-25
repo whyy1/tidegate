@@ -406,26 +406,34 @@ export function WorkbenchView({
 
   const activeTab = tabs.find((t) => t.tabKey === activeTabKey) || tabs[0]
 
+  const sidebarSeqRef = useRef(0)
   const loadSidebarData = async () => {
+    const seq = ++sidebarSeqRef.current
     try {
       const [t, fl, hist] = await Promise.all([
         api.getTree(projectId),
         api.listFiles(projectId),
         api.listDebugHistory(projectId, 40, false),
       ])
+      if (seq !== sidebarSeqRef.current) return
       setTree({ children: t.children || [], problems: t.problems })
       setFiles(fl)
       setHistory(hist)
     } catch (err) {
+      if (seq !== sidebarSeqRef.current) return
       onToast('error', err instanceof APIError ? err.message : '加载项目接口树失败')
     }
   }
 
   useEffect(() => {
     void loadSidebarData()
+    setGrpcCatalog(null)
+    setZoomedMod(null)
+    setConfirmDeleteId('')
+    const freshKey = `scratch-${Date.now()}`
     setTabs([
       {
-        tabKey: `scratch-${Date.now()}`,
+        tabKey: freshKey,
         api: newScratchAPI(),
         dirty: false,
         debugResp: null,
@@ -433,7 +441,19 @@ export function WorkbenchView({
         showEffective: false,
       },
     ])
+    setActiveTabKey(freshKey)
   }, [projectId])
+
+  const wasActiveRef = useRef(isActive)
+  const prevProjectIdRef = useRef(projectId)
+  useEffect(() => {
+    const prevActive = wasActiveRef.current
+    const prevPid = prevProjectIdRef.current
+    wasActiveRef.current = isActive
+    prevProjectIdRef.current = projectId
+    if (!isActive || !projectId || prevPid !== projectId || prevActive) return
+    void loadSidebarData()
+  }, [isActive, projectId])
 
   useEffect(() => {
     if (tabs.length > 0 && !tabs.some((t) => t.tabKey === activeTabKey)) {
@@ -577,27 +597,26 @@ export function WorkbenchView({
   }
 
   const closeTab = (key: string) => {
-    setTabs((prev) => {
-      if (prev.length === 1) {
-        const freshKey = `scratch-${Date.now()}`
-        setActiveTabKey(freshKey)
-        return [
-          {
-            tabKey: freshKey,
-            api: newScratchAPI(),
-            dirty: false,
-            debugResp: null,
-            effective: null,
-            showEffective: false,
-          },
-        ]
-      }
-      const next = prev.filter((t) => t.tabKey !== key)
-      if (activeTabKey === key && next.length > 0) {
-        setActiveTabKey(next[next.length - 1].tabKey)
-      }
-      return next
-    })
+    if (tabs.length <= 1) {
+      const freshKey = `scratch-${Date.now()}`
+      setTabs([
+        {
+          tabKey: freshKey,
+          api: newScratchAPI(),
+          dirty: false,
+          debugResp: null,
+          effective: null,
+          showEffective: false,
+        },
+      ])
+      setActiveTabKey(freshKey)
+      return
+    }
+    const next = tabs.filter((t) => t.tabKey !== key)
+    setTabs(next)
+    if (activeTabKey === key && next.length > 0) {
+      setActiveTabKey(next[next.length - 1].tabKey)
+    }
   }
 
   const handleSave = async () => {
@@ -806,7 +825,7 @@ export function WorkbenchView({
 
   useEffect(() => {
     const onKeyDown = (e: KeyboardEvent) => {
-      if (!actionsRef.current.active || actionsRef.current.modalOpen) return
+      if (!actionsRef.current.active || actionsRef.current.modalOpen || document.querySelector('dialog[open]')) return
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's') {
         e.preventDefault()
         void actionsRef.current.save()
@@ -1116,7 +1135,26 @@ export function WorkbenchView({
               renderDeleteButton(node, '删除接口', async () => {
                 try {
                   await api.deleteAPI(projectId, node.id, node.version)
-                  setTabs((prev) => prev.filter((t) => t.api.id !== node.id))
+                  const nextTabs = tabs.filter((t) => t.api.id !== node.id)
+                  if (nextTabs.length === 0) {
+                    const freshKey = `scratch-${Date.now()}`
+                    setTabs([
+                      {
+                        tabKey: freshKey,
+                        api: newScratchAPI(),
+                        dirty: false,
+                        debugResp: null,
+                        effective: null,
+                        showEffective: false,
+                      },
+                    ])
+                    setActiveTabKey(freshKey)
+                  } else {
+                    setTabs(nextTabs)
+                    if (!nextTabs.some((t) => t.tabKey === activeTabKey)) {
+                      setActiveTabKey(nextTabs[nextTabs.length - 1].tabKey)
+                    }
+                  }
                   await loadSidebarData()
                   onToast('success', `已删除接口「${node.name}」`)
                 } catch (err) {
@@ -2070,7 +2108,7 @@ export function WorkbenchView({
                                 ),
                               })
                             }
-                            className="col-span-2 px-2 py-1.5 border border-line-strong rounded bg-surface"
+                            className="tg-select col-span-2 px-2 py-1.5 border border-line-strong rounded bg-surface"
                           >
                             <option value="text">Text 文本</option>
                             <option value="binary">Binary (Base64)</option>
@@ -2104,7 +2142,7 @@ export function WorkbenchView({
                 )}
 
                 {protocol === 'grpc' && (
-                  <div className="rounded-lg border border-indigo-200 bg-indigo-50/40 p-3 space-y-3">
+                  <div className="flex-1 min-h-0 flex flex-col rounded-lg border border-indigo-200 bg-indigo-50/40 p-3 space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
                       <div className="font-semibold text-indigo-900">gRPC · Unary</div>
                       <div className="flex flex-wrap items-center gap-2">
@@ -2119,7 +2157,7 @@ export function WorkbenchView({
                               response_encoding: pf ? 'proto_json' : req.grpc?.response_encoding,
                             })
                           }}
-                          className="px-2 py-1 border border-line-strong rounded bg-surface text-[11px]"
+                          className="tg-select px-2 py-1 border border-line-strong rounded bg-surface text-[11px]"
                         >
                           <option value="">不绑定 .proto</option>
                           {files
@@ -2170,7 +2208,7 @@ export function WorkbenchView({
                               response_encoding: 'proto_json',
                             })
                           }}
-                          className="px-2 py-1 border border-line-strong rounded font-mono bg-surface-subtle"
+                          className="tg-select px-2 py-1 border border-line-strong rounded font-mono bg-surface-subtle"
                         >
                           {grpcCatalog.services.map((s) => (
                             <option key={s.name} value={s.name}>
@@ -2187,7 +2225,7 @@ export function WorkbenchView({
                               response_encoding: 'proto_json',
                             })
                           }
-                          className="px-2 py-1 border border-line-strong rounded font-mono bg-surface-subtle"
+                          className="tg-select px-2 py-1 border border-line-strong rounded font-mono bg-surface-subtle"
                         >
                           {(grpcCatalog.services.find((s) => s.name === req.grpc?.service)?.methods || []).map((m) => (
                             <option key={m.name} value={m.name}>
@@ -2248,7 +2286,7 @@ export function WorkbenchView({
                         <select
                           value={req.grpc?.payload_encoding || 'json'}
                           onChange={(e) => updateGRPC({ payload_encoding: e.target.value })}
-                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface"
+                          className="tg-select w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface"
                         >
                           <option value="proto_json">Proto JSON 动态编码（反射 / .proto）</option>
                           <option value="json">原始 JSON/UTF-8 直传</option>
@@ -2262,7 +2300,7 @@ export function WorkbenchView({
                         <select
                           value={req.grpc?.response_encoding || 'raw'}
                           onChange={(e) => updateGRPC({ response_encoding: e.target.value })}
-                          className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface"
+                          className="tg-select w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface"
                         >
                           <option value="proto_json">Proto JSON 动态解码（反射 / .proto）</option>
                           <option value="raw">原始 UTF-8 响应</option>
@@ -2701,7 +2739,7 @@ export function WorkbenchView({
                         )
                         updateActiveAPI((cur) => ({ ...cur, extract: next }))
                       }}
-                      className="col-span-2 px-2 py-1 border border-line-strong rounded bg-surface"
+                      className="tg-select col-span-2 px-2 py-1 border border-line-strong rounded bg-surface"
                     >
                       <option value="jsonpath">JSONPath</option>
                       <option value="xpath">XPath / HTML</option>
@@ -2786,7 +2824,7 @@ export function WorkbenchView({
                           else if (t === 'json_schema') updateAs({ type: t, value: '{"type":"object"}', equals: undefined, max: undefined, expr: undefined, contains: undefined, exists: undefined })
                           else updateAs({ type: t, expr: '$.code', equals: '0', max: undefined, value: undefined })
                         }}
-                        className="col-span-3 px-2 py-1 border border-line-strong rounded bg-surface"
+                        className="tg-select col-span-3 px-2 py-1 border border-line-strong rounded bg-surface"
                       >
                         <option value="status">HTTP 状态码 (status)</option>
                         <option value="duration">最大耗时 (duration)</option>
@@ -3144,7 +3182,7 @@ export function WorkbenchView({
                               ),
                             }))
                           }
-                          className="col-span-2 px-2 py-1 border border-line-strong rounded bg-surface"
+                          className="tg-select col-span-2 px-2 py-1 border border-line-strong rounded bg-surface"
                         >
                           <option value="string">string</option>
                           <option value="number">number</option>

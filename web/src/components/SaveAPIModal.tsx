@@ -111,7 +111,7 @@ export function SaveAPIModal({ open, initialName, initialFolderId, treeNodes, on
                 name="api-folder"
                 value={folderId}
                 onChange={(e) => setFolderId(e.target.value)}
-                className={fieldCls}
+                className={`tg-select ${fieldCls}`}
               >
                 <option value="">根目录</option>
                 {folders.map((f) => (
@@ -123,7 +123,7 @@ export function SaveAPIModal({ open, initialName, initialFolderId, treeNodes, on
             </div>
           </div>
 
-          <footer className="px-5 py-3 border-t border-line flex justify-end gap-2 shrink-0">
+          <footer className="tg-dialog-footer">
             <button
               type="button"
               onClick={onClose}

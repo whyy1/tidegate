@@ -327,7 +327,7 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
               aria-label="选择基线压测记录"
               value={effectiveBase}
               onChange={(e) => setBaselineId(e.target.value)}
-              className="px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg [&>option]:bg-surface [&>option]:text-fg"
+              className="tg-select px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg"
             >
               {selectedIds.map((id) => {
                 const r = runs.find((x) => x.id === id)
