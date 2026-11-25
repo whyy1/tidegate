@@ -1372,7 +1372,7 @@ export function LiveRunView({
                 ref={detailTabsRef}
                 role="tablist"
                 aria-label="诊断明细页签"
-                className="relative flex flex-wrap items-center gap-1 font-medium"
+                className="relative tg-tablist items-center gap-1 text-xs font-medium min-w-0 py-0.5"
               >
                 <LiquidCapsule containerRef={detailTabsRef} activeId={detailTab} />
                 <button
@@ -1381,8 +1381,8 @@ export function LiveRunView({
                   aria-selected={detailTab === 'steps'}
                   data-liq-id="steps"
                   onClick={() => setDetailTab('steps')}
-                  className={`relative z-10 px-3 py-1.5 rounded-xl transition-colors ${
-                    detailTab === 'steps' ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
+                  className={`relative z-10 px-3 py-1.5 rounded-xl font-semibold whitespace-nowrap transition-colors ${
+                    detailTab === 'steps' ? 'text-tidal' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <Activity className="w-3.5 h-3.5 inline mr-1" /> 按步骤统计 ({latest?.steps?.length || 0})
@@ -1396,8 +1396,8 @@ export function LiveRunView({
                     setDetailTab('distribution')
                     if (run) void loadHistogram(run.id)
                   }}
-                  className={`relative z-10 px-3 py-1.5 rounded-xl transition-colors ${
-                    detailTab === 'distribution' ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
+                  className={`relative z-10 px-3 py-1.5 rounded-xl font-semibold whitespace-nowrap transition-colors ${
+                    detailTab === 'distribution' ? 'text-tidal' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <BarChart3 className="w-3.5 h-3.5 inline mr-1" /> 延迟分布与热力图
@@ -1408,8 +1408,8 @@ export function LiveRunView({
                   aria-selected={detailTab === 'phases'}
                   data-liq-id="phases"
                   onClick={() => setDetailTab('phases')}
-                  className={`relative z-10 px-3 py-1.5 rounded-xl transition-colors ${
-                    detailTab === 'phases' ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
+                  className={`relative z-10 px-3 py-1.5 rounded-xl font-semibold whitespace-nowrap transition-colors ${
+                    detailTab === 'phases' ? 'text-tidal' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <Layers className="w-3.5 h-3.5 inline mr-1" /> 五段耗时分解
@@ -1420,8 +1420,8 @@ export function LiveRunView({
                   aria-selected={detailTab === 'nodes'}
                   data-liq-id="nodes"
                   onClick={() => setDetailTab('nodes')}
-                  className={`relative z-10 px-3 py-1.5 rounded-xl transition-colors ${
-                    detailTab === 'nodes' ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
+                  className={`relative z-10 px-3 py-1.5 rounded-xl font-semibold whitespace-nowrap transition-colors ${
+                    detailTab === 'nodes' ? 'text-tidal' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <Server className="w-3.5 h-3.5 inline mr-1" /> 分节点指标 ({latest?.nodes?.length || 0})
@@ -1432,8 +1432,8 @@ export function LiveRunView({
                   aria-selected={detailTab === 'thresholds'}
                   data-liq-id="thresholds"
                   onClick={() => setDetailTab('thresholds')}
-                  className={`relative z-10 px-3 py-1.5 rounded-xl transition-colors ${
-                    detailTab === 'thresholds' ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
+                  className={`relative z-10 px-3 py-1.5 rounded-xl font-semibold whitespace-nowrap transition-colors ${
+                    detailTab === 'thresholds' ? 'text-tidal' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <CopyCheck className="w-3.5 h-3.5 inline mr-1" /> 阈值校验 ({run.thresholds?.length || 0})
@@ -1444,8 +1444,8 @@ export function LiveRunView({
                   aria-selected={detailTab === 'samples'}
                   data-liq-id="samples"
                   onClick={() => setDetailTab('samples')}
-                  className={`relative z-10 px-3 py-1.5 rounded-xl transition-colors ${
-                    detailTab === 'samples' ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
+                  className={`relative z-10 px-3 py-1.5 rounded-xl font-semibold whitespace-nowrap transition-colors ${
+                    detailTab === 'samples' ? 'text-tidal' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <Wrench className="w-3.5 h-3.5 inline mr-1" /> 错误与慢请求采样 ({samples.length})

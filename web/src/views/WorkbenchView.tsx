@@ -373,6 +373,7 @@ export function WorkbenchView({
   const reqPaneRef = useRef<HTMLDivElement | null>(null)
   const respPaneRef = useRef<HTMLDivElement | null>(null)
   const reqTabsRef = useRef<HTMLDivElement | null>(null)
+  const bodyTypeTabsRef = useRef<HTMLDivElement | null>(null)
 
   const toggleZoomMod = (mod: 'directory' | 'request' | 'response', fromEl: HTMLElement | null) => {
     const fromRect = fromEl?.getBoundingClientRect() || null
@@ -525,7 +526,9 @@ export function WorkbenchView({
   }, [resizingSplit, splitMode])
 
   const patchActiveTab = (updater: (tab: OpenTab) => OpenTab) => {
-    setTabs((prev) => prev.map((t) => (t.tabKey === activeTab.tabKey ? updater(t) : t)))
+    const targetKey = activeTab?.tabKey
+    if (!targetKey) return
+    setTabs((prev) => prev.map((t) => (t.tabKey === targetKey ? updater(t) : t)))
   }
 
   const updateActiveAPI = (updater: (cur: Partial<API>) => Partial<API>) => {
@@ -1135,33 +1138,43 @@ export function WorkbenchView({
   const responseFields = activeTab.api.response_fields || []
 
   const updateBody = (patch: Partial<NonNullable<API['request']['body']>>) => {
-    updateActiveAPI((cur) => ({
-      ...cur,
-      request: {
-        ...req,
-        body: { ...body, ...patch },
-      },
-    }))
+    updateActiveAPI((cur) => {
+      const curReq = cur.request || { method: 'GET', url: '' }
+      const curBody = curReq.body || { type: 'none' }
+      return {
+        ...cur,
+        request: {
+          ...curReq,
+          body: { ...curBody, ...patch },
+        },
+      }
+    })
   }
 
   const updateWS = (patch: Partial<NonNullable<API['request']['ws']>>) => {
-    updateActiveAPI((cur) => ({
-      ...cur,
-      request: {
-        ...req,
-        ws: { ...(req.ws || {}), ...patch },
-      },
-    }))
+    updateActiveAPI((cur) => {
+      const curReq = cur.request || { method: 'GET', url: '' }
+      return {
+        ...cur,
+        request: {
+          ...curReq,
+          ws: { ...(curReq.ws || {}), ...patch },
+        },
+      }
+    })
   }
 
   const updateGRPC = (patch: Partial<NonNullable<API['request']['grpc']>>) => {
-    updateActiveAPI((cur) => ({
-      ...cur,
-      request: {
-        ...req,
-        grpc: { service: '', method: '', ...(req.grpc || {}), ...patch },
-      },
-    }))
+    updateActiveAPI((cur) => {
+      const curReq = cur.request || { method: 'GET', url: '' }
+      return {
+        ...cur,
+        request: {
+          ...curReq,
+          grpc: { service: '', method: '', ...(curReq.grpc || {}), ...patch },
+        },
+      }
+    })
   }
 
   const handleDiscoverGRPC = async () => {
@@ -1194,13 +1207,16 @@ export function WorkbenchView({
   }
 
   const updateSSE = (patch: Partial<NonNullable<API['request']['sse']>>) => {
-    updateActiveAPI((cur) => ({
-      ...cur,
-      request: {
-        ...req,
-        sse: { ...(req.sse || {}), ...patch },
-      },
-    }))
+    updateActiveAPI((cur) => {
+      const curReq = cur.request || { method: 'GET', url: '' }
+      return {
+        ...cur,
+        request: {
+          ...curReq,
+          sse: { ...(curReq.sse || {}), ...patch },
+        },
+      }
+    })
   }
 
   const addExtractFromJSON = (expr: string, suggestedName: string) => {
@@ -1435,7 +1451,7 @@ export function WorkbenchView({
       )}
 
       {/* Main Editor + Split Response Area */}
-      <main className={`flex-1 min-w-0 flex flex-col gap-2.5 ${zoomedMod === 'directory' ? 'hidden' : ''}`}>
+      <main className={`flex-1 min-w-0 min-h-0 flex flex-col gap-2.5 ${zoomedMod === 'directory' ? 'hidden' : ''}`}>
         {/* Floating Glass Chrome Card: Multi-Tabs + URL Bar */}
         <div className="tg-glass-card shrink-0 flex flex-col">
         {/* Multi-Tabs Bar + View Controls */}
@@ -1614,14 +1630,17 @@ export function WorkbenchView({
                 value={protocol}
                 onChange={(e) => {
                   const nextProto = e.target.value as APIProtocol
-                  updateActiveAPI((cur) => ({
-                    ...cur,
-                    request: {
-                      ...req,
-                      protocol: nextProto,
-                      method: nextProto === 'http' || nextProto === 'sse' ? req.method || 'GET' : '',
-                    },
-                  }))
+                  updateActiveAPI((cur) => {
+                    const curReq = cur.request || { method: 'GET', url: '' }
+                    return {
+                      ...cur,
+                      request: {
+                        ...curReq,
+                        protocol: nextProto,
+                        method: nextProto === 'http' || nextProto === 'sse' ? curReq.method || 'GET' : '',
+                      },
+                    }
+                  })
                   if (nextProto === 'ws' || nextProto === 'grpc' || nextProto === 'sse') {
                     setReqSubTab('body')
                   }
@@ -1644,10 +1663,13 @@ export function WorkbenchView({
                   name="method"
                   value={req.method || 'GET'}
                   onChange={(e) =>
-                    updateActiveAPI((cur) => ({
-                      ...cur,
-                      request: { ...req, method: e.target.value },
-                    }))
+                    updateActiveAPI((cur) => {
+                      const curReq = cur.request || { method: 'GET', url: '' }
+                      return {
+                        ...cur,
+                        request: { ...curReq, method: e.target.value },
+                      }
+                    })
                   }
                   className={`px-2 py-1 rounded-md border font-mono text-xs font-bold focus:outline-none cursor-pointer shrink-0 ${verbTone.bg} ${verbTone.text} ${verbTone.border}`}
                 >
@@ -1667,14 +1689,17 @@ export function WorkbenchView({
                   void handleURLPaste(txt, e)
                 }}
                 onChange={(nextURL) => {
-                  updateActiveAPI((cur) => ({
-                    ...cur,
-                    request: {
-                      ...req,
-                      url: nextURL,
-                      path_params: syncPathParamsFromURL(nextURL, req.path_params),
-                    },
-                  }))
+                  updateActiveAPI((cur) => {
+                    const curReq = cur.request || { method: 'GET', url: '' }
+                    return {
+                      ...cur,
+                      request: {
+                        ...curReq,
+                        url: nextURL,
+                        path_params: syncPathParamsFromURL(nextURL, curReq.path_params),
+                      },
+                    }
+                  })
                 }}
                 placeholder={
                   protocol === 'ws'
@@ -1865,7 +1890,10 @@ export function WorkbenchView({
                     <KeyValueEditor
                       items={req.path_params || []}
                       onChange={(next) =>
-                        updateActiveAPI((cur) => ({ ...cur, request: { ...req, path_params: next } }))
+                        updateActiveAPI((cur) => {
+                          const curReq = cur.request || { method: 'GET', url: '' }
+                          return { ...cur, request: { ...curReq, path_params: next } }
+                        })
                       }
                       keyPlaceholder="路径参数名"
                       valuePlaceholder="替换值"
@@ -1876,7 +1904,12 @@ export function WorkbenchView({
                   <div className="font-semibold text-fg mb-1.5">Query</div>
                   <KeyValueEditor
                     items={req.query || []}
-                    onChange={(next) => updateActiveAPI((cur) => ({ ...cur, request: { ...req, query: next } }))}
+                    onChange={(next) =>
+                      updateActiveAPI((cur) => {
+                        const curReq = cur.request || { method: 'GET', url: '' }
+                        return { ...cur, request: { ...curReq, query: next } }
+                      })
+                    }
                     keyPlaceholder="Query 参数名"
                     valuePlaceholder="值（支持 {{变量}}）"
                   />
@@ -1955,7 +1988,12 @@ export function WorkbenchView({
 
                 <KeyValueEditor
                   items={req.headers || []}
-                  onChange={(next) => updateActiveAPI((cur) => ({ ...cur, request: { ...req, headers: next } }))}
+                  onChange={(next) =>
+                    updateActiveAPI((cur) => {
+                      const curReq = cur.request || { method: 'GET', url: '' }
+                      return { ...cur, request: { ...curReq, headers: next } }
+                    })
+                  }
                   keyPlaceholder="Header 名称"
                   valuePlaceholder="值"
                 />
@@ -2326,31 +2364,46 @@ export function WorkbenchView({
                 {(protocol === 'http' || protocol === 'sse') && (
                   <div className="flex-1 min-h-0 flex flex-col gap-2.5">
                     <div className="flex flex-wrap items-center justify-between gap-2 shrink-0">
-                  <div className="flex flex-wrap gap-1.5">
-                    {(
-                      [
-                        { id: 'none' as const, label: 'None' },
-                        { id: 'json' as const, label: 'JSON' },
-                        { id: 'form' as const, label: 'x-www-form-urlencoded' },
-                        { id: 'multipart' as const, label: 'multipart/form-data' },
-                        { id: 'raw' as const, label: 'Raw' },
-                        { id: 'binary' as const, label: 'Binary' },
-                      ] as const
-                    ).map((bt) => (
-                      <button
-                        key={bt.id}
-                        type="button"
-                        onClick={() => updateBody({ type: bt.id })}
-                        className={`px-2.5 py-1 rounded border font-medium ${
-                          (body.type || 'none') === bt.id
-                            ? 'bg-sky-50 border-sky-400 text-sky-700'
-                            : 'bg-surface border-line text-fg-muted hover:bg-surface-hover'
-                        }`}
+                      <div
+                        ref={bodyTypeTabsRef}
+                        role="tablist"
+                        aria-label="请求体格式"
+                        className="relative tg-tablist items-center gap-0.5 rounded-xl border border-line bg-surface-subtle/80 p-1 text-xs min-w-0 max-w-full"
                       >
-                        {bt.label}
-                      </button>
-                    ))}
-                  </div>
+                        <LiquidCapsule
+                          containerRef={bodyTypeTabsRef}
+                          activeId={body.type || 'none'}
+                          orientation="horizontal"
+                          className="rounded-lg"
+                        />
+                        {(
+                          [
+                            { id: 'none' as const, label: 'None' },
+                            { id: 'json' as const, label: 'JSON' },
+                            { id: 'form' as const, label: 'x-www-form-urlencoded' },
+                            { id: 'multipart' as const, label: 'multipart/form-data' },
+                            { id: 'raw' as const, label: 'Raw' },
+                            { id: 'binary' as const, label: 'Binary' },
+                          ] as const
+                        ).map((bt) => {
+                          const selected = (body.type || 'none') === bt.id
+                          return (
+                            <button
+                              key={bt.id}
+                              data-liq-id={bt.id}
+                              type="button"
+                              role="tab"
+                              aria-selected={selected}
+                              onClick={() => updateBody({ type: bt.id })}
+                              className={`relative z-10 px-2.5 py-1 rounded-lg font-semibold whitespace-nowrap transition-colors ${
+                                selected ? 'text-tidal' : 'text-fg-muted hover:text-fg'
+                              }`}
+                            >
+                              {bt.label}
+                            </button>
+                          )
+                        })}
+                      </div>
                   {(body.type === 'json' || body.type === 'raw') && (
                     <button
                       type="button"

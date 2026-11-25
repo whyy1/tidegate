@@ -241,6 +241,19 @@ code, pre, kbd, .font-mono {
   border-block-end: 2px solid var(--tg-tidal-600);
 }
 
+@media (forced-colors: active) {
+  [role="tablist"] [role="tab"][aria-selected="true"] {
+    position: relative;
+  }
+
+  [role="tablist"] [role="tab"][aria-selected="true"]::after {
+    content: "";
+    position: absolute;
+    inset: auto 0 0;
+    border-block-end: 2px solid Highlight;
+  }
+}
+
 @layer components {
 /* ===== Warm Terracotta × Coastal Blue ambient canvas ===== */
 .tg-mesh-canvas {

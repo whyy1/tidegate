@@ -753,8 +753,8 @@ export function AccountModal({
                   role="tab"
                   aria-selected={selected}
                   onClick={() => setTab(t.id)}
-                  className={`relative z-10 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
-                    selected ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
+                  className={`relative z-10 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-semibold transition-colors whitespace-nowrap ${
+                    selected ? 'text-tidal' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <Icon className="w-3.5 h-3.5" />

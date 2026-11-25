@@ -226,8 +226,8 @@ export function ResponsePanel({
                   setSubTab(t.id)
                   if (t.id === 'history') void onRefreshHistory()
                 }}
-                className={`relative z-10 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg transition-colors whitespace-nowrap ${
-                  selected ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
+                className={`relative z-10 inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-semibold transition-colors whitespace-nowrap ${
+                  selected ? 'text-tidal' : 'text-fg-muted hover:text-fg'
                 }`}
               >
                 <span>{t.label}</span>

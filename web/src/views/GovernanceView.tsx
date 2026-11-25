@@ -734,8 +734,8 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                   aria-selected={selected}
                   data-liq-id={t.id}
                   onClick={() => setSubTab(t.id)}
-                  className={`relative z-10 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-medium whitespace-nowrap transition-colors ${
-                    selected ? 'text-tidal font-semibold' : 'text-fg-muted hover:text-fg'
+                  className={`relative z-10 inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-semibold whitespace-nowrap transition-colors ${
+                    selected ? 'text-tidal' : 'text-fg-muted hover:text-fg'
                   }`}
                 >
                   <Icon className={`w-3.5 h-3.5 ${selected ? 'text-tidal' : ''}`} /> {t.label}
