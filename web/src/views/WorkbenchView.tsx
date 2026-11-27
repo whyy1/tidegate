@@ -1683,7 +1683,7 @@ export function WorkbenchView({
                     setReqSubTab('body')
                   }
                 }}
-                className={`px-2 py-1 rounded-md border font-mono text-[11px] font-bold focus:outline-none cursor-pointer shrink-0 ${
+                className={`tg-select px-2 py-1 rounded-[10px] border font-mono text-[11px] font-bold focus:outline-none cursor-pointer shrink-0 ${
                   protocol === 'http'
                     ? 'bg-surface-subtle text-fg-muted border-line'
                     : `${protoTone.bg} ${protoTone.text} ${protoTone.border}`
@@ -1709,7 +1709,7 @@ export function WorkbenchView({
                       }
                     })
                   }
-                  className={`px-2 py-1 rounded-md border font-mono text-xs font-bold focus:outline-none cursor-pointer shrink-0 ${verbTone.bg} ${verbTone.text} ${verbTone.border}`}
+                  className={`tg-select px-2 py-1 rounded-[10px] border font-mono text-xs font-bold focus:outline-none cursor-pointer shrink-0 ${verbTone.bg} ${verbTone.text} ${verbTone.border}`}
                 >
                   {['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS'].map((m) => (
                     <option key={m} value={m} className={`bg-surface ${methodTone(m).text}`}>
@@ -2108,7 +2108,7 @@ export function WorkbenchView({
                                 ),
                               })
                             }
-                            className="tg-select col-span-2 px-2 py-1.5 border border-line-strong rounded bg-surface"
+                            className="tg-select col-span-2 px-2 py-1.5 border border-line-strong rounded-[10px] bg-surface text-fg"
                           >
                             <option value="text">Text 文本</option>
                             <option value="binary">Binary (Base64)</option>
@@ -2157,7 +2157,7 @@ export function WorkbenchView({
                               response_encoding: pf ? 'proto_json' : req.grpc?.response_encoding,
                             })
                           }}
-                          className="tg-select px-2 py-1 border border-line-strong rounded bg-surface text-[11px]"
+                          className="tg-select px-2 py-1 border border-line-strong rounded-[10px] bg-surface text-fg text-[11px]"
                         >
                           <option value="">不绑定 .proto</option>
                           {files
@@ -2208,7 +2208,7 @@ export function WorkbenchView({
                               response_encoding: 'proto_json',
                             })
                           }}
-                          className="tg-select px-2 py-1 border border-line-strong rounded font-mono bg-surface-subtle"
+                          className="tg-select px-2 py-1 border border-line-strong rounded-[10px] font-mono bg-surface-subtle text-fg"
                         >
                           {grpcCatalog.services.map((s) => (
                             <option key={s.name} value={s.name}>
@@ -2225,7 +2225,7 @@ export function WorkbenchView({
                               response_encoding: 'proto_json',
                             })
                           }
-                          className="tg-select px-2 py-1 border border-line-strong rounded font-mono bg-surface-subtle"
+                          className="tg-select px-2 py-1 border border-line-strong rounded-[10px] font-mono bg-surface-subtle text-fg"
                         >
                           {(grpcCatalog.services.find((s) => s.name === req.grpc?.service)?.methods || []).map((m) => (
                             <option key={m.name} value={m.name}>
@@ -2286,7 +2286,7 @@ export function WorkbenchView({
                         <select
                           value={req.grpc?.payload_encoding || 'json'}
                           onChange={(e) => updateGRPC({ payload_encoding: e.target.value })}
-                          className="tg-select w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface"
+                          className="tg-select w-full px-2.5 py-1.5 border border-line-strong rounded-[10px] bg-surface text-fg"
                         >
                           <option value="proto_json">Proto JSON 动态编码（反射 / .proto）</option>
                           <option value="json">原始 JSON/UTF-8 直传</option>
@@ -2300,7 +2300,7 @@ export function WorkbenchView({
                         <select
                           value={req.grpc?.response_encoding || 'raw'}
                           onChange={(e) => updateGRPC({ response_encoding: e.target.value })}
-                          className="tg-select w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface"
+                          className="tg-select w-full px-2.5 py-1.5 border border-line-strong rounded-[10px] bg-surface text-fg"
                         >
                           <option value="proto_json">Proto JSON 动态解码（反射 / .proto）</option>
                           <option value="raw">原始 UTF-8 响应</option>
@@ -2581,7 +2581,7 @@ export function WorkbenchView({
                               )
                               updateBody({ files: next })
                             }}
-                            className="tg-select flex-1 px-2.5 py-1.5 border border-line-strong rounded-lg font-mono bg-surface text-fg"
+                            className="tg-select flex-1 px-2.5 py-1.5 border border-line-strong rounded-[10px] font-mono bg-surface text-fg"
                           >
                             <option value="">
                               {files.length === 0 ? '暂无项目文件，请点击右侧上传本地文件' : '选择项目文件'}
@@ -2665,7 +2665,7 @@ export function WorkbenchView({
                         aria-label="Binary 项目文件"
                         value={body.file || ''}
                         onChange={(e) => updateBody({ file: e.target.value })}
-                        className="tg-select flex-1 min-w-[220px] px-2.5 py-1.5 border border-line-strong rounded-lg font-mono bg-surface text-fg"
+                        className="tg-select flex-1 min-w-[220px] px-2.5 py-1.5 border border-line-strong rounded-[10px] font-mono bg-surface text-fg"
                       >
                         <option value="">
                           {files.length === 0 ? '暂无项目文件，请点击左侧上传本地文件…' : '选择已上传项目文件…'}
@@ -2739,7 +2739,7 @@ export function WorkbenchView({
                         )
                         updateActiveAPI((cur) => ({ ...cur, extract: next }))
                       }}
-                      className="tg-select col-span-2 px-2 py-1 border border-line-strong rounded bg-surface"
+                      className="tg-select col-span-2 px-2 py-1 border border-line-strong rounded-[10px] bg-surface text-fg"
                     >
                       <option value="jsonpath">JSONPath</option>
                       <option value="xpath">XPath / HTML</option>
@@ -2824,7 +2824,7 @@ export function WorkbenchView({
                           else if (t === 'json_schema') updateAs({ type: t, value: '{"type":"object"}', equals: undefined, max: undefined, expr: undefined, contains: undefined, exists: undefined })
                           else updateAs({ type: t, expr: '$.code', equals: '0', max: undefined, value: undefined })
                         }}
-                        className="tg-select col-span-3 px-2 py-1 border border-line-strong rounded bg-surface"
+                        className="tg-select col-span-3 px-2 py-1 border border-line-strong rounded-[10px] bg-surface text-fg"
                       >
                         <option value="status">HTTP 状态码 (status)</option>
                         <option value="duration">最大耗时 (duration)</option>
@@ -3182,7 +3182,7 @@ export function WorkbenchView({
                               ),
                             }))
                           }
-                          className="tg-select col-span-2 px-2 py-1 border border-line-strong rounded bg-surface"
+                          className="tg-select col-span-2 px-2 py-1 border border-line-strong rounded-[10px] bg-surface text-fg"
                         >
                           <option value="string">string</option>
                           <option value="number">number</option>

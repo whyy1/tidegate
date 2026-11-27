@@ -86,9 +86,43 @@ func splitCSVList(s string) []string {
 	return out
 }
 
+func defaultDataDir() string {
+	exe, err := os.Executable()
+	if err != nil || exe == "" {
+		return "./data"
+	}
+	base := strings.ToLower(filepath.Base(exe))
+	if strings.HasSuffix(base, ".test") || strings.HasSuffix(base, ".test.exe") {
+		return "./data"
+	}
+	exeDir := filepath.Dir(exe)
+	if _, err := os.Stat(filepath.Join(exeDir, ".portable")); err == nil {
+		return filepath.Join(exeDir, "data")
+	}
+	if runtime.GOOS == "windows" {
+		cwdData := filepath.Join("data", "tidegate.db")
+		exeData := filepath.Join(exeDir, "data", "tidegate.db")
+		if _, err := os.Stat(cwdData); err != nil {
+			if _, err := os.Stat(exeData); err == nil {
+				return filepath.Join(exeDir, "data")
+			}
+		}
+		if sysRoot := strings.TrimSpace(os.Getenv("SystemRoot")); sysRoot != "" {
+			if cwd, cerr := os.Getwd(); cerr == nil {
+				cleanRoot := strings.ToLower(filepath.Clean(sysRoot))
+				cleanCwd := strings.ToLower(filepath.Clean(cwd))
+				if cleanCwd == cleanRoot || strings.HasPrefix(cleanCwd, cleanRoot+string(filepath.Separator)) {
+					return filepath.Join(exeDir, "data")
+				}
+			}
+		}
+	}
+	return "./data"
+}
+
 func cmdServe(args []string, stdout, stderr io.Writer) int {
 	fs := newFlagSet("serve", stderr)
-	dataDir := fs.String("data", envOr("TIDEGATE_DATA", "./data"), "数据目录")
+	dataDir := fs.String("data", envOr("TIDEGATE_DATA", defaultDataDir()), "数据目录")
 	listen := fs.String("listen", envOr("TIDEGATE_LISTEN", "127.0.0.1:8080"), "HTTP/WebSocket 监听地址")
 	clusterListen := fs.String("cluster-listen", envOr("TIDEGATE_CLUSTER_LISTEN", "127.0.0.1:7443"), "集群节点 gRPC 监听地址")
 	clusterPublicAddr := fs.String("cluster-public-addr", envOr("TIDEGATE_CLUSTER_PUBLIC_ADDR", ""), "对外公告的集群节点连接地址（host:port）")

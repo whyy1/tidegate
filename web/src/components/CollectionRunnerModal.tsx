@@ -4,6 +4,7 @@ import { api, APIError } from '../lib/api'
 import { copyText, downloadText, fileStamp } from '../lib/download'
 import type { CollectionTestResult, Environment, TreeNode } from '../lib/types'
 import { useNativeDialog } from '../lib/useNativeDialog'
+import { GlassSelect } from './GlassSelect'
 
 interface Props {
   open: boolean
@@ -181,42 +182,28 @@ export function CollectionRunnerModal({
       <div className="flex-1 min-h-0 p-4 space-y-4 overflow-y-auto tg-scroller text-xs">
         <div className="grid grid-cols-1 md:grid-cols-12 gap-3 items-end bg-surface-subtle border border-line rounded-lg p-3">
           <div className="md:col-span-4">
-            <label htmlFor="tg-runner-scope" className="block text-fg-muted mb-1 font-medium">
-              执行范围
-            </label>
-            <select
-              id="tg-runner-scope"
-              name="runner-scope"
+            <span className="block text-fg-muted mb-1 font-medium">执行范围</span>
+            <GlassSelect
+              ariaLabel="执行范围"
               value={folderId}
-              onChange={(e) => setFolderId(e.target.value)}
-              className="tg-select w-full px-2.5 py-1.5 rounded border border-line-strong bg-surface text-fg"
-            >
-              <option value="">整个项目</option>
-              {folderChoices.map((fc) => (
-                <option key={fc.id} value={fc.id}>
-                  目录：{fc.label}
-                </option>
-              ))}
-            </select>
+              onChange={setFolderId}
+              options={[
+                { value: '', label: '整个项目' },
+                ...folderChoices.map((fc) => ({ value: fc.id, label: `目录：${fc.label}` })),
+              ]}
+            />
           </div>
           <div className="md:col-span-3">
-            <label htmlFor="tg-runner-env" className="block text-fg-muted mb-1 font-medium">
-              目标环境
-            </label>
-            <select
-              id="tg-runner-env"
-              name="runner-env"
+            <span className="block text-fg-muted mb-1 font-medium">目标环境</span>
+            <GlassSelect
+              ariaLabel="目标环境"
               value={envId}
-              onChange={(e) => setEnvId(e.target.value)}
-              className="tg-select w-full px-2.5 py-1.5 rounded border border-line-strong bg-surface text-fg"
-            >
-              <option value="">不使用环境</option>
-              {environments.map((ev) => (
-                <option key={ev.id} value={ev.id}>
-                  {ev.name}
-                </option>
-              ))}
-            </select>
+              onChange={setEnvId}
+              options={[
+                { value: '', label: '不使用环境' },
+                ...environments.map((ev) => ({ value: ev.id, label: ev.name })),
+              ]}
+            />
           </div>
           <div className="md:col-span-3 flex items-center pb-1.5">
             <label className="inline-flex items-center gap-2 text-fg cursor-pointer">

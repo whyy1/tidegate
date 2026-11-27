@@ -24,6 +24,7 @@ import {
   XCircle,
 } from 'lucide-react'
 import { DropletFilter, RollingNumber } from '../components/DropletFilter'
+import { GlassSelect } from '../components/GlassSelect'
 import { LiquidCapsule } from '../components/LiquidCapsule'
 import { LoadConfigEditor } from '../components/LoadConfigEditor'
 import { BottomModuleStrip, ModuleZoomButton } from '../components/ModuleStage'
@@ -893,50 +894,45 @@ export function LiveRunView({
               </div>
 
               {sourceType === 'scenario' && (
-                <select
-                  aria-label="压测场景"
+                <GlassSelect
+                  ariaLabel="压测场景"
                   value={selectedScenarioId}
-                  onChange={(e) => setSelectedScenarioId(e.target.value)}
-                  className="tg-select px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg min-w-[200px]"
-                >
-                  <option value="">选择场景...</option>
-                  {scenarios.map((sc) => (
-                    <option key={sc.id} value={sc.id}>
-                      {sc.name} ({sc.steps?.length || 0} 步)
-                    </option>
-                  ))}
-                </select>
+                  onChange={setSelectedScenarioId}
+                  placeholder="选择场景..."
+                  className="min-w-[200px]"
+                  options={scenarios.map((sc) => ({
+                    value: sc.id,
+                    label: sc.name,
+                    badge: `${sc.steps?.length || 0} 步`,
+                  }))}
+                />
               )}
 
               {sourceType === 'api' && (
-                <select
-                  aria-label="目标接口"
+                <GlassSelect
+                  ariaLabel="目标接口"
                   value={selectedApiId}
-                  onChange={(e) => setSelectedApiId(e.target.value)}
-                  className="tg-select px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg min-w-[220px]"
-                >
-                  <option value="">选择接口...</option>
-                  {apis.map((a) => (
-                    <option key={a.id} value={a.id}>
-                      [{a.method}] {a.label}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setSelectedApiId}
+                  placeholder="选择接口..."
+                  className="min-w-[220px]"
+                  options={apis.map((a) => ({
+                    value: a.id,
+                    label: a.label,
+                    badge: a.method,
+                  }))}
+                />
               )}
 
-              <select
-                aria-label="覆盖环境"
+              <GlassSelect
+                ariaLabel="覆盖环境"
                 value={envOverrideId}
-                onChange={(e) => setEnvOverrideId(e.target.value)}
-                className="tg-select px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg"
-              >
-                <option value="">环境：使用默认 / 无环境</option>
-                {environments.map((env) => (
-                  <option key={env.id} value={env.id}>
-                    环境：{env.name}
-                  </option>
-                ))}
-              </select>
+                onChange={setEnvOverrideId}
+                className="min-w-[180px]"
+                options={[
+                  { value: '', label: '环境：使用默认 / 无环境' },
+                  ...environments.map((env) => ({ value: env.id, label: `环境：${env.name}` })),
+                ]}
+              />
 
               {(sourceType === 'scenario' || sourceType === 'mix') && (
                 <label className="inline-flex items-center gap-1.5 text-fg-muted cursor-pointer">
@@ -984,7 +980,7 @@ export function LiveRunView({
                                   prev.map((row, j) => (j === idx ? { ...row, scenario_id: e.target.value } : row))
                                 )
                               }
-                              className="tg-select col-span-6 px-2 py-1 border border-line-strong rounded bg-surface text-fg"
+                              className="tg-select col-span-6 px-2 py-1 border border-line-strong rounded-[10px] bg-surface text-fg"
                             >
                               <option value="">选择场景...</option>
                               {scenarios.map((sc) => (
@@ -1034,9 +1030,36 @@ export function LiveRunView({
             {/* Distributed Scheduling & Failover */}
             <div className="rounded-xl border border-line bg-surface-subtle p-3 grid grid-cols-1 md:grid-cols-2 gap-3">
               <div>
-                <label htmlFor="run-node-selector" className="block font-medium text-fg-muted mb-1">
-                  节点标签筛选
-                </label>
+                <div className="flex items-center justify-between gap-2 mb-1">
+                  <label htmlFor="run-node-selector" className="font-medium text-fg-muted">
+                    节点标签筛选
+                  </label>
+                  {(() => {
+                    const pairs: Array<[string, string]> = []
+                    for (const part of nodeSelectorText.split(',')) {
+                      const trimmed = part.trim()
+                      if (!trimmed) continue
+                      const idx = trimmed.indexOf('=')
+                      if (idx > 0) pairs.push([trimmed.slice(0, idx).trim(), trimmed.slice(idx + 1).trim()])
+                    }
+                    const matched =
+                      pairs.length === 0
+                        ? agents
+                        : agents.filter((ag) => pairs.every(([k, v]) => ag.labels?.[k] === v))
+                    return (
+                      <span
+                        className={`tg-tabular px-2 py-0.5 rounded-full border text-[10px] font-medium ${
+                          matched.length === 0
+                            ? 'border-rose-400/50 bg-rose-500/12 text-rose-700'
+                            : 'border-emerald-400/45 bg-emerald-500/12 text-emerald-700'
+                        }`}
+                        title={matched.map((m) => m.name).join(', ') || '无匹配节点'}
+                      >
+                        匹配在线节点：{matched.length} / {agents.length} 台
+                      </span>
+                    )
+                  })()}
+                </div>
                 <input
                   id="run-node-selector"
                   type="text"
@@ -1047,7 +1070,7 @@ export function LiveRunView({
                   value={nodeSelectorText}
                   onChange={(e) => setNodeSelectorText(e.target.value)}
                   placeholder="全部在线节点 · zone=cn-east, tier=perf"
-                  className="w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface text-fg font-mono"
+                  className="w-full px-2.5 py-1.5 border border-line-strong rounded-[10px] bg-surface text-fg font-mono"
                 />
                 {(() => {
                   const pairs = new Set<string>()
@@ -1085,17 +1108,16 @@ export function LiveRunView({
                 })()}
               </div>
               <div>
-                <label htmlFor="run-node-failure" className="block font-medium text-fg-muted mb-1">节点掉线策略</label>
-                <select
-                  id="run-node-failure"
-                  name="node_failure_policy"
+                <span className="block font-medium text-fg-muted mb-1">节点掉线策略</span>
+                <GlassSelect
+                  ariaLabel="节点掉线策略"
                   value={nodeFailurePolicy}
-                  onChange={(e) => setNodeFailurePolicy(e.target.value as 'redistribute' | 'abort')}
-                  className="tg-select w-full px-2.5 py-1.5 border border-line-strong rounded bg-surface text-fg"
-                >
-                  <option value="redistribute">自动重平衡到剩余节点</option>
-                  <option value="abort">任一节点掉线即中止</option>
-                </select>
+                  onChange={(v) => setNodeFailurePolicy(v as 'redistribute' | 'abort')}
+                  options={[
+                    { value: 'redistribute', label: '自动重平衡到剩余节点' },
+                    { value: 'abort', label: '任一节点掉线即中止' },
+                  ]}
+                />
               </div>
             </div>
 
@@ -1968,19 +1990,19 @@ function LatencyDistributionPanel({
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-3">
-          <select
-            aria-label="选择延迟直方图步骤"
+          <GlassSelect
+            ariaLabel="选择延迟直方图步骤"
             value={histStepId}
-            onChange={(e) => onChangeStepId(e.target.value)}
-            className="tg-select px-2.5 py-1 border border-line-strong rounded bg-surface text-fg text-xs"
-          >
-            <option value="">全局聚合直方图</option>
-            {(histogram?.steps || []).map((st) => (
-              <option key={st.id} value={st.id}>
-                步骤：{st.name || st.id}
-              </option>
-            ))}
-          </select>
+            onChange={onChangeStepId}
+            className="min-w-[180px]"
+            options={[
+              { value: '', label: '全局聚合直方图' },
+              ...(histogram?.steps || []).map((st) => ({
+                value: st.id,
+                label: `步骤：${st.name || st.id}`,
+              })),
+            ]}
+          />
           {activeLatency && activeLatency.count > 0 && (
             <span className="font-mono text-fg-muted text-[11px]">
               样本数 {activeLatency.count} · Mean {activeLatency.mean_ms.toFixed(2)}ms · P50 {activeLatency.p50_ms.toFixed(2)}ms · P95{' '}

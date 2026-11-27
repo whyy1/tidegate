@@ -97,12 +97,33 @@ func (c *Controller) ClusterCACertPEM() []byte {
 	return c.ca.CertPEM()
 }
 
+func (c *Controller) publishAgentReject(nodeName, reason, message string) {
+	c.hub.publish(Event{
+		Type: EventAgentRejected,
+		AgentRejected: &AgentRejectView{
+			NodeName:      nodeName,
+			ServerVersion: c.opts.Version,
+			Reason:        reason,
+			Message:       message,
+			Time:          time.Now(),
+		},
+	})
+}
+
 func (c *Controller) handleEnroll(ctx context.Context, req *cluster.EnrollRequest) (*cluster.EnrollResponse, error) {
+	reqName := ""
+	if req != nil {
+		reqName = req.Name
+	}
 	if c.ca == nil {
-		return &cluster.EnrollResponse{RejectMessage: "控制器未启用集群 CA"}, nil
+		msg := "控制器未启用集群 CA"
+		c.publishAgentReject(reqName, "enroll_disabled", msg)
+		return &cluster.EnrollResponse{RejectMessage: msg}, nil
 	}
 	if req == nil || strings.TrimSpace(req.Token) == "" {
-		return &cluster.EnrollResponse{RejectMessage: "节点加入令牌不能为空"}, nil
+		msg := "节点加入令牌不能为空"
+		c.publishAgentReject(reqName, "bad_token", msg)
+		return &cluster.EnrollResponse{RejectMessage: msg}, nil
 	}
 
 	authorized := cluster.TokenEqual(req.Token, c.internalToken) ||
@@ -113,16 +134,20 @@ func (c *Controller) handleEnroll(ctx context.Context, req *cluster.EnrollReques
 			if strings.Contains(err.Error(), "已") {
 				msg = err.Error()
 			}
+			c.publishAgentReject(reqName, "bad_token", msg)
 			return &cluster.EnrollResponse{RejectMessage: msg}, nil
 		}
 	}
 
 	certPEM, serialHex, expiresAt, err := c.ca.SignCSR(req.CSRDER, req.Name, 365*24*time.Hour)
 	if err != nil {
+		c.publishAgentReject(reqName, "enroll_csr_error", err.Error())
 		return &cluster.EnrollResponse{RejectMessage: err.Error()}, nil
 	}
 	if err := c.results.SaveAgentCert(ctx, serialHex, req.Name, expiresAt); err != nil {
-		return &cluster.EnrollResponse{RejectMessage: fmt.Sprintf("记录节点证书失败：%v", err)}, nil
+		msg := fmt.Sprintf("记录节点证书失败：%v", err)
+		c.publishAgentReject(reqName, "enroll_store_error", msg)
+		return &cluster.EnrollResponse{RejectMessage: msg}, nil
 	}
 	return &cluster.EnrollResponse{
 		ClientCertPEM: certPEM,

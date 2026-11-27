@@ -57,8 +57,8 @@ function fmtDuration(sec: number): string {
 }
 
 const inputCls =
-  'w-full px-2 py-1 border border-line-strong rounded bg-surface text-fg font-mono tg-tabular focus:border-sky-500 focus:outline-none'
-const selectCls = 'tg-select w-full px-2 py-1 border border-line-strong rounded bg-surface text-fg focus:border-sky-500 focus:outline-none'
+  'w-full px-2 py-1 border border-line-strong rounded-[10px] bg-surface text-fg font-mono tg-tabular focus:border-sky-500 focus:outline-none'
+const selectCls = 'tg-select w-full px-2 py-1 border border-line-strong rounded-[10px] bg-surface text-fg focus:border-sky-500 focus:outline-none'
 const fieldLabelCls = 'block text-fg-muted mb-1'
 
 export function LoadConfigEditor({ load, onChange, http, onHTTPChange, stepOptions = [], compact = false }: Props) {

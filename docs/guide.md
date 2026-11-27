@@ -25,17 +25,22 @@
 ```bash
 npm --prefix web ci
 npm --prefix web run build
-CGO_ENABLED=0 go build -trimpath -o tidegate ./cmd/tidegate
+CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=0.1.0" -o tidegate ./cmd/tidegate
 ```
 
-Windows PowerShell 示例：
+Windows PowerShell 示例（含一键生成绿色便携包与 `.zip` 校验和）：
 
 ```powershell
 npm --prefix web ci
 npm --prefix web run build
 $env:CGO_ENABLED = "0"
-go build -trimpath -o tidegate.exe .\cmd\tidegate
+go build -trimpath -ldflags="-s -w -X main.version=0.1.0" -o tidegate.exe .\cmd\tidegate
+
+# 一键打包 Windows 绿色便携版至 dist/（可选 -IncludeLinux 同时生成 Linux amd64/arm64 静态包）
+powershell -ExecutionPolicy Bypass -File scripts/build-portable.ps1 -Version 0.1.0
 ```
+
+> **Windows 绿色便携版数据目录规则**：若与可执行文件同级存在 `.portable` 标记文件或已有的 `data/tidegate.db`，或从快捷方式/系统目录启动且未指定 `--data` / `TIDEGATE_DATA`，Tidegate 会自动将数据目录锚定到可执行文件同级的 `data/` 目录，避免数据漂移到其它路径。
 
 直接启动本地控制面与内置发压节点：
 
@@ -256,10 +261,11 @@ docker exec -it tidegate-controller \
 
 ## 7. 分布式零信任 mTLS 集群
 
-1. 放行控制器集群端口（默认 `7443/tcp`，容器或 NAT 后请配置 `TIDEGATE_CLUSTER_PUBLIC_ADDR`）。
-2. 进入左侧 **发压节点** 页面，填写节点预设标签（如 `zone=cn-east,tier=perf`）并点击 **签发加入令牌**，页面自动拼装带有 `--join`、`--ca-fingerprint`、`--labels` 的接入命令。
-3. 在远程发压机执行接入命令后，节点通过 CSR 换签将双向 mTLS 证书持久化到 `--cert-dir`，后续重启无需重传加入令牌。
-4. 运行时可按节点权重（Enter 提交、Esc 还原）、带宽上限或标签选择器（`node_selector`）精细调度，并支持在线吊销节点证书或切换掉线重平衡策略。
+1. **监听与对外地址**：控制端裸机默认监听 `127.0.0.1:7443`，跨机接入请以 `--cluster-listen 0.0.0.0:7443` 启动（Docker 默认已监听 `0.0.0.0:7443`），若控制端位于反代或 NAT 之后请设置 `TIDEGATE_CLUSTER_PUBLIC_ADDR=<外网或局域网IP:7443>`。
+2. **版本一致**：控制端与所有 `agent` 须保持一致版本号（源码编译或分发请注入 `-ldflags="-s -w -X main.version=0.1.0"`，或使用相同版本的发布包）。
+3. **签发令牌与多平台命令**：进入左侧 **发压节点** 页面，按需填写控制器接入地址、节点名称（`--name`）及预设标签（如 `zone=cn-east,tier=perf`），切换 **Linux/macOS / Windows PowerShell / Docker** 标签页并点击 **一键签发并复制命令**。
+4. **mTLS 证书持久化**：在远程发压机执行接入命令后，节点通过 CSR 换签将双向 mTLS 证书持久化到 `--cert-dir`（如 `~/.tidegate/agent-certs`、`$env:LOCALAPPDATA\Tidegate\agent-certs` 或容器卷 `/certs`），后续重启无需重传一次性加入令牌。
+5. **调度与异常诊断**：运行时可按节点权重（Enter 提交、Esc 还原）、带宽上限或标签选择器（`node_selector`）精细调度，支持在线吊销节点证书、切换掉线重平衡策略，并在控制台实时告警版本不匹配或令牌拒接原因。
 
 ---
 
@@ -305,7 +311,7 @@ Tidegate 内置无外部依赖的纯 Go MCP 2.0 服务端，同时支持 **Strea
 ## 9. 导入导出生态与 CI 门禁
 
 - **两步预览导入**：在工作台点击 **导入**，支持 OpenAPI 3.0/3.1、Swagger 2.0、Postman v2.1、Apifox、JMeter（`.jmx`）、HAR 1.2、cURL 与 `.tidegate` 归档。选择智能合并时先预览差异 diff，写入时自动保留团队手工添加的断言、提取器与前后置脚本。
-- **生态导出**：项目管理弹窗支持导出 `.tidegate` 完整归档、OpenAPI 3.0（YAML/JSON）与 Postman v2.1；场景页面支持导出独立 **k6 脚本（`.js`）**。
+- **生态导出**：项目管理弹窗支持导出 `.tidegate` 完整归档、OpenAPI 3.0（YAML/JSON）与 Postman v2.1；场景页面优先提供可直接用于 `tidegate run` 的原生 **Tidegate 场景（`.yaml` / `.json`）**，并兼容导出 **k6 脚本（`.js`）**。
 - **CI/CD 质量与性能门禁**：
 
 ```bash

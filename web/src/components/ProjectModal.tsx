@@ -14,7 +14,14 @@ import {
   X,
 } from 'lucide-react'
 import { api, APIError } from '../lib/api'
-import type { KeyValue, Project, ProjectAccessRole, User } from '../lib/types'
+import {
+  computeEffectiveProjectAccess,
+  getGlobalRoleLabel,
+  getProjectRoleLabel,
+  PROJECT_ROLE_LABELS,
+  ROLE_BADGE_TONE,
+} from '../lib/roles'
+import type { KeyValue, Project, ProjectAccessRole, User, UserRole } from '../lib/types'
 import { useNativeDialog } from '../lib/useNativeDialog'
 import { KeyValueEditor } from './KeyValueEditor'
 import { LiquidCapsule } from './LiquidCapsule'
@@ -23,6 +30,7 @@ interface Props {
   open: boolean
   projects: Project[]
   activeProject: Project | null
+  userRole?: UserRole
   isAdmin?: boolean
   onClose: () => void
   onSelectProject: (id: string) => void
@@ -44,17 +52,11 @@ const EXPORTS = [
   { fmt: 'postman' as const, label: 'Postman v2.1' },
 ]
 
-const ACL_ROLE_LABELS: Record<ProjectAccessRole, string> = {
-  '': '继承全局',
-  member: '读写执行',
-  viewer: '只读',
-  none: '禁止访问',
-}
-
 export function ProjectModal({
   open,
   projects,
   activeProject,
+  userRole = 'member',
   isAdmin = false,
   onClose,
   onSelectProject,
@@ -62,6 +64,7 @@ export function ProjectModal({
   onOpenGovernanceUsers,
   onToast,
 }: Props) {
+  const canCreateProject = userRole !== 'viewer'
   const dialogRef = useNativeDialog(open, onClose)
   const [mode, setMode] = useState<LeftMode>('project')
   const [selectedId, setSelectedId] = useState<string>('')
@@ -74,6 +77,9 @@ export function ProjectModal({
   const [vars, setVars] = useState<KeyValue[]>([])
   const [newName, setNewName] = useState('')
   const [newDesc, setNewDesc] = useState('')
+  const [newRestricted, setNewRestricted] = useState(false)
+  const [newMembers, setNewMembers] = useState<Record<number, ProjectAccessRole>>({})
+  const [createUsers, setCreateUsers] = useState<User[]>([])
   const [archiveFile, setArchiveFile] = useState<File | null>(null)
   const [archiveName, setArchiveName] = useState('')
   const [busy, setBusy] = useState(false)
@@ -95,15 +101,28 @@ export function ProjectModal({
     if (wasOpenRef.current) return
     wasOpenRef.current = true
     setQuery('')
-    setMode(projects.length > 0 ? 'project' : 'create')
+    setMode(projects.length > 0 || !canCreateProject ? 'project' : 'create')
     setSelectedId(activeProject?.id || projects[0]?.id || '')
     setRightTab('basic')
     setNewName('')
     setNewDesc('')
+    setNewRestricted(false)
+    setNewMembers({})
     setArchiveFile(null)
     setArchiveName('')
     setConfirmDelete(false)
-  }, [open, activeProject?.id, projects])
+  }, [open, activeProject?.id, projects, canCreateProject])
+
+  useEffect(() => {
+    if (!open || mode !== 'create' || !isAdmin || !newRestricted) return
+    let active = true
+    api.listUsers().then((list) => {
+      if (active) setCreateUsers(list)
+    }).catch(() => undefined)
+    return () => {
+      active = false
+    }
+  }, [open, mode, isAdmin, newRestricted])
 
   const selectedProject = useMemo(
     () => projects.find((p) => p.id === selectedId) || activeProject || null,
@@ -184,9 +203,25 @@ export function ProjectModal({
     if (!newName.trim()) return
     setBusy(true)
     try {
-      const created = await api.createProject({ name: newName.trim(), description: newDesc.trim() })
+      const members =
+        isAdmin && newRestricted
+          ? Object.entries(newMembers)
+              .map(([uid, role]) => ({ user_id: Number(uid), role }))
+              .filter(
+                (m): m is { user_id: number; role: 'member' | 'viewer' | 'none' } =>
+                  m.user_id > 0 && (m.role === 'member' || m.role === 'viewer' || m.role === 'none')
+              )
+          : undefined
+      const created = await api.createProject({
+        name: newName.trim(),
+        description: newDesc.trim(),
+        restricted: newRestricted,
+        members,
+      })
       setNewName('')
       setNewDesc('')
+      setNewRestricted(false)
+      setNewMembers({})
       await onProjectsChanged(created.id)
       onSelectProject(created.id)
       setSelectedId(created.id)
@@ -282,6 +317,7 @@ export function ProjectModal({
   }
 
   const canWriteSelected = selectedProject?.effective_role !== 'viewer'
+  const canDeleteSelected = projects.length > 1 && (selectedProject?.can_delete ?? isAdmin)
 
   return (
     <dialog
@@ -316,30 +352,32 @@ export function ProjectModal({
               aria-label="项目列表"
               className="w-56 shrink-0 border-r border-line bg-surface-subtle p-2.5 flex flex-col gap-1.5 overflow-y-auto tg-scroller"
             >
-              <div className="grid grid-cols-2 gap-1">
-                <button
-                  type="button"
-                  onClick={() => setMode('create')}
-                  className={`inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-[10px] text-xs font-medium transition-colors ${
-                    mode === 'create'
-                      ? 'bg-primary text-white'
-                      : 'text-tidal hover:bg-sky-500/10 border border-dashed border-sky-400/50'
-                  }`}
-                >
-                  <FolderPlus className="w-3.5 h-3.5" /> 新建
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setMode('import')}
-                  className={`inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-[10px] text-xs font-medium transition-colors ${
-                    mode === 'import'
-                      ? 'bg-primary text-white'
-                      : 'text-fg-muted hover:bg-surface-hover border border-line'
-                  }`}
-                >
-                  <ArchiveRestore className="w-3.5 h-3.5" /> 导入
-                </button>
-              </div>
+              {canCreateProject && (
+                <div className="grid grid-cols-2 gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setMode('create')}
+                    className={`inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-[10px] text-xs font-medium transition-colors ${
+                      mode === 'create'
+                        ? 'bg-primary text-white'
+                        : 'text-tidal hover:bg-sky-500/10 border border-dashed border-sky-400/50'
+                    }`}
+                  >
+                    <FolderPlus className="w-3.5 h-3.5" /> 新建
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setMode('import')}
+                    className={`inline-flex items-center justify-center gap-1 px-2 py-1.5 rounded-[10px] text-xs font-medium transition-colors ${
+                      mode === 'import'
+                        ? 'bg-primary text-white'
+                        : 'text-fg-muted hover:bg-surface-hover border border-line'
+                    }`}
+                  >
+                    <ArchiveRestore className="w-3.5 h-3.5" /> 导入
+                  </button>
+                </div>
+              )}
 
               {projects.length > 4 && (
                 <search className="relative">
@@ -377,6 +415,9 @@ export function ProjectModal({
                         <div className="flex items-center justify-between gap-1.5 min-w-0">
                           <span className="truncate">{pr.name}</span>
                           <div className="flex items-center gap-1 shrink-0">
+                            {pr.restricted && (
+                              <span className="px-1 rounded bg-sky-500/12 text-tidal text-[10px]">私有</span>
+                            )}
                             {pr.effective_role === 'viewer' && (
                               <span className="px-1 rounded bg-amber-500/15 text-amber-700 text-[10px]">只读</span>
                             )}
@@ -401,9 +442,9 @@ export function ProjectModal({
             <div className="flex-1 min-w-0 flex flex-col text-xs">
               {mode === 'create' && (
                 <form onSubmit={handleCreate} className="flex-1 min-h-0 flex flex-col">
-                  <div className="flex-1 min-h-0 overflow-y-auto tg-scroller p-5 space-y-4">
+                  <div className="flex-1 min-h-0 overflow-y-auto tg-scroller p-5 space-y-5">
                     <div className="font-semibold text-sm text-fg">新建项目</div>
-                    <div className="space-y-3 max-w-md">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-2xl">
                       <label className="block">
                         <span className="block font-medium text-fg-muted mb-1">名称</span>
                         <input
@@ -429,6 +470,125 @@ export function ProjectModal({
                         />
                       </label>
                     </div>
+
+                    <fieldset className="rounded-xl border border-line bg-surface-subtle/60 p-3.5 space-y-3 max-w-2xl">
+                      <legend className="px-1.5 font-medium text-fg-muted">访问范围</legend>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        {(
+                          [
+                            {
+                              val: false,
+                              title: '团队开放',
+                              desc: '按成员全局角色（未隔离）开放访问',
+                            },
+                            {
+                              val: true,
+                              title: '私有白名单',
+                              desc: isAdmin ? '仅下列显式授权的成员可访问' : '仅管理员与创建者本人可访问',
+                            },
+                          ] as const
+                        ).map((opt) => {
+                          const active = newRestricted === opt.val
+                          return (
+                            <label
+                              key={opt.title}
+                              className={`flex items-start gap-2.5 p-2.5 rounded-xl border cursor-pointer transition-colors ${
+                                active ? 'border-sky-400 bg-surface shadow-xs' : 'border-line bg-surface/60 hover:bg-surface'
+                              }`}
+                            >
+                              <input
+                                type="radio"
+                                name="new_project_visibility"
+                                checked={active}
+                                onChange={() => setNewRestricted(opt.val)}
+                                className="mt-0.5"
+                              />
+                              <span className="min-w-0">
+                                <span className="block font-semibold text-fg">{opt.title}</span>
+                                <span className="block text-[11px] text-fg-subtle">{opt.desc}</span>
+                              </span>
+                            </label>
+                          )
+                        })}
+                      </div>
+
+                      {newRestricted && isAdmin && createUsers.filter((u) => u.role !== 'admin').length > 0 && (
+                        <div className="space-y-2 pt-1">
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <span className="font-medium text-fg">初始白名单成员</span>
+                            <div className="inline-flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next: Record<number, ProjectAccessRole> = {}
+                                  for (const u of createUsers) if (u.role !== 'admin') next[u.id] = 'member'
+                                  setNewMembers(next)
+                                }}
+                                className="tg-btn-secondary !py-1 !px-2 !text-[11px]"
+                              >
+                                全部读写
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  const next: Record<number, ProjectAccessRole> = {}
+                                  for (const u of createUsers) if (u.role !== 'admin') next[u.id] = 'viewer'
+                                  setNewMembers(next)
+                                }}
+                                className="tg-btn-secondary !py-1 !px-2 !text-[11px]"
+                              >
+                                全部只读
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setNewMembers({})}
+                                className="tg-btn-secondary !py-1 !px-2 !text-[11px]"
+                              >
+                                清空授权
+                              </button>
+                            </div>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            {createUsers
+                              .filter((u) => u.role !== 'admin')
+                              .map((u) => {
+                                const val = newMembers[u.id] || ''
+                                return (
+                                  <div
+                                    key={u.id}
+                                    className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border border-line bg-surface"
+                                  >
+                                    <span className="truncate font-medium text-fg">
+                                      {u.username}{' '}
+                                      <span className="text-[11px] font-normal text-fg-subtle">
+                                        · {getGlobalRoleLabel(u.role, true)}
+                                      </span>
+                                    </span>
+                                    <div className="inline-flex rounded-md border border-line bg-surface-subtle p-0.5 shrink-0">
+                                      {(['', 'member', 'viewer'] as const).map((r) => (
+                                        <button
+                                          key={r || 'none'}
+                                          type="button"
+                                          onClick={() => setNewMembers((prev) => ({ ...prev, [u.id]: r }))}
+                                          className={`px-2 py-0.5 rounded text-[11px] font-medium ${
+                                            val === r
+                                              ? r === ''
+                                                ? 'bg-slate-600 text-white'
+                                                : 'bg-primary text-white'
+                                              : 'text-fg-muted hover:text-fg'
+                                          }`}
+                                        >
+                                          {r === '' ? '未授权' : PROJECT_ROLE_LABELS[r]}
+                                        </button>
+                                      ))}
+                                    </div>
+                                  </div>
+                                )
+                              })}
+                          </div>
+                        </div>
+                      )}
+                    </fieldset>
                   </div>
                   <footer className="tg-dialog-footer">
                     <button type="button" onClick={onClose} className="tg-btn-secondary">
@@ -552,19 +712,50 @@ export function ProjectModal({
                                 <span>私有白名单模式</span>
                                 <span className="font-normal text-fg-subtle">仅明确授权的成员可访问</span>
                               </label>
-                              {onOpenGovernanceUsers && (
+                              <div className="flex flex-wrap items-center gap-1.5">
                                 <button
                                   type="button"
                                   onClick={() => {
-                                    onClose()
-                                    onOpenGovernanceUsers()
+                                    const next: Record<number, ProjectAccessRole> = {}
+                                    for (const u of aclUsers) if (u.role !== 'admin') next[u.id] = 'viewer'
+                                    setAclRoles(next)
                                   }}
-                                  className="inline-flex items-center gap-1 text-tidal hover:underline font-medium"
+                                  className="tg-btn-secondary !py-1 !px-2 !text-[11px]"
                                 >
-                                  <span>前往全局账号与项目权限矩阵</span>
-                                  <ArrowRight className="w-3 h-3" />
+                                  全部只读
                                 </button>
-                              )}
+                                <button
+                                  type="button"
+                                  onClick={() => {
+                                    const next: Record<number, ProjectAccessRole> = {}
+                                    for (const u of aclUsers) if (u.role !== 'admin') next[u.id] = 'none'
+                                    setAclRoles(next)
+                                  }}
+                                  className="tg-btn-secondary !py-1 !px-2 !text-[11px] hover:!text-rose-600"
+                                >
+                                  全部禁止
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setAclRoles({})}
+                                  className="tg-btn-secondary !py-1 !px-2 !text-[11px]"
+                                >
+                                  全部恢复继承
+                                </button>
+                                {onOpenGovernanceUsers && (
+                                  <button
+                                    type="button"
+                                    onClick={() => {
+                                      onClose()
+                                      onOpenGovernanceUsers()
+                                    }}
+                                    className="inline-flex items-center gap-1 text-tidal hover:underline font-medium ml-1"
+                                  >
+                                    <span>全局权限矩阵</span>
+                                    <ArrowRight className="w-3 h-3" />
+                                  </button>
+                                )}
+                              </div>
                             </div>
 
                             <div className="border border-line rounded-xl overflow-hidden bg-surface">
@@ -573,57 +764,84 @@ export function ProjectModal({
                                   <tr>
                                     <th className="px-3 py-2 font-medium">用户</th>
                                     <th className="px-3 py-2 font-medium">全局角色</th>
+                                    <th className="px-3 py-2 font-medium">实时生效</th>
                                     <th className="px-3 py-2 font-medium">本项目权限</th>
                                   </tr>
                                 </thead>
                                 <tbody className="divide-y divide-line">
-                                  {aclUsers.map((u) => (
-                                    <tr key={u.id}>
-                                      <td className="px-3 py-2 font-medium text-fg">
-                                        {u.username}
-                                        {u.disabled && (
-                                          <span className="ml-1.5 px-1.5 py-0.2 rounded bg-rose-500/15 text-rose-700 text-[10px]">
-                                            已停用
+                                  {aclUsers.map((u) => {
+                                    const preview = computeEffectiveProjectAccess(
+                                      u.role,
+                                      u.default_project_access,
+                                      aclRestricted,
+                                      aclRoles[u.id]
+                                    )
+                                    return (
+                                      <tr key={u.id}>
+                                        <td className="px-3 py-2 font-medium text-fg">
+                                          {u.username}
+                                          {u.disabled && (
+                                            <span className="ml-1.5 px-1.5 py-px rounded bg-rose-500/15 text-rose-700 text-[10px]">
+                                              已停用
+                                            </span>
+                                          )}
+                                          {u.default_project_access === 'deny' && u.role !== 'admin' && (
+                                            <span className="ml-1.5 px-1.5 py-px rounded bg-surface-subtle border border-line text-fg-subtle text-[10px]">
+                                              白名单账号
+                                            </span>
+                                          )}
+                                        </td>
+                                        <td className="px-3 py-2 text-fg-muted">
+                                          <span className={`inline-flex px-2 py-0.5 rounded-full border text-[11px] ${ROLE_BADGE_TONE[u.role]}`}>
+                                            {getGlobalRoleLabel(u.role)}
                                           </span>
-                                        )}
-                                      </td>
-                                      <td className="px-3 py-2 font-mono text-fg-subtle">{u.role}</td>
-                                      <td className="px-3 py-2">
-                                        {u.role === 'admin' ? (
-                                          <span className="px-2 py-0.5 rounded-full bg-sky-500/15 text-tidal text-[11px] font-medium">
-                                            始终可管理
+                                        </td>
+                                        <td className="px-3 py-2">
+                                          <span
+                                            className={`inline-flex px-2 py-0.5 rounded-full border text-[11px] font-medium ${
+                                              preview.allowed
+                                                ? ROLE_BADGE_TONE[preview.effectiveRole || 'viewer']
+                                                : ROLE_BADGE_TONE.none
+                                            }`}
+                                          >
+                                            {preview.label}
                                           </span>
-                                        ) : (
-                                          <div className="inline-flex rounded-lg border border-line bg-surface-subtle p-0.5 gap-0.5">
-                                            {(['', 'member', 'viewer', 'none'] as const).map((r) => {
-                                              const cur = aclRoles[u.id] || ''
-                                              const active = cur === r
-                                              return (
-                                                <button
-                                                  key={r || 'inherit'}
-                                                  type="button"
-                                                  onClick={() => setAclRoles((prev) => ({ ...prev, [u.id]: r }))}
-                                                  className={`px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors ${
-                                                    active
-                                                      ? r === 'none'
-                                                        ? 'bg-rose-600 text-white'
-                                                        : 'bg-primary text-white'
-                                                      : 'text-fg-muted hover:text-fg hover:bg-surface-hover'
-                                                  }`}
-                                                >
-                                                  {r === ''
-                                                    ? aclRestricted
-                                                      ? '未授权'
-                                                      : ACL_ROLE_LABELS[r]
-                                                    : ACL_ROLE_LABELS[r]}
-                                                </button>
-                                              )
-                                            })}
-                                          </div>
-                                        )}
-                                      </td>
-                                    </tr>
-                                  ))}
+                                        </td>
+                                        <td className="px-3 py-2">
+                                          {u.role === 'admin' ? (
+                                            <span className="px-2 py-0.5 rounded-full bg-sky-500/15 text-tidal text-[11px] font-medium">
+                                              始终可管理
+                                            </span>
+                                          ) : (
+                                            <div className="inline-flex rounded-lg border border-line bg-surface-subtle p-0.5 gap-0.5">
+                                              {(['', 'member', 'viewer', 'none'] as const).map((r) => {
+                                                const cur = aclRoles[u.id] || ''
+                                                const active = cur === r
+                                                return (
+                                                  <button
+                                                    key={r || 'inherit'}
+                                                    type="button"
+                                                    onClick={() => setAclRoles((prev) => ({ ...prev, [u.id]: r }))}
+                                                    className={`px-2 py-0.5 rounded-md text-[11px] font-medium transition-colors ${
+                                                      active
+                                                        ? r === 'none'
+                                                          ? 'bg-rose-600 text-white'
+                                                          : 'bg-primary text-white'
+                                                        : 'text-fg-muted hover:text-fg hover:bg-surface-hover'
+                                                    }`}
+                                                  >
+                                                    {r === ''
+                                                      ? getProjectRoleLabel('', aclRestricted || u.default_project_access === 'deny')
+                                                      : PROJECT_ROLE_LABELS[r]}
+                                                  </button>
+                                                )
+                                              })}
+                                            </div>
+                                          )}
+                                        </td>
+                                      </tr>
+                                    )
+                                  })}
                                 </tbody>
                               </table>
                             </div>
@@ -704,7 +922,7 @@ export function ProjectModal({
 
                       <footer className="tg-dialog-footer justify-between">
                         <div>
-                          {projects.length > 1 && canWriteSelected && (
+                          {canDeleteSelected && (
                             <button
                               type="button"
                               onClick={() => void handleDelete()}

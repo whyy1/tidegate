@@ -28,7 +28,7 @@ function collectFolders(nodes: TreeNode[], prefix = ''): Array<{ id: string; lab
 }
 
 const FORM_ID = 'tg-import-form'
-const selectCls = 'tg-select px-2.5 py-1 border border-line-strong bg-surface text-fg'
+const selectCls = 'tg-select px-2.5 py-1 border border-line-strong rounded-[10px] bg-surface text-fg'
 
 export function ImportModal({ open, projectId, treeNodes, onClose, onApplied, onToast }: Props) {
   const ref = useNativeDialog(open, onClose)

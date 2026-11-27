@@ -73,26 +73,35 @@ func (s *Server) handleListUsers(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Username string    `json:"username"`
-		Password string    `json:"password"`
-		Role     auth.Role `json:"role"`
+		Username             string                    `json:"username"`
+		Password             string                    `json:"password"`
+		Role                 auth.Role                 `json:"role"`
+		MustChangePassword   bool                      `json:"must_change_password"`
+		DefaultProjectAccess auth.DefaultProjectAccess `json:"default_project_access"`
+		ProjectOverrides     map[string]auth.Role      `json:"project_overrides"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, err)
 		return
 	}
 	u, err := s.auth.CreateUser(r.Context(), auth.CreateUserRequest{
-		Username: body.Username,
-		Password: body.Password,
-		Role:     body.Role,
+		Username:             body.Username,
+		Password:             body.Password,
+		Role:                 body.Role,
+		MustChangePassword:   body.MustChangePassword,
+		DefaultProjectAccess: body.DefaultProjectAccess,
+		ProjectOverrides:     body.ProjectOverrides,
 	})
 	if err != nil {
 		writeError(w, err)
 		return
 	}
 	s.audit(r, "user.create", "user", strconv.FormatInt(u.ID, 10), map[string]any{
-		"username": u.Username,
-		"role":     u.Role,
+		"username":               u.Username,
+		"role":                   u.Role,
+		"must_change_password":   u.MustChangePassword,
+		"default_project_access": u.DefaultProjectAccess,
+		"override_count":         len(body.ProjectOverrides),
 	})
 	writeJSON(w, http.StatusCreated, map[string]any{"user": toUserDTO(u)})
 }
@@ -219,17 +228,21 @@ func (s *Server) handlePutUserProjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Overrides map[string]auth.Role `json:"overrides"`
+		DefaultProjectAccess auth.DefaultProjectAccess `json:"default_project_access"`
+		Overrides            map[string]auth.Role      `json:"overrides"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, err)
 		return
 	}
-	if err := s.auth.SetUserProjectOverrides(r.Context(), uid, body.Overrides); err != nil {
+	if err := s.auth.SetUserProjectAccess(r.Context(), uid, body.DefaultProjectAccess, body.Overrides); err != nil {
 		writeError(w, err)
 		return
 	}
-	s.audit(r, "user.projects_update", "user", strconv.FormatInt(uid, 10), map[string]any{"count": len(body.Overrides)})
+	s.audit(r, "user.projects_update", "user", strconv.FormatInt(uid, 10), map[string]any{
+		"default_project_access": body.DefaultProjectAccess,
+		"count":                  len(body.Overrides),
+	})
 	s.handleGetUserProjects(w, r)
 }
 
@@ -259,7 +272,8 @@ func (s *Server) handleAdminResetUserPassword(w http.ResponseWriter, r *http.Req
 		return
 	}
 	var body struct {
-		Password string `json:"password"`
+		Password           string `json:"password"`
+		MustChangePassword *bool  `json:"must_change_password"`
 	}
 	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, err)
@@ -270,12 +284,17 @@ func (s *Server) handleAdminResetUserPassword(w http.ResponseWriter, r *http.Req
 		writeError(w, err)
 		return
 	}
-	if err := s.auth.ResetPassword(r.Context(), target.Username, body.Password); err != nil {
+	mustChange := false
+	if body.MustChangePassword != nil {
+		mustChange = *body.MustChangePassword
+	}
+	if err := s.auth.ResetPasswordWithFlag(r.Context(), target.Username, body.Password, mustChange); err != nil {
 		writeError(w, err)
 		return
 	}
 	s.audit(r, "user.password_reset", "user", strconv.FormatInt(uid, 10), map[string]any{
-		"username": target.Username,
+		"username":             target.Username,
+		"must_change_password": mustChange,
 	})
 	w.WriteHeader(http.StatusNoContent)
 }

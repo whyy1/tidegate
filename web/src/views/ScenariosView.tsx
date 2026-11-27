@@ -1537,7 +1537,7 @@ export function ScenariosView({
                           aria-label="数据文件"
                           value={ds.file}
                           onChange={(e) => updateDS({ file: e.target.value })}
-                          className="tg-select flex-1 min-w-0 px-2 py-1 border border-line-strong rounded font-mono bg-surface text-fg"
+                          className="tg-select flex-1 min-w-0 px-2 py-1 border border-line-strong rounded-[10px] font-mono bg-surface text-fg"
                         >
                           <option value="">选择文件</option>
                           {ds.file && !dataFiles.some((f) => f.name === ds.file) && (
@@ -1553,7 +1553,7 @@ export function ScenariosView({
                           aria-label="读取方式"
                           value={ds.mode || 'sequential'}
                           onChange={(e) => updateDS({ mode: e.target.value as DataSource['mode'] })}
-                          className="tg-select w-28 px-1.5 py-1 border border-line-strong rounded bg-surface text-fg"
+                          className="tg-select w-28 px-1.5 py-1 border border-line-strong rounded-[10px] bg-surface text-fg"
                         >
                           <option value="sequential">顺序循环</option>
                           <option value="random">随机读取</option>
@@ -2014,7 +2014,7 @@ function ScenarioStepListEditor({
                         else if (t === 'uniform') updateStep({ think: { type: 'uniform', min: '500ms', max: '1500ms' } })
                         else updateStep({ think: { type: 'normal', mean: '800ms', stddev: '200ms', min: '100ms', max: '3s' } })
                       }}
-                      className={`tg-select ${fieldCls} px-1.5`}
+                      className={`tg-select rounded-[10px] ${fieldCls} px-1.5`}
                     >
                       <option value="">无思考时间</option>
                       <option value="fixed">思考 · 固定</option>

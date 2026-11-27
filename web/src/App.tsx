@@ -4,6 +4,7 @@ import { AuthGate } from './components/AuthGate'
 import { CommandPalette } from './components/CommandPalette'
 import { GooFilterDefs } from './components/DropletFilter'
 import { EnvModal } from './components/EnvModal'
+import { ForcePasswordModal } from './components/ForcePasswordModal'
 import { GlassDock } from './components/GlassDock'
 import { ProjectModal } from './components/ProjectModal'
 import { SidebarRail } from './components/SidebarRail'
@@ -189,16 +190,39 @@ export function App() {
     }
   }, [])
 
+  const resetSessionState = useCallback(() => {
+    setUser(null)
+    setProjects([])
+    setActiveProjectId('')
+    setEnvironments([])
+    setActiveEnvId('')
+    setTempVars({})
+    setAgents([])
+    setSysByAgent({})
+    setActiveRunId('')
+    setActiveTab('workbench')
+    setQuickLoadAPI(null)
+    setPreloadedScenarioId('')
+    setInspectRunId('')
+    setIncomingReplay(null)
+    setOpenAPIRequest(null)
+    setProjectModalOpen(false)
+    setEnvModalOpen(false)
+    setAccountModalOpen(false)
+    setCmdOpen(false)
+    setToasts([])
+    wsClient.stop()
+  }, [])
+
   useEffect(() => {
     void bootstrap()
     const onUnauth = () => {
-      setUser(null)
-      wsClient.stop()
+      resetSessionState()
       void api.setupStatus().then(setSetupStatus).catch(() => undefined)
     }
     window.addEventListener(UNAUTHORIZED_EVENT, onUnauth)
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, onUnauth)
-  }, [bootstrap])
+  }, [bootstrap, resetSessionState])
 
   const loadProjects = useCallback(
     async (preferId?: string) => {
@@ -259,11 +283,14 @@ export function App() {
     }
   }, [user, loadProjects])
 
+  const activeProject = projects.find((p) => p.id === activeProjectId) || null
+  const hasActiveProject = Boolean(activeProject)
+
   useEffect(() => {
-    if (user && activeProjectId) {
-      void loadEnvironments(activeProjectId)
+    if (user && activeProjectId && hasActiveProject) {
+      void loadEnvironments(activeProjectId).catch(() => undefined)
     }
-  }, [user, activeProjectId, loadEnvironments])
+  }, [user, activeProjectId, hasActiveProject, loadEnvironments])
 
   const liveAgents = useMemo(
     () => agents.map((ag) => (sysByAgent[ag.id] ? { ...ag, stats: sysByAgent[ag.id] } : ag)),
@@ -278,7 +305,6 @@ export function App() {
     setInspectRunId('')
   }, [])
 
-  const activeProject = projects.find((p) => p.id === activeProjectId) || null
   const canWriteProject = activeProject?.effective_role ? activeProject.effective_role !== 'viewer' : user?.role !== 'viewer'
   const isProjectTab = activeTab === 'workbench' || activeTab === 'scenarios' || activeTab === 'run' || activeTab === 'history'
 
@@ -363,8 +389,15 @@ export function App() {
 
         <div className="flex-1 flex flex-col min-h-0 overflow-hidden">
           {!activeProject && isProjectTab ? (
-            <div className="flex-1 tg-glass-card flex flex-col items-center justify-center gap-3 text-sm text-fg-subtle">
-              <span>暂无可用项目</span>
+            <div className="flex-1 tg-glass-card flex flex-col items-center justify-center gap-3 p-6 text-center text-sm text-fg-subtle">
+              <span className="font-semibold text-fg">
+                {user.role === 'viewer' ? '当前暂无可访问的项目' : '暂无可用项目'}
+              </span>
+              {user.role === 'viewer' && (
+                <p className="max-w-md text-xs text-fg-muted">
+                  请联系系统管理员在「系统治理 → 用户与角色」中为您分配项目访问权限。
+                </p>
+              )}
               <div className="flex items-center gap-2">
                 {user.role !== 'viewer' && (
                   <button
@@ -532,11 +565,31 @@ export function App() {
         open={projectModalOpen}
         projects={projects}
         activeProject={activeProject}
+        userRole={user.role}
         isAdmin={user.role === 'admin'}
         onClose={() => setProjectModalOpen(false)}
         onSelectProject={selectProject}
         onProjectsChanged={loadProjects}
         onOpenGovernanceUsers={() => setActiveTab('governance')}
+        onToast={pushToast}
+      />
+
+      <ForcePasswordModal
+        open={Boolean(user.must_change_password)}
+        user={user}
+        onCompleted={async () => {
+          const meRes = await api.me()
+          setUser(meRes.user)
+          await loadProjects()
+        }}
+        onLogout={async () => {
+          try {
+            await api.logout()
+          } catch {
+            // ignore logout failure
+          }
+          resetSessionState()
+        }}
         onToast={pushToast}
       />
 
@@ -562,17 +615,7 @@ export function App() {
         onClose={() => setAccountModalOpen(false)}
         onOpenGovernance={() => setActiveTab('governance')}
         onToast={pushToast}
-        onLoggedOut={() => {
-          setUser(null)
-          setSysByAgent({})
-          setActiveRunId('')
-          setQuickLoadAPI(null)
-          setPreloadedScenarioId('')
-          setInspectRunId('')
-          setIncomingReplay(null)
-          setOpenAPIRequest(null)
-          wsClient.stop()
-        }}
+        onLoggedOut={resetSessionState}
       />
 
       <GlassDock

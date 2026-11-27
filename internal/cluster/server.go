@@ -85,8 +85,21 @@ type ServerOptions struct {
 	VerifyClientCert func(cert *x509.Certificate, nodeID string) error
 	// GRPCOptions are appended to the options NewServer builds.
 	GRPCOptions []grpc.ServerOption
+	// OnReject, when set, is notified whenever a connecting node is rejected.
+	OnReject func(RejectInfo)
 	// Logf, when set, receives diagnostic messages.
 	Logf func(format string, args ...any)
+}
+
+// RejectInfo describes a rejected node handshake for diagnostics and UI alerts.
+type RejectInfo struct {
+	RemoteAddr    string
+	NodeName      string
+	NodeVersion   string
+	ServerVersion string
+	Reason        RejectReason
+	Message       string
+	Time          time.Time
 }
 
 func (o *ServerOptions) setDefaults() {
@@ -436,7 +449,7 @@ func (s *Server) connect(stream grpc.ServerStream) error {
 	}
 	hello, ok := first.msg.Body.(*Hello)
 	if !ok {
-		return s.reject(stream, remote, RejectProtocol, "协议错误：节点的第一条消息必须是 Hello", "")
+		return s.reject(stream, remote, "", "", RejectProtocol, "协议错误：节点的第一条消息必须是 Hello", "")
 	}
 
 	var certSerial string
@@ -448,18 +461,18 @@ func (s *Server) connect(stream grpc.ServerStream) error {
 			}
 		}
 		if leafCert == nil {
-			return s.reject(stream, remote, RejectBadToken, "集群已启用双向 TLS，节点必须先凭令牌签发有效客户端证书", "")
+			return s.reject(stream, remote, hello.Name, hello.Version, RejectBadToken, "集群已启用双向 TLS，节点必须先凭令牌签发有效客户端证书", "")
 		}
 		if err := s.opts.VerifyClientCert(leafCert, hello.NodeID); err != nil {
-			return s.reject(stream, remote, RejectBadToken, err.Error(), "")
+			return s.reject(stream, remote, hello.Name, hello.Version, RejectBadToken, err.Error(), "")
 		}
 		certSerial = CertSerialHex(leafCert)
 	} else if !s.authenticate(hello.Token) {
-		return s.reject(stream, remote, RejectBadToken, "节点令牌无效，控制器拒绝接入", "")
+		return s.reject(stream, remote, hello.Name, hello.Version, RejectBadToken, "节点令牌无效，控制器拒绝接入", "")
 	}
 	if hello.Version != s.opts.Version {
 		msg := fmt.Sprintf("节点版本 %s 与控制器版本 %s 不一致，请使用与控制器相同版本的 tidegate", orUnknown(hello.Version), orUnknown(s.opts.Version))
-		return s.reject(stream, remote, RejectVersionMismatch, msg, s.opts.Version)
+		return s.reject(stream, remote, hello.Name, hello.Version, RejectVersionMismatch, msg, s.opts.Version)
 	}
 
 	n = s.newNode(hello, remote, certSerial)
@@ -499,8 +512,19 @@ func orUnknown(v string) string {
 	return v
 }
 
-func (s *Server) reject(stream grpc.ServerStream, remote string, reason RejectReason, msg, serverVersion string) error {
+func (s *Server) reject(stream grpc.ServerStream, remote, nodeName, nodeVersion string, reason RejectReason, msg, serverVersion string) error {
 	s.logf("拒绝节点 %s 接入：%s", remote, msg)
+	if s.opts.OnReject != nil {
+		s.opts.OnReject(RejectInfo{
+			RemoteAddr:    remote,
+			NodeName:      nodeName,
+			NodeVersion:   nodeVersion,
+			ServerVersion: serverVersion,
+			Reason:        reason,
+			Message:       msg,
+			Time:          time.Now(),
+		})
+	}
 	f, err := encodeController(&Reject{Reason: reason, Message: msg, ServerVersion: serverVersion}, s.opts.MaxMessageSize)
 	if err == nil {
 		_ = stream.SendMsg(f)

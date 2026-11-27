@@ -7,6 +7,7 @@ export interface SetupStatus {
 
 export type UserRole = 'admin' | 'member' | 'viewer'
 export type ProjectAccessRole = '' | 'member' | 'viewer' | 'none'
+export type DefaultProjectAccess = 'inherit' | 'deny'
 
 export interface User {
   id: number
@@ -14,6 +15,8 @@ export interface User {
   role: UserRole
   totp_enabled?: boolean
   totp_policy_required?: boolean
+  must_change_password?: boolean
+  default_project_access?: DefaultProjectAccess
   disabled?: boolean
   disabled_at?: string
   active_sessions?: number
@@ -101,6 +104,8 @@ export interface Project {
   description?: string
   variables?: KeyValue[]
   effective_role?: UserRole
+  restricted?: boolean
+  can_delete?: boolean
   version: string
 }
 
@@ -950,9 +955,12 @@ export interface ApplyResult {
 export interface SystemInfo {
   version: string
   tls: boolean
+  runtime?: 'docker' | 'binary' | string
   cluster_addr: string
+  cluster_listen_loopback?: boolean
   cluster_ca_fingerprint: string
   exe_path?: string
+  public_url?: string
 }
 
 export interface APIToken {
@@ -1075,8 +1083,18 @@ export interface AuditEntry {
   detail?: unknown
 }
 
+export interface AgentRejectView {
+  remote_addr?: string
+  node_name?: string
+  node_version?: string
+  server_version?: string
+  reason?: string
+  message: string
+  time: string
+}
+
 export interface WSEvent {
-  type: 'snapshot' | 'sys' | 'run_status' | 'alert' | 'agents'
+  type: 'snapshot' | 'sys' | 'run_status' | 'alert' | 'agents' | 'agent_rejected'
   run_id?: string
   agent_id?: string
   status?: RunStatus
@@ -1085,4 +1103,5 @@ export interface WSEvent {
   sys?: SysmonStats
   alert?: Alert
   agents?: AgentView[]
+  agent_rejected?: AgentRejectView
 }

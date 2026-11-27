@@ -44,20 +44,20 @@ export function ToastContainer({
         <div
           key={t.id}
           role={t.kind === 'error' ? 'alert' : 'status'}
-          className={`flex items-start gap-2.5 rounded-lg border bg-surface/95 backdrop-blur-md px-3.5 py-2.5 text-sm shadow-lg ${
+          className={`tg-glass-popover flex items-start gap-2.5 px-3.5 py-2.5 text-sm text-fg ${
             t.kind === 'error'
-              ? 'border-rose-200 text-rose-800'
+              ? '!border-rose-400/55'
               : t.kind === 'success'
-                ? 'border-emerald-200 text-emerald-800'
-                : 'border-sky-200 text-sky-900'
+                ? '!border-emerald-400/55'
+                : '!border-sky-400/55'
           }`}
         >
           {t.kind === 'error' ? (
             <AlertCircle className="mt-0.5 h-4 w-4 shrink-0 text-rose-500" />
           ) : t.kind === 'success' ? (
-            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-600" />
+            <CheckCircle2 className="mt-0.5 h-4 w-4 shrink-0 text-emerald-500" />
           ) : (
-            <Info className="mt-0.5 h-4 w-4 shrink-0 text-sky-500" />
+            <Info className="mt-0.5 h-4 w-4 shrink-0 text-tidal" />
           )}
           <span className="flex-1 break-words leading-snug">{t.message}</span>
           <button

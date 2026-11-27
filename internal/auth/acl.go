@@ -21,6 +21,7 @@ type ProjectMember struct {
 type ProjectACL struct {
 	ProjectID  string          `json:"project_id"`
 	Restricted bool            `json:"restricted"`
+	CreatedBy  int64           `json:"created_by,omitempty"`
 	Members    []ProjectMember `json:"members"`
 }
 
@@ -35,11 +36,13 @@ func (s *Service) GetProjectACL(ctx context.Context, projectID string) (*Project
 		Members:   []ProjectMember{},
 	}
 	var restricted int
-	err := s.db.QueryRowContext(ctx, `SELECT restricted FROM auth_project_acl WHERE project_id = ?`, pid).Scan(&restricted)
+	var createdBy int64
+	err := s.db.QueryRowContext(ctx, `SELECT restricted, created_by FROM auth_project_acl WHERE project_id = ?`, pid).Scan(&restricted, &createdBy)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("auth: get project acl: %w", err)
 	}
 	acl.Restricted = restricted != 0
+	acl.CreatedBy = createdBy
 
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT m.user_id, u.username, m.role
@@ -69,6 +72,54 @@ func (s *Service) GetProjectACL(ctx context.Context, projectID string) (*Project
 
 // SetProjectACL updates whether projectID requires explicit membership and replaces its member list.
 func (s *Service) SetProjectACL(ctx context.Context, projectID string, restricted bool, members []ProjectMember) (*ProjectACL, error) {
+	return s.saveProjectACL(ctx, projectID, 0, false, restricted, members)
+}
+
+// InitProjectACL initializes a newly created/imported project's creator, visibility mode,
+// and initial member list in a single transaction.
+func (s *Service) InitProjectACL(ctx context.Context, projectID string, createdBy int64, restricted bool, members []ProjectMember) (*ProjectACL, error) {
+	return s.saveProjectACL(ctx, projectID, createdBy, true, restricted, members)
+}
+
+// ProjectCreatedBy returns the creator user ID stored for projectID (0 if unknown or legacy).
+func (s *Service) ProjectCreatedBy(ctx context.Context, projectID string) (int64, error) {
+	pid := strings.TrimSpace(projectID)
+	if pid == "" {
+		return 0, nil
+	}
+	var createdBy int64
+	err := s.db.QueryRowContext(ctx, `SELECT created_by FROM auth_project_acl WHERE project_id = ?`, pid).Scan(&createdBy)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("auth: get project creator: %w", err)
+	}
+	return createdBy, nil
+}
+
+// ListRestrictedProjects returns the map of project IDs marked as restricted.
+func (s *Service) ListRestrictedProjects(ctx context.Context) (map[string]bool, error) {
+	out := make(map[string]bool)
+	rows, err := s.db.QueryContext(ctx, `SELECT project_id FROM auth_project_acl WHERE restricted <> 0`)
+	if err != nil {
+		return nil, fmt.Errorf("auth: list restricted projects: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var pid string
+		if err := rows.Scan(&pid); err != nil {
+			return nil, fmt.Errorf("auth: scan restricted project: %w", err)
+		}
+		out[pid] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("auth: list restricted projects: %w", err)
+	}
+	return out, nil
+}
+
+func (s *Service) saveProjectACL(ctx context.Context, projectID string, createdBy int64, setCreator bool, restricted bool, members []ProjectMember) (*ProjectACL, error) {
 	pid := strings.TrimSpace(projectID)
 	if pid == "" {
 		return nil, &Error{Code: CodeInvalidTokenInput, Status: http.StatusBadRequest, Message: "项目 ID 不能为空"}
@@ -101,11 +152,20 @@ func (s *Service) SetProjectACL(ctx context.Context, projectID string, restricte
 	if restricted {
 		restrInt = 1
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO auth_project_acl (project_id, restricted, updated_at) VALUES (?, ?, ?)
-		 ON CONFLICT(project_id) DO UPDATE SET restricted = excluded.restricted, updated_at = excluded.updated_at`,
-		pid, restrInt, ms); err != nil {
-		return nil, fmt.Errorf("auth: upsert project acl: %w", err)
+	if setCreator {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO auth_project_acl (project_id, restricted, created_by, updated_at) VALUES (?, ?, ?, ?)
+			 ON CONFLICT(project_id) DO UPDATE SET restricted = excluded.restricted, created_by = excluded.created_by, updated_at = excluded.updated_at`,
+			pid, restrInt, createdBy, ms); err != nil {
+			return nil, fmt.Errorf("auth: upsert project acl: %w", err)
+		}
+	} else {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO auth_project_acl (project_id, restricted, updated_at) VALUES (?, ?, ?)
+			 ON CONFLICT(project_id) DO UPDATE SET restricted = excluded.restricted, updated_at = excluded.updated_at`,
+			pid, restrInt, ms); err != nil {
+			return nil, fmt.Errorf("auth: upsert project acl: %w", err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_project_members WHERE project_id = ?`, pid); err != nil {
 		return nil, fmt.Errorf("auth: clear project members: %w", err)
@@ -183,7 +243,7 @@ func (s *Service) ResolveProjectRole(ctx context.Context, u *User, tok *APIToken
 		}
 		if memberRole != "" && Role(memberRole).Valid() {
 			baseRole = Role(memberRole)
-		} else if restricted != 0 {
+		} else if restricted != 0 || u.DefaultProjectAccess == DefaultAccessDeny {
 			return "", false, nil
 		} else {
 			baseRole = rawRole
@@ -244,6 +304,15 @@ func (s *Service) ListUserProjectOverrides(ctx context.Context, userID int64) (r
 // SetUserProjectOverrides replaces userID's explicit per-project roles (entries
 // with empty role clear that project override so the user falls back to their global role or restricted denial).
 func (s *Service) SetUserProjectOverrides(ctx context.Context, userID int64, roles map[string]Role) error {
+	return s.SetUserProjectAccess(ctx, userID, "", roles)
+}
+
+// SetUserProjectAccess atomically updates userID's optional default_project_access policy
+// and replaces explicit per-project role overrides.
+func (s *Service) SetUserProjectAccess(ctx context.Context, userID int64, defaultAccess DefaultProjectAccess, roles map[string]Role) error {
+	if defaultAccess != "" && !defaultAccess.Valid() {
+		return &Error{Code: CodeInvalidRole, Status: http.StatusBadRequest, Message: "默认项目访问策略只能是 inherit 或 deny"}
+	}
 	var exists int
 	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM auth_users WHERE id = ?`, userID).Scan(&exists); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -258,10 +327,16 @@ func (s *Service) SetUserProjectOverrides(ctx context.Context, userID int64, rol
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	ms := s.clock().UnixMilli()
+	if defaultAccess != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE auth_users SET default_project_access = ?, updated_at = ? WHERE id = ?`,
+			string(defaultAccess), ms, userID); err != nil {
+			return fmt.Errorf("auth: update default project access: %w", err)
+		}
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_project_members WHERE user_id = ?`, userID); err != nil {
 		return fmt.Errorf("auth: clear user project overrides: %w", err)
 	}
-	ms := s.clock().UnixMilli()
 	for rawPID, r := range roles {
 		pid := strings.TrimSpace(rawPID)
 		if pid == "" || r == "" {

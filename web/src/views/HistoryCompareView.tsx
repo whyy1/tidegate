@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type uPlot from 'uplot'
 import { Download, Eye, FileSpreadsheet, GitCompare, ImageDown, RefreshCw, Search, Trash2, X } from 'lucide-react'
 import { DropletFilter, RollingNumber } from '../components/DropletFilter'
+import { GlassSelect } from '../components/GlassSelect'
 import { UPlotChart } from '../components/UPlotChart'
 import { api, APIError } from '../lib/api'
 import { downloadText, fileStamp, toCSV } from '../lib/download'
@@ -322,22 +323,20 @@ export function HistoryCompareView({ projectId, canWrite = true, onInspectRun, o
         </div>
         <div className="flex flex-wrap items-center gap-2">
           {canCompare && (
-            <select
-              name="baseline_run"
-              aria-label="选择基线压测记录"
+            <GlassSelect
+              ariaLabel="选择基线压测记录"
               value={effectiveBase}
-              onChange={(e) => setBaselineId(e.target.value)}
-              className="tg-select px-2.5 py-1.5 border border-line-strong rounded-lg bg-surface text-fg"
-            >
-              {selectedIds.map((id) => {
+              onChange={setBaselineId}
+              className="min-w-[200px] max-w-[300px]"
+              options={selectedIds.map((id) => {
                 const r = runs.find((x) => x.id === id)
-                return (
-                  <option key={id} value={id}>
-                    基线：{r?.scenario_name || id} ({id.slice(-5)})
-                  </option>
-                )
+                return {
+                  value: id,
+                  label: `基线：${r?.scenario_name || id}`,
+                  badge: id.slice(-5),
+                }
               })}
-            </select>
+            />
           )}
           <button
             type="button"

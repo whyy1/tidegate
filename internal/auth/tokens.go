@@ -325,24 +325,24 @@ func (s *Service) AuthenticateBearerFrom(ctx context.Context, rawToken, remoteAd
 	}
 	sum := sha256.Sum256([]byte(rawToken))
 	var (
-		tok                                        APIToken
-		u                                          User
-		tokRole, userRole, scopesRaw, pids, mcpRaw string
-		totpEnabled                                int
-		disabledAt                                 int64
-		tokCreated                                 int64
-		lastUsed, exp                              sql.NullInt64
-		userCreated, userPwChangedAt               int64
+		tok                                                   APIToken
+		u                                                     User
+		tokRole, userRole, defAccess, scopesRaw, pids, mcpRaw string
+		totpEnabled, mustChange                               int
+		disabledAt                                            int64
+		tokCreated                                            int64
+		lastUsed, exp                                         sql.NullInt64
+		userCreated, userPwChangedAt                          int64
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT t.id, t.user_id, t.name, t.token_prefix, t.role, t.scopes, t.project_ids, t.mcp_tools,
 		        t.mcp_max_vus, t.mcp_max_duration_sec, t.rate_per_min, t.last_used_addr, t.created_at, t.last_used_at, t.expires_at,
-		        u.username, u.role, u.totp_enabled, u.disabled_at, u.created_at, u.password_changed_at
+		        u.username, u.role, u.totp_enabled, u.must_change_password, u.default_project_access, u.disabled_at, u.created_at, u.password_changed_at
 		   FROM auth_tokens t JOIN auth_users u ON u.id = t.user_id
 		  WHERE t.token_hash = ?`, sum[:]).
 		Scan(&tok.ID, &tok.UserID, &tok.Name, &tok.Prefix, &tokRole, &scopesRaw, &pids, &mcpRaw,
 			&tok.MCPMaxVUs, &tok.MCPMaxDurationSec, &tok.RatePerMin, &tok.LastUsedAddr, &tokCreated, &lastUsed, &exp,
-			&u.Username, &userRole, &totpEnabled, &disabledAt, &userCreated, &userPwChangedAt)
+			&u.Username, &userRole, &totpEnabled, &mustChange, &defAccess, &disabledAt, &userCreated, &userPwChangedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fail(ErrUnauthenticated)
 	}
@@ -380,6 +380,8 @@ func (s *Service) AuthenticateBearerFrom(ctx context.Context, rawToken, remoteAd
 	u.RawRole = Role(userRole)
 	u.Role = EffectiveRole(Role(userRole), tok.Role)
 	u.TOTPEnabled = totpEnabled != 0
+	u.MustChangePassword = mustChange != 0
+	u.DefaultProjectAccess = normalizeDefaultProjectAccess(DefaultProjectAccess(defAccess))
 	u.CreatedAt = time.UnixMilli(userCreated)
 	u.PasswordChangedAt = time.UnixMilli(userPwChangedAt)
 

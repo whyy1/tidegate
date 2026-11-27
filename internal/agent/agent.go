@@ -18,8 +18,8 @@ import (
 
 	"tidegate/internal/cluster"
 	"tidegate/internal/engine"
+	"tidegate/internal/safepath"
 	"tidegate/internal/scenario"
-	"tidegate/internal/store"
 	"tidegate/internal/sysmon"
 )
 
@@ -344,7 +344,7 @@ func (a *Agent) executeRun(ar *agentRun, r *cluster.StartRun) {
 	defer cleanupDir()
 
 	for _, df := range r.DataFiles {
-		if err := store.ValidateFileName(df.Name); err != nil {
+		if err := safepath.ValidateFileName(df.Name); err != nil {
 			cleanupDir()
 			finishErr(fmt.Sprintf("数据文件名无效 %q：%v", df.Name, err))
 			return

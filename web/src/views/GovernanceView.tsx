@@ -39,9 +39,18 @@ import { GlassSelect } from '../components/GlassSelect'
 import { LiquidCapsule } from '../components/LiquidCapsule'
 import { api, APIError } from '../lib/api'
 import { copyText, downloadText, fileStamp, toCSV } from '../lib/download'
+import {
+  computeEffectiveProjectAccess,
+  getGlobalRoleLabel,
+  getProjectRoleLabel,
+  GLOBAL_ROLE_META,
+  PROJECT_ROLE_LABELS,
+  ROLE_BADGE_TONE,
+} from '../lib/roles'
 import type {
   APIToken,
   AuditEntry,
+  DefaultProjectAccess,
   MCPCatalog,
   MCPToolCatalogItem,
   MCPToolCategory,
@@ -86,23 +95,8 @@ const AUDIT_FILTERS: { id: string; label: string; mono: boolean; match: (action:
   { id: 'project', label: 'project.*', mono: true, match: (a) => a.startsWith('project.') },
 ]
 
-const ROLE_BADGE: Record<string, string> = {
-  admin: 'bg-rose-50 border-rose-200 text-rose-800',
-  member: 'bg-sky-50 border-sky-200 text-sky-800',
-  viewer: 'bg-slate-100 border-slate-200 text-slate-700',
-  none: 'bg-rose-500/15 border-rose-300 text-rose-800',
-}
-
-const ACL_ROLE_LABELS: Record<ProjectAccessRole, string> = {
-  '': '继承全局',
-  member: '读写',
-  viewer: '只读',
-  none: '禁止访问',
-}
-
 const inputCls = 'w-full px-2.5 py-1.5 border border-line-strong rounded-[10px] bg-surface text-fg disabled:bg-surface-subtle disabled:text-fg-subtle'
-const ghostBtn =
-  'inline-flex items-center gap-1 px-2.5 py-1.5 rounded border border-line-strong bg-surface hover:bg-surface-hover text-fg-muted font-medium disabled:opacity-50'
+const ghostBtn = 'tg-btn-secondary'
 
 /** Cryptographically random password without look-alike characters (rejection sampling, no modulo bias). */
 function randomPassword(length = 20): string {
@@ -210,7 +204,7 @@ function PasswordField({
   const short = value.length > 0 && value.length < MIN_PASSWORD
   return (
     <div
-      className={`flex items-stretch rounded border bg-surface focus-within:border-sky-500 ${
+      className={`flex items-stretch rounded-[10px] border bg-surface focus-within:border-sky-500 ${
         short ? 'border-amber-400' : 'border-line-strong'
       }`}
     >
@@ -290,19 +284,31 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
   const [newUsername, setNewUsername] = useState('')
   const [newPassword, setNewPassword] = useState('')
   const [newRole, setNewRole] = useState<UserRole>('member')
-  const [createAclMode, setCreateAclMode] = useState<'inherit' | 'custom'>('inherit')
+  const [newMustChangePw, setNewMustChangePw] = useState(true)
+  const [newDefaultAccess, setNewDefaultAccess] = useState<DefaultProjectAccess>('inherit')
+  const [createAclMode, setCreateAclMode] = useState<'default' | 'custom'>('default')
   const [newProjectRoles, setNewProjectRoles] = useState<Record<string, ProjectAccessRole>>({})
   const [savingUser, setSavingUser] = useState(false)
-  const [createdBanner, setCreatedBanner] = useState<{ username: string; password: string; role: UserRole } | null>(null)
+  const [createdBanner, setCreatedBanner] = useState<{
+    username: string
+    password: string
+    role: UserRole
+    mustChangePassword: boolean
+    defaultAccess: DefaultProjectAccess
+  } | null>(null)
   const [resetUid, setResetUid] = useState(0)
   const [resetPw, setResetPw] = useState('')
+  const [resetMustChangePw, setResetMustChangePw] = useState(true)
   const [resettingPw, setResettingPw] = useState(false)
   const [pendingDemote, setPendingDemote] = useState<{ user: User; nextRole: UserRole } | null>(null)
   const [permUid, setPermUid] = useState(0)
   const [permLoading, setPermLoading] = useState(false)
   const [permSaving, setPermSaving] = useState(false)
   const [permItems, setPermItems] = useState<UserProjectAccessItem[]>([])
+  const [permDefaultAccess, setPermDefaultAccess] = useState<DefaultProjectAccess>('inherit')
+  const [permOrigDefaultAccess, setPermOrigDefaultAccess] = useState<DefaultProjectAccess>('inherit')
   const [permDraft, setPermDraft] = useState<Record<string, ProjectAccessRole>>({})
+  const [permOrigDraft, setPermOrigDraft] = useState<Record<string, ProjectAccessRole>>({})
   const [allTokens, setAllTokens] = useState<APIToken[]>([])
 
   // Security policy + MCP catalog & activity
@@ -359,11 +365,15 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
     try {
       const res = await api.getUserProjects(uid)
       setPermItems(res.projects || [])
+      const defAccess = res.user.default_project_access || 'inherit'
+      setPermDefaultAccess(defAccess)
+      setPermOrigDefaultAccess(defAccess)
       const draft: Record<string, ProjectAccessRole> = {}
       for (const p of res.projects || []) {
         draft[p.project_id] = p.member_role || ''
       }
       setPermDraft(draft)
+      setPermOrigDraft(draft)
     } catch (err) {
       onToast('error', errMsg(err, '加载用户项目权限失败'))
       setPermUid(0)
@@ -375,11 +385,16 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
   const handleSaveUserProjects = async (u: User) => {
     setPermSaving(true)
     try {
-      const res = await api.putUserProjects(u.id, permDraft)
+      const res = await api.putUserProjects(u.id, permDraft, permDefaultAccess)
       setPermItems(res.projects || [])
+      const defAccess = res.user.default_project_access || 'inherit'
+      setPermDefaultAccess(defAccess)
+      setPermOrigDefaultAccess(defAccess)
       const draft: Record<string, ProjectAccessRole> = {}
       for (const p of res.projects || []) draft[p.project_id] = p.member_role || ''
       setPermDraft(draft)
+      setPermOrigDraft(draft)
+      await loadUsers()
       onToast('success', `已更新「${u.username}」的项目访问权限`)
     } catch (err) {
       onToast('error', errMsg(err, '保存项目权限失败'))
@@ -473,22 +488,35 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
     }
     setSavingUser(true)
     try {
+      const overrides: Record<string, ProjectAccessRole> = {}
+      if (newRole !== 'admin' && createAclMode === 'custom' && projects.length > 0) {
+        for (const p of projects) {
+          const val = newProjectRoles[p.id]
+          if (val) overrides[p.id] = val
+        }
+      }
+      const effectiveDefault: DefaultProjectAccess = newRole === 'admin' ? 'inherit' : newDefaultAccess
       const createdU = await api.createUser({
         username: newUsername.trim(),
         password: newPassword,
         role: newRole,
+        must_change_password: newMustChangePw,
+        default_project_access: effectiveDefault,
+        project_overrides: Object.keys(overrides).length > 0 ? overrides : undefined,
       })
-      if (newRole !== 'admin' && createAclMode === 'custom' && projects.length > 0) {
-        const overrides: Record<string, ProjectAccessRole> = {}
-        for (const p of projects) {
-          overrides[p.id] = newProjectRoles[p.id] || 'none'
-        }
-        await api.putUserProjects(createdU.user.id, overrides)
-      }
-      setCreatedBanner({ username: createdU.user.username, password: newPassword, role: createdU.user.role })
+      setCreatedBanner({
+        username: createdU.user.username,
+        password: newPassword,
+        role: createdU.user.role,
+        mustChangePassword: newMustChangePw,
+        defaultAccess: effectiveDefault,
+      })
       setNewUsername('')
       setNewPassword('')
-      setCreateAclMode('inherit')
+      setNewRole('member')
+      setNewMustChangePw(true)
+      setNewDefaultAccess('inherit')
+      setCreateAclMode('default')
       setNewProjectRoles({})
       await loadUsers()
       onToast('success', `已开通账号「${createdU.user.username}」`)
@@ -507,6 +535,7 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
     }
     setResetUid(uid)
     setResetPw('')
+    setResetMustChangePw(true)
   }
 
   const handleResetPassword = async (u: User) => {
@@ -514,13 +543,13 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
       onToast('error', `新密码至少 ${MIN_PASSWORD} 个字符`)
       return
     }
-    if (!confirm.arm(`pw-${u.id}`)) return
     setResettingPw(true)
     try {
-      await api.adminResetUserPassword(u.id, resetPw)
+      await api.adminResetUserPassword(u.id, resetPw, resetMustChangePw)
       setResetUid(0)
       setResetPw('')
-      onToast('success', `已重置「${u.username}」的密码`)
+      await loadUsers()
+      onToast('success', `已重置「${u.username}」的密码${resetMustChangePw ? '（下次登录须改密）' : ''}`)
     } catch (err) {
       onToast('error', errMsg(err, '重置密码失败'))
     } finally {
@@ -705,7 +734,7 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
       await api.patchUser(u.id, { role })
       setPendingDemote(null)
       await loadUsers()
-      onToast('success', `已将 ${u.username} 设为 ${role}`)
+      onToast('success', `已将 ${u.username} 设为${getGlobalRoleLabel(role)}`)
     } catch (err) {
       onToast('error', errMsg(err, '更新角色失败'))
     }
@@ -744,7 +773,7 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
             })}
         </div>
         <span className="text-[11px] text-fg-subtle font-mono">
-          {currentUser.username} · {currentUser.role}
+          {currentUser.username} · {getGlobalRoleLabel(currentUser.role, true)}
         </span>
       </div>
 
@@ -756,27 +785,66 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
               <h2 className="font-semibold text-sm text-fg flex items-center gap-1.5">
                 <UserPlus className="w-4 h-4 text-tidal" /> 开通新账号并分配项目权限
               </h2>
-              {createdBanner && (
-                <div className="flex items-center gap-2 px-3 py-1 rounded-full border border-emerald-300 bg-emerald-50 text-emerald-900">
-                  <span className="font-mono">
-                    {createdBanner.username} ({createdBanner.role})
-                  </span>
+            </div>
+
+            {createdBanner && (
+              <div className="tg-accent-card p-3.5 flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0 space-y-1">
+                  <div className="flex flex-wrap items-center gap-2 text-fg font-semibold">
+                    <span>已开通账号「{createdBanner.username}」</span>
+                    <span className={`px-2 py-0.5 rounded-full border text-[11px] ${ROLE_BADGE_TONE[createdBanner.role]}`}>
+                      {getGlobalRoleLabel(createdBanner.role)}
+                    </span>
+                    {createdBanner.mustChangePassword && (
+                      <span className="px-2 py-0.5 rounded-full border border-amber-400/50 bg-amber-500/12 text-amber-700 text-[11px]">
+                        首次登录须改密
+                      </span>
+                    )}
+                    {createdBanner.role !== 'admin' && (
+                      <span className="px-2 py-0.5 rounded-full border border-line bg-surface-subtle text-fg-muted text-[11px]">
+                        {createdBanner.defaultAccess === 'deny' ? '白名单隔离' : '开放项目继承'}
+                      </span>
+                    )}
+                  </div>
+                  <div className="font-mono text-[11px] text-fg-muted flex flex-wrap items-center gap-x-4 gap-y-1">
+                    <span>登录地址: {window.location.origin}</span>
+                    <span>账号: {createdBanner.username}</span>
+                    <span>临时密码: {createdBanner.password}</span>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
                   <button
                     type="button"
                     onClick={() =>
                       void copyPassword(
                         'created-cred',
-                        `账号: ${createdBanner.username}\n密码: ${createdBanner.password}\n角色: ${createdBanner.role}`
+                        [
+                          `登录地址: ${window.location.origin}`,
+                          `账号: ${createdBanner.username}`,
+                          `临时密码: ${createdBanner.password}`,
+                          `全局角色: ${getGlobalRoleLabel(createdBanner.role)}`,
+                          createdBanner.mustChangePassword
+                            ? '说明: 首次登录后请按系统提示立即修改密码。'
+                            : '说明: 建议登录后尽快在个人设置中更新密码。',
+                        ].join('\n')
                       )
                     }
-                    className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-600 text-white font-medium"
+                    className="tg-btn-primary !py-1.5"
                   >
-                    {copied === 'created-cred' ? <Check className="w-3 h-3" /> : <Copy className="w-3 h-3" />}
-                    {copied === 'created-cred' ? '已复制凭据' : '复制账号密码'}
+                    {copied === 'created-cred' ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
+                    {copied === 'created-cred' ? '已复制入驻指引' : '一键复制入驻指引'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCreatedBanner(null)}
+                    aria-label="关闭引导卡片"
+                    className="p-1.5 rounded-lg text-fg-subtle hover:text-fg hover:bg-surface-hover"
+                  >
+                    <X className="w-3.5 h-3.5" />
                   </button>
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
             <form onSubmit={handleCreateUser} className="space-y-3">
               <div className="grid grid-cols-1 md:grid-cols-12 gap-2.5 items-end">
@@ -814,9 +882,9 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                     value={newRole}
                     onChange={(v) => setNewRole(v as UserRole)}
                     options={[
-                      { value: 'member', label: 'member · 编辑与压测' },
-                      { value: 'viewer', label: 'viewer · 全站只读' },
-                      { value: 'admin', label: 'admin · 系统管理员' },
+                      { value: 'member', label: GLOBAL_ROLE_META.member.label, description: GLOBAL_ROLE_META.member.description },
+                      { value: 'viewer', label: GLOBAL_ROLE_META.viewer.label, description: GLOBAL_ROLE_META.viewer.description },
+                      { value: 'admin', label: GLOBAL_ROLE_META.admin.label, description: GLOBAL_ROLE_META.admin.description },
                     ]}
                   />
                 </div>
@@ -831,27 +899,33 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                 </div>
               </div>
 
-              {newRole !== 'admin' && projects.length > 0 && (
-                <div className="rounded-xl border border-line bg-surface-subtle/70 p-3 space-y-2.5">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <span className="font-medium text-fg flex items-center gap-1.5">
-                      <FolderKey className="w-3.5 h-3.5 text-tidal" /> 初始项目访问范围
-                    </span>
-                    <div role="radiogroup" aria-label="项目权限分配方式" className="inline-flex rounded-lg border border-line bg-surface p-0.5">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <label className="inline-flex items-center gap-2 text-fg cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={newMustChangePw}
+                    onChange={(e) => setNewMustChangePw(e.target.checked)}
+                  />
+                  <span>首次登录强制修改密码</span>
+                </label>
+                {newRole !== 'admin' && (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="font-medium text-fg-muted">新建/未配置项目默认策略</span>
+                    <div role="radiogroup" aria-label="默认项目可见策略" className="inline-flex rounded-[10px] border border-line bg-surface-subtle p-0.5">
                       {(
                         [
                           ['inherit', '按全局角色访问开放项目'],
-                          ['custom', '自定义每个项目的权限'],
+                          ['deny', '白名单隔离（仅明确授权项目）'],
                         ] as const
-                      ).map(([id, label]) => (
+                      ).map(([mode, label]) => (
                         <button
-                          key={id}
+                          key={mode}
                           type="button"
                           role="radio"
-                          aria-checked={createAclMode === id}
-                          onClick={() => setCreateAclMode(id)}
-                          className={`px-2.5 py-1 rounded-md font-medium ${
-                            createAclMode === id ? 'bg-sky-500/15 text-tidal' : 'text-fg-muted hover:text-fg'
+                          aria-checked={newDefaultAccess === mode}
+                          onClick={() => setNewDefaultAccess(mode)}
+                          className={`px-2.5 py-1 rounded-lg font-medium ${
+                            newDefaultAccess === mode ? 'bg-surface text-tidal shadow-xs' : 'text-fg-muted hover:text-fg'
                           }`}
                         >
                           {label}
@@ -859,27 +933,116 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                       ))}
                     </div>
                   </div>
+                )}
+              </div>
+
+              {newRole !== 'admin' && projects.length > 0 && (
+                <div className="rounded-xl border border-line bg-surface-subtle/70 p-3 space-y-2.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-medium text-fg flex items-center gap-1.5">
+                      <FolderKey className="w-3.5 h-3.5 text-tidal" /> 初始项目授权
+                    </span>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {createAclMode === 'custom' && (
+                        <div className="inline-flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next: Record<string, ProjectAccessRole> = {}
+                              for (const p of projects) next[p.id] = 'member'
+                              setNewProjectRoles(next)
+                            }}
+                            className="tg-btn-secondary !py-1 !px-2 !text-[11px]"
+                          >
+                            全部读写
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next: Record<string, ProjectAccessRole> = {}
+                              for (const p of projects) next[p.id] = 'viewer'
+                              setNewProjectRoles(next)
+                            }}
+                            className="tg-btn-secondary !py-1 !px-2 !text-[11px]"
+                          >
+                            全部只读
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              const next: Record<string, ProjectAccessRole> = {}
+                              for (const p of projects) next[p.id] = 'none'
+                              setNewProjectRoles(next)
+                            }}
+                            className="tg-btn-secondary !py-1 !px-2 !text-[11px]"
+                          >
+                            全部禁止
+                          </button>
+                        </div>
+                      )}
+                      <div role="radiogroup" aria-label="项目权限分配方式" className="inline-flex rounded-[10px] border border-line bg-surface p-0.5">
+                        {(
+                          [
+                            ['default', '暂不单独指定'],
+                            ['custom', '逐项目精细分配'],
+                          ] as const
+                        ).map(([id, label]) => (
+                          <button
+                            key={id}
+                            type="button"
+                            role="radio"
+                            aria-checked={createAclMode === id}
+                            onClick={() => setCreateAclMode(id)}
+                            className={`px-2.5 py-1 rounded-lg font-medium ${
+                              createAclMode === id ? 'bg-sky-500/15 text-tidal' : 'text-fg-muted hover:text-fg'
+                            }`}
+                          >
+                            {label}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
                   {createAclMode === 'custom' && (
                     <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
                       {projects.map((pr) => {
-                        const val = newProjectRoles[pr.id] || 'none'
+                        const val = newProjectRoles[pr.id] ?? ''
+                        const preview = computeEffectiveProjectAccess(
+                          newRole,
+                          newDefaultAccess,
+                          Boolean(pr.restricted),
+                          val
+                        )
                         return (
                           <div
                             key={pr.id}
-                            className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg border border-line bg-surface"
+                            className="flex items-center justify-between gap-2 px-2.5 py-2 rounded-xl border border-line bg-surface"
                           >
-                            <span className="truncate font-medium text-fg" title={pr.name}>
-                              {pr.name}
-                            </span>
-                            <div className="inline-flex rounded-md border border-line bg-surface-subtle p-0.5 shrink-0">
-                              {(['member', 'viewer', 'none'] as const).map((r) => (
+                            <div className="min-w-0">
+                              <div className="truncate font-medium text-fg" title={pr.name}>
+                                {pr.name}
+                              </div>
+                              <div className="flex items-center gap-1 mt-0.5 text-[10px]">
+                                <span
+                                  className={`px-1.5 py-px rounded-full border ${
+                                    preview.allowed
+                                      ? ROLE_BADGE_TONE[preview.effectiveRole || 'viewer']
+                                      : ROLE_BADGE_TONE.none
+                                  }`}
+                                >
+                                  生效: {preview.label}
+                                </span>
+                              </div>
+                            </div>
+                            <div className="inline-flex rounded-lg border border-line bg-surface-subtle p-0.5 shrink-0">
+                              {(['', 'member', 'viewer', 'none'] as const).map((r) => (
                                 <button
-                                  key={r}
+                                  key={r || 'default'}
                                   type="button"
                                   onClick={() =>
                                     setNewProjectRoles((prev) => ({ ...prev, [pr.id]: r }))
                                   }
-                                  className={`px-2 py-0.5 rounded text-[11px] font-medium ${
+                                  className={`px-2 py-0.5 rounded-md text-[11px] font-medium ${
                                     val === r
                                       ? r === 'none'
                                         ? 'bg-rose-600 text-white'
@@ -887,7 +1050,11 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                                       : 'text-fg-muted hover:text-fg'
                                   }`}
                                 >
-                                  {ACL_ROLE_LABELS[r]}
+                                  {r === ''
+                                    ? pr.restricted || newDefaultAccess === 'deny'
+                                      ? '未授权'
+                                      : '默认'
+                                    : PROJECT_ROLE_LABELS[r]}
                                 </button>
                               ))}
                             </div>
@@ -923,8 +1090,10 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                     const permOpen = permUid === u.id
                     const delArmed = confirm.armed === `del-${u.id}`
                     const totpArmed = confirm.armed === `totp-${u.id}`
-                    const pwArmed = confirm.armed === `pw-${u.id}`
                     const isLastAdmin = u.role === 'admin' && !u.disabled && totalEnabledAdmins <= 1
+                    const permDirty =
+                      permDefaultAccess !== permOrigDefaultAccess ||
+                      permItems.some((item) => (permDraft[item.project_id] ?? '') !== (permOrigDraft[item.project_id] ?? ''))
                     return (
                       <Fragment key={u.id}>
                         <tr className={resetOpen || permOpen ? 'bg-surface-subtle' : 'hover:bg-surface-hover'}>
@@ -934,18 +1103,23 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                               {u.username}
                             </span>
                             {isSelf && (
-                              <span className="ml-1.5 px-1.5 py-px rounded bg-sky-50 border border-sky-200 text-sky-800 text-[11px] font-medium">
+                              <span className="ml-1.5 px-1.5 py-px rounded bg-sky-500/12 border border-sky-400/40 text-tidal text-[11px] font-medium">
                                 当前账号
+                              </span>
+                            )}
+                            {u.must_change_password && (
+                              <span className="ml-1.5 px-1.5 py-px rounded bg-amber-500/12 border border-amber-400/40 text-amber-700 text-[11px] font-medium">
+                                待改密
                               </span>
                             )}
                           </td>
                           <td className="px-3 py-2">
                             {isSelf ? (
                               <span
-                                className={`inline-flex px-2 py-0.5 rounded border font-mono text-[11px] ${ROLE_BADGE[u.role] || ROLE_BADGE.viewer}`}
+                                className={`inline-flex px-2 py-0.5 rounded-full border text-[11px] font-medium ${ROLE_BADGE_TONE[u.role] || ROLE_BADGE_TONE.viewer}`}
                                 title="不能修改自己的角色"
                               >
-                                {u.role}
+                                {getGlobalRoleLabel(u.role)}
                               </span>
                             ) : pendingDemote?.user.id === u.id ? (
                               <div className="inline-flex items-center gap-1.5">
@@ -954,7 +1128,7 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                                   onClick={() => void applyRoleChange(u, pendingDemote.nextRole)}
                                   className="px-2 py-1 rounded-md bg-rose-600 text-white font-semibold text-[11px]"
                                 >
-                                  确认降级为 {pendingDemote.nextRole}？
+                                  确认降级为{getGlobalRoleLabel(pendingDemote.nextRole, true)}？
                                 </button>
                                 <button
                                   type="button"
@@ -980,9 +1154,9 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                                   void applyRoleChange(u, nextRole)
                                 }}
                                 options={[
-                                  { value: 'admin', label: 'admin', description: '系统管理员' },
-                                  { value: 'member', label: 'member', description: '编辑与压测' },
-                                  { value: 'viewer', label: 'viewer', description: '全站只读' },
+                                  { value: 'admin', label: GLOBAL_ROLE_META.admin.label, description: GLOBAL_ROLE_META.admin.description },
+                                  { value: 'member', label: GLOBAL_ROLE_META.member.label, description: GLOBAL_ROLE_META.member.description },
+                                  { value: 'viewer', label: GLOBAL_ROLE_META.viewer.label, description: GLOBAL_ROLE_META.viewer.description },
                                 ]}
                               />
                             )}
@@ -1141,13 +1315,52 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                               ) : (
                                 <div className="space-y-3">
                                   <div className="flex flex-wrap items-center justify-between gap-2">
-                                    <div className="font-semibold text-fg flex items-center gap-1.5">
-                                      <FolderKey className="w-3.5 h-3.5 text-tidal" />
-                                      <span>
-                                        {u.username} · 项目权限管控（全局角色：<code className="font-mono">{u.role}</code>）
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <span className="font-semibold text-fg flex items-center gap-1.5">
+                                        <FolderKey className="w-3.5 h-3.5 text-tidal" />
+                                        {u.username} · 项目权限管控（{getGlobalRoleLabel(u.role)}）
                                       </span>
+                                      <div role="radiogroup" aria-label="默认项目可见策略" className="inline-flex rounded-[10px] border border-line bg-surface p-0.5">
+                                        {(
+                                          [
+                                            ['inherit', '继承开放项目'],
+                                            ['deny', '白名单隔离'],
+                                          ] as const
+                                        ).map(([mode, label]) => (
+                                          <button
+                                            key={mode}
+                                            type="button"
+                                            role="radio"
+                                            aria-checked={permDefaultAccess === mode}
+                                            onClick={() => setPermDefaultAccess(mode)}
+                                            className={`px-2 py-0.5 rounded-lg text-[11px] font-medium ${
+                                              permDefaultAccess === mode
+                                                ? 'bg-sky-500/15 text-tidal'
+                                                : 'text-fg-muted hover:text-fg'
+                                            }`}
+                                          >
+                                            {label}
+                                          </button>
+                                        ))}
+                                      </div>
+                                      {permDirty && (
+                                        <span className="px-2 py-0.5 rounded-full border border-amber-400/50 bg-amber-500/12 text-amber-700 text-[11px] font-medium">
+                                          待保存
+                                        </span>
+                                      )}
                                     </div>
-                                    <div className="flex items-center gap-2">
+                                    <div className="flex flex-wrap items-center gap-2">
+                                      <button
+                                        type="button"
+                                        onClick={() => {
+                                          const allViewer: Record<string, ProjectAccessRole> = {}
+                                          for (const item of permItems) allViewer[item.project_id] = 'viewer'
+                                          setPermDraft(allViewer)
+                                        }}
+                                        className="tg-btn-secondary !py-1 !px-2 !text-[11px]"
+                                      >
+                                        全部设为只读
+                                      </button>
                                       <button
                                         type="button"
                                         onClick={() => {
@@ -1155,7 +1368,7 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                                           for (const item of permItems) allNone[item.project_id] = 'none'
                                           setPermDraft(allNone)
                                         }}
-                                        className="px-2 py-1 rounded-md border border-line bg-surface text-fg-muted hover:text-rose-700 text-[11px]"
+                                        className="tg-btn-secondary !py-1 !px-2 !text-[11px] hover:!text-rose-600"
                                       >
                                         全部禁止访问
                                       </button>
@@ -1166,9 +1379,9 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                                           for (const item of permItems) cleared[item.project_id] = ''
                                           setPermDraft(cleared)
                                         }}
-                                        className="px-2 py-1 rounded-md border border-line bg-surface text-fg-muted hover:text-tidal text-[11px]"
+                                        className="tg-btn-secondary !py-1 !px-2 !text-[11px]"
                                       >
-                                        全部恢复继承
+                                        全部恢复默认
                                       </button>
                                       <button
                                         type="button"
@@ -1183,10 +1396,21 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                                   <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-2">
                                     {permItems.map((item) => {
                                       const val = permDraft[item.project_id] ?? ''
+                                      const preview = computeEffectiveProjectAccess(
+                                        u.role,
+                                        permDefaultAccess,
+                                        item.restricted,
+                                        val
+                                      )
+                                      const rowChanged =
+                                        val !== (permOrigDraft[item.project_id] ?? '') ||
+                                        permDefaultAccess !== permOrigDefaultAccess
                                       return (
                                         <div
                                           key={item.project_id}
-                                          className="flex items-center justify-between gap-2 p-2.5 rounded-xl border border-line bg-surface"
+                                          className={`flex items-center justify-between gap-2 p-2.5 rounded-xl border bg-surface ${
+                                            rowChanged ? 'border-amber-400/70' : 'border-line'
+                                          }`}
                                         >
                                           <div className="min-w-0">
                                             <div className="font-semibold text-fg truncate" title={item.project_name}>
@@ -1197,13 +1421,13 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                                                 {item.restricted ? '私有白名单' : '开放项目'}
                                               </span>
                                               <span
-                                                className={`px-1.5 py-0.2 rounded-full border ${
-                                                  item.allowed
-                                                    ? ROLE_BADGE[item.effective_role] || ROLE_BADGE.viewer
-                                                    : ROLE_BADGE.none
+                                                className={`px-1.5 py-px rounded-full border ${
+                                                  preview.allowed
+                                                    ? ROLE_BADGE_TONE[preview.effectiveRole || 'viewer']
+                                                    : ROLE_BADGE_TONE.none
                                                 }`}
                                               >
-                                                生效: {item.allowed ? item.effective_role : '无权限'}
+                                                生效: {preview.label}
                                               </span>
                                             </div>
                                           </div>
@@ -1223,7 +1447,9 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                                                     : 'text-fg-muted hover:text-fg'
                                                 }`}
                                               >
-                                                {r === '' ? (item.restricted ? '未授权' : '继承') : ACL_ROLE_LABELS[r]}
+                                                {r === ''
+                                                  ? getProjectRoleLabel('', item.restricted || permDefaultAccess === 'deny')
+                                                  : PROJECT_ROLE_LABELS[r]}
                                               </button>
                                             ))}
                                           </div>
@@ -1244,7 +1470,7 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                                   e.preventDefault()
                                   void handleResetPassword(u)
                                 }}
-                                className="flex flex-wrap items-center justify-end gap-2"
+                                className="flex flex-wrap items-center justify-end gap-2.5"
                               >
                                 <span className="text-fg-muted">
                                   新密码 · <span className="font-mono text-fg">{u.username}</span>
@@ -1254,31 +1480,33 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                                     name={`reset_password_${u.id}`}
                                     ariaLabel={`${u.username} 的新密码`}
                                     value={resetPw}
-                                    onChange={(v) => {
-                                      setResetPw(v)
-                                      if (pwArmed) confirm.reset()
-                                    }}
+                                    onChange={setResetPw}
                                     placeholder={`至少 ${MIN_PASSWORD} 位`}
                                     autoFocus
                                     onCopy={() => void copyPassword('reset-pw', resetPw)}
                                     copied={copied === 'reset-pw'}
                                   />
                                 </div>
+                                <label className="inline-flex items-center gap-1.5 text-fg-muted cursor-pointer">
+                                  <input
+                                    type="checkbox"
+                                    checked={resetMustChangePw}
+                                    onChange={(e) => setResetMustChangePw(e.target.checked)}
+                                  />
+                                  <span>下次登录强制改密</span>
+                                </label>
                                 <button
                                   type="submit"
                                   disabled={resettingPw || resetPw.length < MIN_PASSWORD}
-                                  className={pwArmed ? 'tg-btn-primary !bg-rose-600' : 'tg-btn-primary'}
+                                  className="tg-btn-primary"
                                 >
-                                  <KeyRound className="w-3.5 h-3.5" /> {pwArmed ? '确认重置？' : '重置密码'}
+                                  <KeyRound className="w-3.5 h-3.5" /> {resettingPw ? '重置中…' : '确认重置密码'}
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => {
-                                    setResetUid(0)
-                                    confirm.reset()
-                                  }}
+                                  onClick={() => setResetUid(0)}
                                   aria-label="取消"
-                                  className="p-1.5 rounded text-fg-subtle hover:text-fg hover:bg-surface-hover"
+                                  className="p-1.5 rounded-lg text-fg-subtle hover:text-fg hover:bg-surface-hover"
                                 >
                                   <X className="w-3.5 h-3.5" />
                                 </button>
@@ -1766,16 +1994,16 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <Field label="类型">
-                <select
-                  name="sink_type"
+                <GlassSelect
+                  ariaLabel="指标外推类型"
                   disabled={!isAdmin}
                   value={sink.type || 'influxdb'}
-                  onChange={(e) => setSink({ ...sink, type: e.target.value })}
-                  className={`tg-select ${inputCls}`}
-                >
-                  <option value="influxdb">InfluxDB Line Protocol</option>
-                  <option value="prometheus_pushgateway">Prometheus Pushgateway</option>
-                </select>
+                  onChange={(v) => setSink({ ...sink, type: v })}
+                  options={[
+                    { value: 'influxdb', label: 'InfluxDB Line Protocol' },
+                    { value: 'prometheus_pushgateway', label: 'Prometheus Pushgateway' },
+                  ]}
+                />
               </Field>
               <Field label="写入 URL" className="md:col-span-2">
                 <input
@@ -1886,7 +2114,7 @@ export function GovernanceView({ currentUser, projects = [], onToast }: Props) {
                 <button
                   type="submit"
                   disabled={savingSink}
-                  className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded bg-primary hover:bg-primary-hover text-white font-medium disabled:opacity-50"
+                  className="tg-btn-primary"
                 >
                   <Save className="w-3.5 h-3.5" /> 保存外推配置
                 </button>

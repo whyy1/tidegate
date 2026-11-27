@@ -14,7 +14,7 @@ import (
 
 func cmdResetPassword(args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	fs := newFlagSet("reset-password", stderr)
-	dataDir := fs.String("data", envOr("TIDEGATE_DATA", "./data"), "数据目录")
+	dataDir := fs.String("data", envOr("TIDEGATE_DATA", defaultDataDir()), "数据目录")
 	username := fs.String("user", envOr(auth.AdminUserEnv, auth.DefaultAdminUsername), "要重置密码的用户名")
 	passwordFlag := fs.String("password", "", "直接指定新密码")
 	passwordFile := fs.String("password-file", "", "从文件读取新密码（默认从标准输入读取）")

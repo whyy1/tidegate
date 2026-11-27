@@ -22,28 +22,32 @@ import (
 )
 
 type userDTO struct {
-	ID                int64      `json:"id"`
-	Username          string     `json:"username"`
-	Role              auth.Role  `json:"role"`
-	TOTPEnabled       bool       `json:"totp_enabled"`
-	Disabled          bool       `json:"disabled,omitempty"`
-	ActiveSessions    int        `json:"active_sessions,omitempty"`
-	LastSeenAt        *time.Time `json:"last_seen_at,omitempty"`
-	CreatedAt         time.Time  `json:"created_at"`
-	PasswordChangedAt time.Time  `json:"password_changed_at"`
+	ID                   int64                     `json:"id"`
+	Username             string                    `json:"username"`
+	Role                 auth.Role                 `json:"role"`
+	TOTPEnabled          bool                      `json:"totp_enabled"`
+	MustChangePassword   bool                      `json:"must_change_password,omitempty"`
+	DefaultProjectAccess auth.DefaultProjectAccess `json:"default_project_access,omitempty"`
+	Disabled             bool                      `json:"disabled,omitempty"`
+	ActiveSessions       int                       `json:"active_sessions,omitempty"`
+	LastSeenAt           *time.Time                `json:"last_seen_at,omitempty"`
+	CreatedAt            time.Time                 `json:"created_at"`
+	PasswordChangedAt    time.Time                 `json:"password_changed_at"`
 }
 
 func toUserDTO(u *auth.User) userDTO {
 	return userDTO{
-		ID:                u.ID,
-		Username:          u.Username,
-		Role:              u.Role,
-		TOTPEnabled:       u.TOTPEnabled,
-		Disabled:          u.Disabled,
-		ActiveSessions:    u.ActiveSessions,
-		LastSeenAt:        u.LastSeenAt,
-		CreatedAt:         u.CreatedAt,
-		PasswordChangedAt: u.PasswordChangedAt,
+		ID:                   u.ID,
+		Username:             u.Username,
+		Role:                 u.Role,
+		TOTPEnabled:          u.TOTPEnabled,
+		MustChangePassword:   u.MustChangePassword,
+		DefaultProjectAccess: u.DefaultProjectAccess,
+		Disabled:             u.Disabled,
+		ActiveSessions:       u.ActiveSessions,
+		LastSeenAt:           u.LastSeenAt,
+		CreatedAt:            u.CreatedAt,
+		PasswordChangedAt:    u.PasswordChangedAt,
 	}
 }
 
@@ -305,6 +309,8 @@ func (s *Server) authorizeProject(w http.ResponseWriter, r *http.Request, pid st
 type projectDTO struct {
 	*store.Project
 	EffectiveRole auth.Role `json:"effective_role,omitempty"`
+	Restricted    bool      `json:"restricted,omitempty"`
+	CanDelete     bool      `json:"can_delete,omitempty"`
 }
 
 func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
@@ -313,17 +319,29 @@ func (s *Server) handleListProjects(w http.ResponseWriter, r *http.Request) {
 		writeError(w, err)
 		return
 	}
+	restrictedMap, _ := s.auth.ListRestrictedProjects(r.Context())
 	u, _ := auth.UserFromContext(r.Context())
 	tok, _ := auth.TokenFromContext(r.Context())
 	out := make([]projectDTO, 0, len(list))
 	for _, pr := range list {
 		if u == nil {
-			out = append(out, projectDTO{Project: pr})
+			out = append(out, projectDTO{Project: pr, Restricted: restrictedMap[pr.ID]})
 			continue
 		}
 		effRole, allowed, err := s.auth.ResolveProjectRole(r.Context(), u, tok, pr.ID)
 		if err == nil && allowed {
-			out = append(out, projectDTO{Project: pr, EffectiveRole: effRole})
+			canDel := u.Role.IsAdmin()
+			if !canDel {
+				if creatorID, cerr := s.auth.ProjectCreatedBy(r.Context(), pr.ID); cerr == nil && creatorID != 0 && creatorID == u.ID {
+					canDel = effRole.CanWrite()
+				}
+			}
+			out = append(out, projectDTO{
+				Project:       pr,
+				EffectiveRole: effRole,
+				Restricted:    restrictedMap[pr.ID],
+				CanDelete:     canDel,
+			})
 		}
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -334,22 +352,77 @@ func (s *Server) handleCreateProject(w http.ResponseWriter, r *http.Request) {
 		writeError(w, auth.ErrForbidden)
 		return
 	}
-	var in store.Project
-	if err := decodeJSON(w, r, &in); err != nil {
+	var body struct {
+		Name        string               `json:"name"`
+		Description string               `json:"description"`
+		Variables   store.KeyValueList   `json:"variables"`
+		Restricted  bool                 `json:"restricted"`
+		Members     []auth.ProjectMember `json:"members"`
+	}
+	if err := decodeJSON(w, r, &body); err != nil {
 		writeError(w, err)
 		return
 	}
+	in := store.Project{
+		Name:        body.Name,
+		Description: body.Description,
+		Variables:   body.Variables,
+	}
+	u, _ := auth.UserFromContext(r.Context())
+	if u, ok := auth.UserFromContext(r.Context()); ok && u != nil {
+		members := body.Members
+		if !u.Role.IsAdmin() && body.Restricted {
+			hasSelf := false
+			for i := range members {
+				if members[i].UserID == u.ID {
+					members[i].Role = auth.RoleMember
+					hasSelf = true
+					break
+				}
+			}
+			if !hasSelf {
+				members = append(members, auth.ProjectMember{UserID: u.ID, Role: auth.RoleMember})
+			}
+		}
+		body.Members = members
+	}
+
 	out, err := s.store.CreateProject(&in)
 	if err != nil {
 		writeError(w, err)
 		return
 	}
-	s.audit(r, "project.create", "project", out.ID, map[string]any{"name": out.Name})
-	writeJSON(w, http.StatusCreated, out)
+	var actorID int64
+	effRole := auth.RoleMember
+	if u != nil {
+		actorID = u.ID
+		effRole = u.Role
+		if tok, tokOK := auth.TokenFromContext(r.Context()); tokOK && tok != nil {
+			effRole = auth.EffectiveRole(u.Role, tok.Role)
+		}
+	}
+	if body.Restricted || len(body.Members) > 0 || actorID > 0 {
+		if _, aerr := s.auth.InitProjectACL(r.Context(), out.ID, actorID, body.Restricted, body.Members); aerr != nil {
+			_ = s.store.DeleteProject(out.ID, "")
+			writeError(w, aerr)
+			return
+		}
+	}
+	s.audit(r, "project.create", "project", out.ID, map[string]any{
+		"name":       out.Name,
+		"restricted": body.Restricted,
+	})
+	writeJSON(w, http.StatusCreated, projectDTO{
+		Project:       out,
+		EffectiveRole: effRole,
+		Restricted:    body.Restricted,
+		CanDelete:     true,
+	})
 }
 
 func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
-	pr, err := s.store.GetProject(r.PathValue("pid"))
+	pid := r.PathValue("pid")
+	pr, err := s.store.GetProject(pid)
 	if err != nil {
 		writeError(w, err)
 		return
@@ -357,6 +430,21 @@ func (s *Server) handleGetProject(w http.ResponseWriter, r *http.Request) {
 	var effRole auth.Role
 	if u, ok := auth.UserFromContext(r.Context()); ok && u != nil {
 		effRole = u.Role
+		canDel := u.Role.IsAdmin()
+		if !canDel {
+			if creatorID, cerr := s.auth.ProjectCreatedBy(r.Context(), pid); cerr == nil && creatorID != 0 && creatorID == u.ID {
+				canDel = effRole.CanWrite()
+			}
+		}
+		acl, _ := s.auth.GetProjectACL(r.Context(), pid)
+		restricted := acl != nil && acl.Restricted
+		writeJSON(w, http.StatusOK, projectDTO{
+			Project:       pr,
+			EffectiveRole: effRole,
+			Restricted:    restricted,
+			CanDelete:     canDel,
+		})
+		return
 	}
 	writeJSON(w, http.StatusOK, projectDTO{Project: pr, EffectiveRole: effRole})
 }
@@ -405,6 +493,17 @@ func (s *Server) handlePatchProject(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteProject(w http.ResponseWriter, r *http.Request) {
 	pid := r.PathValue("pid")
+	if u, ok := auth.UserFromContext(r.Context()); ok && u != nil && !u.Role.IsAdmin() {
+		creatorID, cerr := s.auth.ProjectCreatedBy(r.Context(), pid)
+		if cerr != nil {
+			writeError(w, cerr)
+			return
+		}
+		if creatorID == 0 || creatorID != u.ID {
+			writeError(w, newHTTPError(http.StatusForbidden, string(auth.CodeForbidden), "仅系统管理员或项目创建者可删除该项目"))
+			return
+		}
+	}
 	ver := deleteVersion(w, r)
 	if err := s.store.DeleteProject(pid, ver); err != nil {
 		writeError(w, err)
@@ -602,6 +701,9 @@ func (s *Server) handleImportProjectArchive(w http.ResponseWriter, r *http.Reque
 	if err != nil {
 		writeImportError(w, err)
 		return
+	}
+	if u, ok := auth.UserFromContext(r.Context()); ok && u != nil {
+		_, _ = s.auth.InitProjectACL(r.Context(), pr.ID, u.ID, false, nil)
 	}
 	s.audit(r, "project.import", "project", pr.ID, map[string]any{"name": pr.Name})
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -1530,11 +1632,25 @@ func (s *Server) handleRunHistogram(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+func isLoopbackClusterHost(host string) bool {
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	return auth.IsLoopback(host)
+}
+
 func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
+	rawClusterAddr := s.ctrl.ClusterAddr()
+	rawHost, _, _ := net.SplitHostPort(rawClusterAddr)
+	listenLoopback := strings.TrimSpace(s.opts.ClusterPublicAddr) == "" && isLoopbackClusterHost(rawHost)
+
 	clusterAddr := strings.TrimSpace(s.opts.ClusterPublicAddr)
 	if clusterAddr == "" {
-		clusterAddr = s.ctrl.ClusterAddr()
-		if host, port, err := net.SplitHostPort(clusterAddr); err == nil && (host == "" || host == "0.0.0.0" || host == "::") {
+		clusterAddr = rawClusterAddr
+		if host, port, err := net.SplitHostPort(clusterAddr); err == nil && (host == "" || host == "0.0.0.0" || host == "::" || isLoopbackClusterHost(host)) {
 			extHost := ""
 			if strings.TrimSpace(s.opts.PublicURL) != "" {
 				if u, perr := url.Parse(strings.TrimSpace(s.opts.PublicURL)); perr == nil && u.Hostname() != "" {
@@ -1548,17 +1664,22 @@ func (s *Server) handleSystemInfo(w http.ResponseWriter, r *http.Request) {
 					extHost = strings.Trim(r.Host, "[]")
 				}
 			}
-			if extHost != "" {
+			if extHost != "" && !isLoopbackClusterHost(extHost) {
 				clusterAddr = net.JoinHostPort(extHost, port)
+			} else if host == "" || host == "0.0.0.0" || host == "::" {
+				if extHost != "" {
+					clusterAddr = net.JoinHostPort(extHost, port)
+				}
 			}
 		}
 	}
 	res := map[string]any{
-		"version":                s.opts.Version,
-		"tls":                    s.guard.IsSecureRequest(r),
-		"runtime":                runtimeHint(),
-		"cluster_addr":           clusterAddr,
-		"cluster_ca_fingerprint": s.ctrl.ClusterCAFingerprint(),
+		"version":                 s.opts.Version,
+		"tls":                     s.guard.IsSecureRequest(r),
+		"runtime":                 runtimeHint(),
+		"cluster_addr":            clusterAddr,
+		"cluster_listen_loopback": listenLoopback,
+		"cluster_ca_fingerprint":  s.ctrl.ClusterCAFingerprint(),
 	}
 	if u, ok := auth.UserFromContext(r.Context()); ok && u.Role.IsAdmin() {
 		if exe, eerr := os.Executable(); eerr == nil && exe != "" {

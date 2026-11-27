@@ -15,12 +15,24 @@ import (
 
 // Event types pushed over the controller pub/sub hub and WebSocket API.
 const (
-	EventSnapshot  = "snapshot"
-	EventSys       = "sys"
-	EventRunStatus = "run_status"
-	EventAlert     = "alert"
-	EventAgents    = "agents"
+	EventSnapshot      = "snapshot"
+	EventSys           = "sys"
+	EventRunStatus     = "run_status"
+	EventAlert         = "alert"
+	EventAgents        = "agents"
+	EventAgentRejected = "agent_rejected"
 )
+
+// AgentRejectView describes a rejected remote agent handshake or enrollment attempt.
+type AgentRejectView struct {
+	RemoteAddr    string    `json:"remote_addr,omitempty"`
+	NodeName      string    `json:"node_name,omitempty"`
+	NodeVersion   string    `json:"node_version,omitempty"`
+	ServerVersion string    `json:"server_version,omitempty"`
+	Reason        string    `json:"reason,omitempty"`
+	Message       string    `json:"message"`
+	Time          time.Time `json:"time"`
+}
 
 // AgentInterface describes a network interface on a connected node.
 type AgentInterface struct {
@@ -54,15 +66,16 @@ type AgentView struct {
 
 // Event is one real-time notification emitted by the controller.
 type Event struct {
-	Type     string                `json:"type"`
-	RunID    string                `json:"run_id,omitempty"`
-	AgentID  string                `json:"agent_id,omitempty"`
-	Status   store.RunStatus       `json:"status,omitempty"`
-	Error    string                `json:"error,omitempty"`
-	Snapshot *metrics.SnapshotView `json:"snapshot,omitempty"`
-	Sys      json.RawMessage       `json:"sys,omitempty"`
-	Alert    *store.Alert          `json:"alert,omitempty"`
-	Agents   []AgentView           `json:"agents,omitempty"`
+	Type          string                `json:"type"`
+	RunID         string                `json:"run_id,omitempty"`
+	AgentID       string                `json:"agent_id,omitempty"`
+	Status        store.RunStatus       `json:"status,omitempty"`
+	Error         string                `json:"error,omitempty"`
+	Snapshot      *metrics.SnapshotView `json:"snapshot,omitempty"`
+	Sys           json.RawMessage       `json:"sys,omitempty"`
+	Alert         *store.Alert          `json:"alert,omitempty"`
+	Agents        []AgentView           `json:"agents,omitempty"`
+	AgentRejected *AgentRejectView      `json:"agent_rejected,omitempty"`
 }
 
 const subscriberQueueSize = 256

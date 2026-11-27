@@ -1,15 +1,39 @@
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
-import { Check, Copy, Cpu, Download, HardDrive, KeyRound, Network, Plus, Save, Server, Shield, Tags, Terminal, Trash2 } from 'lucide-react'
+import { AlertTriangle, Check, Copy, Cpu, HardDrive, KeyRound, Network, Plus, Save, Server, Shield, Tags, Terminal, Trash2 } from 'lucide-react'
 import { RollingNumber } from '../components/DropletFilter'
+import { LiquidCapsule } from '../components/LiquidCapsule'
 import { api, APIError } from '../lib/api'
 import { copyText } from '../lib/download'
-import type { AgentJoinToken, AgentView, JoinTokenCreated, SystemInfo } from '../lib/types'
+import type { AgentJoinToken, AgentRejectView, AgentView, JoinTokenCreated, SystemInfo } from '../lib/types'
+import { wsClient } from '../lib/ws'
 
 interface Props {
   agents: AgentView[]
   isAdmin?: boolean
   onAgentsRefresh: () => Promise<void>
   onToast: (kind: 'success' | 'error' | 'info', msg: string) => void
+}
+
+type CmdPlatform = 'linux' | 'powershell' | 'docker'
+
+function isLoopbackJoinAddr(addr: string): boolean {
+  const s = addr.trim().toLowerCase()
+  if (!s) return false
+  return (
+    s.startsWith('127.') ||
+    s.startsWith('localhost') ||
+    s.startsWith('[::1]') ||
+    s === '::1' ||
+    s.startsWith('0.0.0.0')
+  )
+}
+
+function shellArg(s: string): string {
+  return /^[\w.,=:/@+-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`
+}
+
+function psArg(s: string): string {
+  return /^[\w.,=:/\\@+-]+$/.test(s) ? s : `'${s.replace(/'/g, "''")}'`
 }
 
 function formatGiB(bytes: number): string {
@@ -41,10 +65,6 @@ function parseLabels(raw: string): { normalized: string; invalid: boolean } {
   return { normalized: pairs.join(','), invalid }
 }
 
-function shellArg(s: string): string {
-  return /^[\w.,=:/@+-]+$/.test(s) ? s : `'${s.replace(/'/g, `'\\''`)}'`
-}
-
 const bwInputFor = (ag: AgentView) => (ag.bandwidth_bps > 0 ? String(Math.round(ag.bandwidth_bps / 1e6)) : '0')
 const weightInputFor = (ag: AgentView) => String(ag.weight > 0 ? ag.weight : 1)
 
@@ -72,13 +92,18 @@ function useArmedConfirm() {
 
 export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }: Props) {
   const [sysInfo, setSysInfo] = useState<SystemInfo | null>(null)
+  const [joinAddrOverride, setJoinAddrOverride] = useState('')
+  const [cmdPlatform, setCmdPlatform] = useState<CmdPlatform>('linux')
+  const cmdTabsRef = useRef<HTMLDivElement | null>(null)
   const [joinTokens, setJoinTokens] = useState<AgentJoinToken[]>([])
   const [tokenName, setTokenName] = useState('')
+  const [nodeName, setNodeName] = useState('')
   const [tokenTTL, setTokenTTL] = useState(24)
   const [tokenSingleUse, setTokenSingleUse] = useState(true)
   const [tokenLabels, setTokenLabels] = useState('')
   const [creatingTok, setCreatingTok] = useState(false)
   const [createdTok, setCreatedTok] = useState<JoinTokenCreated | null>(null)
+  const [rejectAlerts, setRejectAlerts] = useState<AgentRejectView[]>([])
   const [bwInputs, setBwInputs] = useState<Record<string, string>>({})
   const [weightInputs, setWeightInputs] = useState<Record<string, string>>({})
   const [savingId, setSavingId] = useState('')
@@ -102,6 +127,20 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
   }, [isAdmin])
 
   useEffect(() => {
+    const unsub = wsClient.onEvent((ev) => {
+      if (ev.type === 'agents') {
+        void loadJoinTokens()
+      } else if (ev.type === 'agent_rejected' && ev.agent_rejected) {
+        const item = ev.agent_rejected
+        setRejectAlerts((prev) => [item, ...prev].slice(0, 5))
+        void loadJoinTokens()
+        onToast('error', `节点接入被拒：${item.message}`)
+      }
+    })
+    return unsub
+  }, [isAdmin, onToast])
+
+  useEffect(() => {
     setBwInputs((prev) => {
       const next = { ...prev }
       for (const ag of agents) {
@@ -118,12 +157,50 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
     })
   }, [agents])
 
+  const effectiveJoinAddr = (joinAddrOverride.trim() || sysInfo?.cluster_addr || '<控制器IP:7443>')
+  const showLoopbackWarning =
+    Boolean(sysInfo?.cluster_listen_loopback) || isLoopbackJoinAddr(effectiveJoinAddr)
   const labels = parseLabels(tokenLabels)
-  const fpFlag = sysInfo?.cluster_ca_fingerprint ? ` --ca-fingerprint ${sysInfo.cluster_ca_fingerprint}` : ''
-  const labelsFlag = labels.normalized ? ` --labels ${shellArg(labels.normalized)}` : ''
-  const joinCmd = sysInfo
-    ? `tidegate agent --join ${sysInfo.cluster_addr || '127.0.0.1:7443'} --token ${createdTok?.token || '<加入令牌>'} --cert-dir ./agent-certs${fpFlag}${labelsFlag}`
-    : `tidegate agent --join <控制器IP:7443> --token <加入令牌> --cert-dir ./agent-certs --ca-fingerprint <CA指纹>${labelsFlag}`
+
+  const buildCommand = (tokValue: string): string => {
+    const fp = sysInfo?.cluster_ca_fingerprint
+    const cleanName = nodeName.trim()
+    if (cmdPlatform === 'powershell') {
+      const parts = [
+        '.\\tidegate.exe agent',
+        `--join ${psArg(effectiveJoinAddr)}`,
+        `--token ${psArg(tokValue)}`,
+        '--cert-dir "$env:LOCALAPPDATA\\Tidegate\\agent-certs"',
+      ]
+      if (cleanName) parts.push(`--name ${psArg(cleanName)}`)
+      if (fp) parts.push(`--ca-fingerprint ${fp}`)
+      if (labels.normalized) parts.push(`--labels ${psArg(labels.normalized)}`)
+      return parts.join(' ')
+    }
+    if (cmdPlatform === 'docker') {
+      const envArgs = [
+        `-e TIDEGATE_JOIN=${shellArg(effectiveJoinAddr)}`,
+        `-e TIDEGATE_TOKEN=${shellArg(tokValue)}`,
+        '-e TIDEGATE_CERT_DIR=/certs',
+      ]
+      if (cleanName) envArgs.push(`-e TIDEGATE_NAME=${shellArg(cleanName)}`)
+      if (fp) envArgs.push(`-e TIDEGATE_CA_FINGERPRINT=${fp}`)
+      if (labels.normalized) envArgs.push(`-e TIDEGATE_LABELS=${shellArg(labels.normalized)}`)
+      return `docker run -d --name tidegate-agent --restart unless-stopped -v tidegate-agent-certs:/certs ${envArgs.join(' ')} tidegate:latest agent`
+    }
+    const parts = [
+      './tidegate agent',
+      `--join ${shellArg(effectiveJoinAddr)}`,
+      `--token ${shellArg(tokValue)}`,
+      '--cert-dir ~/.tidegate/agent-certs',
+    ]
+    if (cleanName) parts.push(`--name ${shellArg(cleanName)}`)
+    if (fp) parts.push(`--ca-fingerprint ${fp}`)
+    if (labels.normalized) parts.push(`--labels ${shellArg(labels.normalized)}`)
+    return parts.join(' ')
+  }
+
+  const joinCmd = buildCommand(createdTok?.token || '<加入令牌>')
   const canCopyCmd = Boolean(createdTok)
 
   const handleSaveSettings = async (agent: AgentView) => {
@@ -150,12 +227,7 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
     }
   }
 
-  const handleCreateJoinToken = async (e: FormEvent) => {
-    e.preventDefault()
-    if (!tokenName.trim()) {
-      onToast('error', '请输入令牌备注名称')
-      return
-    }
+  const issueJoinToken = async (copyCommandAfter = false) => {
     if (labels.invalid) {
       onToast('error', '预设标签格式应为 key=value，多个用逗号分隔')
       return
@@ -163,19 +235,33 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
     setCreatingTok(true)
     try {
       const res = await api.createJoinToken({
-        name: tokenName.trim(),
+        name: tokenName.trim() || nodeName.trim() || 'agent-join',
         ttl_hours: Math.max(1, Number(tokenTTL) || 24),
         single_use: tokenSingleUse,
       })
       setCreatedTok(res)
       setTokenName('')
       await loadJoinTokens()
+      if (copyCommandAfter) {
+        const cmd = buildCommand(res.token)
+        if (await copyText(cmd)) {
+          setCopiedCmd(true)
+          window.setTimeout(() => setCopiedCmd(false), 1500)
+          onToast('success', '已签发令牌并复制完整接入命令')
+          return
+        }
+      }
       onToast('success', '已签发加入令牌，复制命令到节点执行即可接入')
     } catch (err) {
       onToast('error', err instanceof APIError ? err.message : '签发加入令牌失败')
     } finally {
       setCreatingTok(false)
     }
+  }
+
+  const handleCreateJoinToken = async (e: FormEvent) => {
+    e.preventDefault()
+    await issueJoinToken(false)
   }
 
   const copyWithFeedback = async (text: string, done: (v: boolean) => void, msg: string) => {
@@ -209,25 +295,86 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
           <div className="flex flex-wrap items-center gap-2">
             {sysInfo && (
               <span className="tg-tabular font-mono text-[11px] text-fg-muted">
-                {sysInfo.version} · {sysInfo.cluster_addr}
+                控制端版本 {sysInfo.version} · {effectiveJoinAddr}
               </span>
             )}
-            <a
-              href={api.exportAgentCAPEMUrl()}
-              download="tidegate-cluster-ca.pem"
-              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium"
+            <div
+              ref={cmdTabsRef}
+              role="tablist"
+              aria-label="运行环境命令"
+              className="relative tg-tablist inline-flex items-center gap-0.5 rounded-[10px] border border-line bg-surface-subtle p-0.5"
             >
-              <Download className="w-3.5 h-3.5 text-tidal" /> 下载 CA (.pem)
-            </a>
+              <LiquidCapsule containerRef={cmdTabsRef} activeId={cmdPlatform} className="rounded-lg" />
+              {(
+                [
+                  { id: 'linux' as const, label: 'Linux / macOS' },
+                  { id: 'powershell' as const, label: 'Windows PowerShell' },
+                  { id: 'docker' as const, label: 'Docker' },
+                ] as const
+              ).map((tab) => {
+                const selected = cmdPlatform === tab.id
+                return (
+                  <button
+                    key={tab.id}
+                    type="button"
+                    role="tab"
+                    data-liq-id={tab.id}
+                    aria-selected={selected}
+                    onClick={() => setCmdPlatform(tab.id)}
+                    className={`relative z-10 px-2.5 py-1 rounded-lg font-semibold whitespace-nowrap transition-colors ${
+                      selected ? 'text-tidal' : 'text-fg-muted hover:text-fg'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                )
+              })}
+            </div>
           </div>
         </div>
+
+        {showLoopbackWarning && (
+          <div className="px-3 py-2 rounded-[10px] border border-amber-400/55 bg-amber-500/12 text-amber-800 flex flex-wrap items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-500 shrink-0" />
+            <span className="flex-1 min-w-0 leading-relaxed">
+              {sysInfo?.cluster_listen_loopback
+                ? '控制器当前集群端口仅监听回环地址（127.0.0.1），跨机器节点无法接入；请改用 --cluster-listen 0.0.0.0:7443 启动，并在右侧填入控制端对外 IP:7443。'
+                : '当前接入地址为本机回环（localhost / 127.0.0.1），远程机器执行时请在右侧填入控制端局域网或公网 IP:7443。'}
+            </span>
+          </div>
+        )}
+
+        {rejectAlerts.length > 0 && (
+          <div className="px-3 py-2 rounded-[10px] border border-rose-400/55 bg-rose-500/12 text-rose-700 space-y-1">
+            <div className="flex items-center justify-between gap-2 font-semibold">
+              <span className="flex items-center gap-1.5">
+                <AlertTriangle className="w-3.5 h-3.5 text-rose-500 shrink-0" /> 最近节点握手拒接诊断
+              </span>
+              <button
+                type="button"
+                onClick={() => setRejectAlerts([])}
+                className="text-[11px] underline hover:no-underline"
+              >
+                清除提醒
+              </button>
+            </div>
+            {rejectAlerts.map((al, i) => (
+              <div key={`${al.time}-${i}`} className="font-mono text-[11px] flex flex-wrap items-center gap-x-2">
+                <span>[{new Date(al.time).toLocaleTimeString()}]</span>
+                <span>{al.node_name || al.remote_addr || '未知节点'}</span>
+                {al.node_version && <span>({al.node_version})</span>}
+                <span>· {al.message}</span>
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="space-y-3">
           <div className="grid grid-cols-1 xl:grid-cols-12 gap-3 items-start">
             {isAdmin && (
               <form
                 onSubmit={handleCreateJoinToken}
-                className="xl:col-span-5 grid grid-cols-[1fr_auto] gap-2 p-2.5 rounded-xl border border-line bg-surface-subtle"
+                className="xl:col-span-5 grid grid-cols-2 gap-2 p-3 rounded-xl border border-line bg-surface-subtle"
               >
                 <div className="col-span-2 flex flex-wrap items-center gap-2">
                   <input
@@ -237,8 +384,8 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
                     autoComplete="off"
                     value={tokenName}
                     onChange={(e) => setTokenName(e.target.value)}
-                    placeholder="备注，如 perf-node-02"
-                    className="flex-1 min-w-[140px] px-2.5 py-1.5 border border-line-strong rounded bg-surface text-fg"
+                    placeholder="备注（可选，默认 agent-join）"
+                    className="flex-1 min-w-[140px] px-2.5 py-1.5 border border-line-strong rounded-[10px] bg-surface text-fg"
                   />
                   <label className="inline-flex items-center gap-1 text-fg-muted">
                     <input
@@ -249,7 +396,7 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
                       max={8760}
                       value={tokenTTL}
                       onChange={(e) => setTokenTTL(Math.max(1, Number(e.target.value) || 24))}
-                      className="tg-tabular w-16 px-2 py-1.5 border border-line-strong rounded font-mono bg-surface text-fg"
+                      className="tg-tabular w-16 px-2 py-1.5 border border-line-strong rounded-[10px] font-mono bg-surface text-fg"
                     />
                     <span>小时</span>
                   </label>
@@ -258,8 +405,21 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
                     <span>单次</span>
                   </label>
                 </div>
+                <input
+                  name="node_name"
+                  aria-label="节点名称"
+                  type="text"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  value={nodeName}
+                  onChange={(e) => setNodeName(e.target.value)}
+                  placeholder="节点名 --name（可选）"
+                  className="w-full px-2.5 py-1.5 border border-line-strong rounded-[10px] bg-surface text-fg font-mono"
+                />
                 <label className="relative min-w-0">
-                  <Tags className="w-3.5 h-3.5 text-fg-subtle absolute left-2 top-1/2 -translate-y-1/2 pointer-events-none" />
+                  <Tags className="w-3.5 h-3.5 text-fg-subtle absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                   <input
                     name="labels"
                     aria-label="预设标签"
@@ -270,42 +430,68 @@ export function AgentsView({ agents, isAdmin = false, onAgentsRefresh, onToast }
                     spellCheck={false}
                     value={tokenLabels}
                     onChange={(e) => setTokenLabels(e.target.value)}
-                    placeholder="预设标签 zone=sh,tier=edge"
+                    placeholder="标签 zone=sh,tier=edge"
                     aria-invalid={labels.invalid || undefined}
-                    className={`w-full pl-7 pr-2.5 py-1.5 border rounded bg-surface text-fg font-mono ${
+                    className={`w-full pl-8 pr-2.5 py-1.5 border rounded-[10px] bg-surface text-fg font-mono ${
                       labels.invalid ? 'border-rose-400 focus:outline-rose-500' : 'border-line-strong'
                     }`}
                   />
                 </label>
-                <button
-                  type="submit"
-                  disabled={creatingTok}
-                  className="inline-flex items-center gap-1 px-3 py-1.5 rounded bg-sky-600 hover:bg-sky-solid text-white font-medium disabled:opacity-50"
-                >
-                  <Plus className="w-3.5 h-3.5" /> 签发令牌
-                </button>
+                <div className="col-span-2 flex flex-wrap items-center justify-end gap-2">
+                  <button
+                    type="submit"
+                    disabled={creatingTok}
+                    className="tg-btn-secondary"
+                  >
+                    <Plus className="w-3.5 h-3.5" /> 仅签发令牌
+                  </button>
+                  <button
+                    type="button"
+                    disabled={creatingTok}
+                    onClick={() => void issueJoinToken(true)}
+                    className="tg-btn-primary"
+                  >
+                    <KeyRound className="w-3.5 h-3.5" /> {creatingTok ? '生成中…' : '一键签发并复制命令'}
+                  </button>
+                </div>
               </form>
             )}
 
             <div className={`${isAdmin ? 'xl:col-span-7' : 'xl:col-span-12'} space-y-2 min-w-0`}>
-              <div className="flex items-center gap-2 tg-code-surface px-3 py-2 rounded-lg font-mono text-xs">
+              <label className="flex flex-wrap items-center gap-2">
+                <span className="text-fg-muted font-medium shrink-0">控制器接入地址</span>
+                <input
+                  name="cluster_join_addr"
+                  type="text"
+                  autoComplete="off"
+                  autoCorrect="off"
+                  autoCapitalize="none"
+                  spellCheck={false}
+                  value={joinAddrOverride}
+                  onChange={(e) => setJoinAddrOverride(e.target.value)}
+                  placeholder={sysInfo?.cluster_addr || '192.168.1.10:7443'}
+                  className="flex-1 min-w-[200px] px-2.5 py-1.5 border border-line-strong rounded-[10px] bg-surface text-fg font-mono"
+                />
+              </label>
+
+              <div className="flex items-center gap-2 tg-code-surface px-3 py-2.5 rounded-[10px] font-mono text-xs">
                 <code className="flex-1 min-w-0 overflow-x-auto tg-scroller-dark whitespace-nowrap text-sky-100">{joinCmd}</code>
                 <button
                   type="button"
                   disabled={!canCopyCmd}
                   title={canCopyCmd ? '复制接入命令' : '签发令牌后可复制'}
                   onClick={() => void copyWithFeedback(joinCmd, setCopiedCmd, '已复制节点接入命令')}
-                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded bg-white/15 hover:bg-white/25 text-white shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/15"
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-white/15 hover:bg-white/25 text-white shrink-0 disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-white/15"
                 >
                   {copiedCmd ? <Check className="w-3.5 h-3.5" /> : <Copy className="w-3.5 h-3.5" />}
                   复制
                 </button>
               </div>
               {sysInfo?.cluster_ca_fingerprint && (
-                <div className="flex items-center gap-2 px-3 py-1.5 rounded-lg border border-sky-200 bg-sky-50 text-sky-900 font-mono text-[11px] min-w-0">
-                  <Shield className="w-3.5 h-3.5 text-sky-600 shrink-0" />
+                <div className="flex items-center gap-2 px-3 py-1.5 rounded-[10px] border border-sky-400/35 bg-sky-500/10 text-fg font-mono text-[11px] min-w-0">
+                  <Shield className="w-3.5 h-3.5 text-tidal shrink-0" />
                   <span className="font-sans font-medium shrink-0">CA 指纹</span>
-                  <span className="truncate select-all">{sysInfo.cluster_ca_fingerprint}</span>
+                  <span className="truncate select-all text-fg-muted">{sysInfo.cluster_ca_fingerprint}</span>
                 </div>
               )}
             </div>

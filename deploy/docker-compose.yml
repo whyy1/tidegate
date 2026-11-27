@@ -88,6 +88,8 @@ services:
     # 在 Linux 压测发压机上运行分布式节点时，推荐启用宿主机网络避免容器 NAT 端口耗尽与额外转发开销：
     # network_mode: host
     # 启用 --profile cluster 前请先设置环境变量 TIDEGATE_CLUSTER_TOKEN=<强随机令牌>
+    volumes:
+      - tidegate-agent-certs:/certs
     environment:
       # 控制器集群 gRPC 地址（host:port，例：tidegate:7443 或 192.168.1.10:7443）
       TIDEGATE_JOIN: tidegate:7443
@@ -95,9 +97,8 @@ services:
       TIDEGATE_TOKEN: ${TIDEGATE_CLUSTER_TOKEN:-}
       # 节点在控制台显示的名称（默认取主机名）
       TIDEGATE_NAME: docker-agent-1
-      # 推荐生产环境持久化 mTLS 节点证书并绑定 CA 指纹与调度标签：
-      # mTLS 节点证书持久化目录（注意 read_only 容器下须挂载可写卷，例：/data/agent-certs）
-      # TIDEGATE_CERT_DIR: /data/agent-certs
+      # mTLS 节点证书持久化目录（已挂载持久卷 tidegate-agent-certs 到 /certs，支持重启自动续连）
+      TIDEGATE_CERT_DIR: /certs
       # 控制器 Cluster CA 的 64 位 SHA-256 十六进制指纹（防止 MITM）
       # TIDEGATE_CA_FINGERPRINT: <控制台显示的64位CA_SHA256指纹>
       # 节点调度标签（逗号分隔 key=value，用于场景 node_selector 匹配）
@@ -114,3 +115,4 @@ services:
 
 volumes:
   tidegate-data: {}
+  tidegate-agent-certs: {}

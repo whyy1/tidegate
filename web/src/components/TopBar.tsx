@@ -2,6 +2,7 @@ import { Bot, FolderCog, FolderKanban, Layers, Play, Plus, Search, Server } from
 import type { AccountModalTab } from './AccountModal'
 import { GlassSelect } from './GlassSelect'
 import { RollingNumber } from './DropletFilter'
+import { getGlobalRoleLabel } from '../lib/roles'
 import type { AgentView, Environment, Project, User } from '../lib/types'
 import { TempVarsPopover } from './TempVarsPopover'
 import { ThemeToggle } from './ThemeToggle'
@@ -43,13 +44,8 @@ interface Props {
 const chipCls =
   'h-7 items-center gap-1.5 rounded-full border border-line bg-surface-subtle px-2.5 text-xs text-fg-muted hover:bg-surface-hover hover:text-fg transition-colors'
 
-const ROLE_BADGE: Record<string, string> = {
-  admin: '管理员',
-  member: '读写',
-  viewer: '只读',
-}
-
 export function TopBar({
+  user,
   projects,
   activeProject,
   environments,
@@ -72,11 +68,12 @@ export function TopBar({
 }: Props) {
   const activeEnv = environments.find((e) => e.id === activeEnvId) || null
   const linkState = wsConnected && agents.length > 0 ? 'ok' : wsConnected ? 'idle' : 'down'
+  const canCreateProject = user.role !== 'viewer'
 
   const projectOptions = projects.map((p) => ({
     value: p.id,
     label: p.name,
-    badge: p.effective_role ? ROLE_BADGE[p.effective_role] || p.effective_role : undefined,
+    badge: p.effective_role ? getGlobalRoleLabel(p.effective_role, true) : undefined,
     description: p.description || undefined,
   }))
 
@@ -107,8 +104,8 @@ export function TopBar({
             icon={<FolderKanban className="w-3.5 h-3.5 text-sky-600" />}
             className="max-w-[84px] sm:max-w-[180px] min-w-0"
             footerAction={{
-              label: '项目管理与新建…',
-              icon: <Plus className="w-3.5 h-3.5" />,
+              label: canCreateProject ? '项目管理与新建…' : '查看项目列表…',
+              icon: canCreateProject ? <Plus className="w-3.5 h-3.5" /> : <FolderKanban className="w-3.5 h-3.5" />,
               onClick: onOpenProjectModal,
             }}
           />

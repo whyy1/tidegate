@@ -23,7 +23,7 @@ import (
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
-var version = "0.1.0-dev"
+var version = "0.1.0"
 
 const usage = `Tidegate：API 管理与压测一体化工具
 

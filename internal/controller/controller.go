@@ -243,6 +243,20 @@ func New(ctx context.Context, opts Options) (*Controller, error) {
 			return opts.ClusterToken != "" && cluster.TokenEqual(tok, opts.ClusterToken)
 		},
 		Handler: &clusterHandler{ctrl: c},
+		OnReject: func(info cluster.RejectInfo) {
+			c.hub.publish(Event{
+				Type: EventAgentRejected,
+				AgentRejected: &AgentRejectView{
+					RemoteAddr:    info.RemoteAddr,
+					NodeName:      info.NodeName,
+					NodeVersion:   info.NodeVersion,
+					ServerVersion: info.ServerVersion,
+					Reason:        string(info.Reason),
+					Message:       info.Message,
+					Time:          info.Time,
+				},
+			})
+		},
 		Logf: func(format string, args ...any) {
 			log.Info(fmt.Sprintf(format, args...))
 		},

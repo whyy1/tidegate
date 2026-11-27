@@ -88,6 +88,12 @@ var migrations = [][]string{
 		`ALTER TABLE auth_tokens ADD COLUMN rate_per_min INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE auth_tokens ADD COLUMN last_used_addr TEXT NOT NULL DEFAULT ''`,
 	},
+	// Version 6: onboarding force password change, default project access policy, and project creator tracking.
+	{
+		`ALTER TABLE auth_users ADD COLUMN must_change_password INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE auth_users ADD COLUMN default_project_access TEXT NOT NULL DEFAULT 'inherit'`,
+		`ALTER TABLE auth_project_acl ADD COLUMN created_by INTEGER NOT NULL DEFAULT 0`,
+	},
 }
 
 const schemaVersionKey = "schema_version"

@@ -27,6 +27,7 @@ import {
 import { api, APIError } from '../lib/api'
 import { copyText, downloadText, fileStamp } from '../lib/download'
 import { qrToDataURL } from '../lib/qrcode'
+import { getGlobalRoleLabel, ROLE_BADGE_TONE } from '../lib/roles'
 import { setPreference, useColorScheme, type ResolvedScheme, type SchemePreference } from '../lib/theme'
 import { useNativeDialog } from '../lib/useNativeDialog'
 import type {
@@ -42,6 +43,7 @@ import type {
   User,
   UserRole,
 } from '../lib/types'
+import { GlassSelect } from './GlassSelect'
 import { LiquidCapsule } from './LiquidCapsule'
 
 export type AccountModalTab = 'sessions' | 'tokens' | 'totp' | 'mcp' | 'password' | 'appearance'
@@ -62,12 +64,10 @@ interface Props {
 // Shared styles
 
 const inputCls =
-  'px-2.5 py-1.5 rounded-md border border-line-strong bg-surface text-fg placeholder:text-fg-subtle focus:border-tidal focus:outline-none'
-const btnSecondary =
-  'inline-flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-md border border-line-strong bg-surface hover:bg-surface-hover text-fg font-medium disabled:opacity-50'
-const btnPrimary =
-  'inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-md bg-primary hover:bg-primary-hover text-white font-medium disabled:opacity-50'
-const badge = 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] leading-4 border'
+  'px-2.5 py-1.5 rounded-[10px] border border-line-strong bg-surface text-fg placeholder:text-fg-subtle focus:border-tidal focus:outline-none'
+const btnSecondary = 'tg-btn-secondary'
+const btnPrimary = 'tg-btn-primary'
+const badge = 'inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full text-[11px] leading-4 border'
 
 const SCOPES: { id: string; desc: string; adminOnly?: boolean }[] = [
   { id: 'read', desc: '只读查询' },
@@ -737,8 +737,8 @@ export function AccountModal({
             <div className="flex items-center gap-2.5 min-w-0">
               <h2 className="text-sm font-semibold text-fg shrink-0">账号与令牌</h2>
               <span className="text-xs font-mono text-fg-muted truncate">{user.username}</span>
-              <span className="px-2 py-0.5 rounded-full bg-sky-500/12 text-tidal font-mono text-[11px] font-medium">
-                {user.role}
+              <span className={`px-2 py-0.5 rounded-full border text-[11px] font-medium ${ROLE_BADGE_TONE[user.role]}`}>
+                {getGlobalRoleLabel(user.role)}
               </span>
               {user.totp_enabled && (
                 <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/12 text-emerald-700 text-[11px] font-medium">
@@ -869,31 +869,30 @@ export function AccountModal({
                       placeholder="自动化流水线 / MCP 客户端"
                       className={`${inputCls} flex-1 min-w-[12rem]`}
                     />
-                    <select
-                      aria-label="角色"
+                    <GlassSelect
+                      ariaLabel="令牌角色"
                       value={tokRole}
-                      onChange={(e) => setTokRole(e.target.value as UserRole)}
-                      className={`tg-select ${inputCls} font-mono`}
-                    >
-                      {allowedTokenRoles.map((r) => (
-                        <option key={r} value={r}>
-                          {r}
-                        </option>
-                      ))}
-                    </select>
-                    <select
-                      aria-label="有效期"
-                      value={tokTTLDays}
-                      onChange={(e) => setTokTTLDays(Number(e.target.value))}
-                      className={`tg-select ${inputCls} tg-tabular`}
-                    >
-                      <option value={7}>7 天</option>
-                      <option value={30}>30 天</option>
-                      <option value={90}>90 天</option>
-                      <option value={365}>365 天</option>
-                      <option value={-1}>自定义天数</option>
-                      <option value={0}>长期有效</option>
-                    </select>
+                      onChange={(v) => setTokRole(v as UserRole)}
+                      className="min-w-[118px]"
+                      options={allowedTokenRoles.map((r) => ({
+                        value: r,
+                        label: getGlobalRoleLabel(r, true),
+                      }))}
+                    />
+                    <GlassSelect
+                      ariaLabel="令牌有效期"
+                      value={String(tokTTLDays)}
+                      onChange={(v) => setTokTTLDays(Number(v))}
+                      className="min-w-[110px]"
+                      options={[
+                        { value: '7', label: '7 天' },
+                        { value: '30', label: '30 天' },
+                        { value: '90', label: '90 天' },
+                        { value: '365', label: '365 天' },
+                        { value: '-1', label: '自定义天数' },
+                        { value: '0', label: '长期有效' },
+                      ]}
+                    />
                     {tokTTLDays === -1 && (
                       <input
                         type="number"
@@ -1275,23 +1274,22 @@ export function AccountModal({
                       </button>
                     ))}
                   </div>
-                  <label className="flex items-center gap-1.5 flex-1 min-w-[14rem]">
+                  <div className="flex items-center gap-1.5 flex-1 min-w-[14rem]">
                     <span className="text-fg-muted shrink-0">令牌</span>
-                    <select
+                    <GlassSelect
+                      ariaLabel="选择 MCP 令牌"
                       value={selectedMcpToken?.id || ''}
-                      onChange={(e) => setMcpTokenId(e.target.value)}
                       disabled={mcpTokens.length === 0}
-                      className={`tg-select ${inputCls} flex-1 min-w-0 font-mono disabled:opacity-60`}
-                    >
-                      {mcpTokens.length === 0 && <option value="">{loadingTokens ? '加载中…' : '无可用 MCP 令牌'}</option>}
-                      {mcpTokens.map((t) => (
-                        <option key={t.id} value={t.id}>
-                          {t.name} · {t.prefix}… · {t.role}
-                          {plaintexts[t.id] ? ' · 新' : ''}
-                        </option>
-                      ))}
-                    </select>
-                  </label>
+                      onChange={setMcpTokenId}
+                      placeholder={loadingTokens ? '加载中…' : '无可用 MCP 令牌'}
+                      className="flex-1 min-w-0"
+                      options={mcpTokens.map((t) => ({
+                        value: t.id,
+                        label: `${t.name} · ${t.prefix}…`,
+                        badge: getGlobalRoleLabel(t.role, true),
+                      }))}
+                    />
+                  </div>
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2 rounded-xl border border-line bg-surface-subtle px-3 py-2">

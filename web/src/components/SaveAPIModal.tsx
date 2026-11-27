@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type FormEvent } from 'react'
 import { Save, X } from 'lucide-react'
 import type { TreeNode } from '../lib/types'
 import { useNativeDialog } from '../lib/useNativeDialog'
+import { GlassSelect } from './GlassSelect'
 
 interface Props {
   open: boolean
@@ -25,7 +26,7 @@ function collectFolderOptions(nodes: TreeNode[], prefix = ''): Array<{ id: strin
 }
 
 const fieldCls =
-  'w-full px-3 py-1.5 border border-line-strong rounded-md bg-surface text-fg focus:border-sky-500 focus:outline-none'
+  'w-full px-3 py-1.5 border border-line-strong rounded-[10px] bg-surface text-fg focus:border-sky-500 focus:outline-none'
 
 export function SaveAPIModal({ open, initialName, initialFolderId, treeNodes, onClose, onConfirm }: Props) {
   const ref = useNativeDialog(open, onClose)
@@ -103,39 +104,24 @@ export function SaveAPIModal({ open, initialName, initialFolderId, treeNodes, on
               />
             </div>
             <div>
-              <label htmlFor="tg-save-api-folder" className="block font-medium text-fg-muted mb-1">
-                存放目录
-              </label>
-              <select
-                id="tg-save-api-folder"
-                name="api-folder"
+              <span className="block font-medium text-fg-muted mb-1">存放目录</span>
+              <GlassSelect
+                ariaLabel="存放目录"
                 value={folderId}
-                onChange={(e) => setFolderId(e.target.value)}
-                className={`tg-select ${fieldCls}`}
-              >
-                <option value="">根目录</option>
-                {folders.map((f) => (
-                  <option key={f.id} value={f.id}>
-                    {f.label}
-                  </option>
-                ))}
-              </select>
+                onChange={setFolderId}
+                options={[
+                  { value: '', label: '根目录' },
+                  ...folders.map((f) => ({ value: f.id, label: f.label })),
+                ]}
+              />
             </div>
           </div>
 
           <footer className="tg-dialog-footer">
-            <button
-              type="button"
-              onClick={onClose}
-              className="px-3 py-1.5 rounded-md border border-line-strong bg-surface text-fg hover:bg-surface-hover"
-            >
+            <button type="button" onClick={onClose} className="tg-btn-secondary">
               取消
             </button>
-            <button
-              type="submit"
-              disabled={busy}
-              className="inline-flex items-center gap-1.5 px-4 py-1.5 rounded-md bg-primary hover:bg-primary-hover text-white font-medium disabled:opacity-50"
-            >
+            <button type="submit" disabled={busy} className="tg-btn-primary">
               <Save className="w-3.5 h-3.5" /> 保存
             </button>
           </footer>

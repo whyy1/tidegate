@@ -14,6 +14,7 @@ import type {
   DebugAPIResponse,
   DebugRecord,
   DebugRunResult,
+  DefaultProjectAccess,
   EffectiveAPIPreview,
   Environment,
   FilePreview,
@@ -183,8 +184,13 @@ export const api = {
       method: 'PUT',
       jsonBody: payload,
     }),
-  createProject: (payload: { name: string; description?: string; variables?: KeyValue[] }) =>
-    request<Project>('/api/v1/projects', { method: 'POST', jsonBody: payload }),
+  createProject: (payload: {
+    name: string
+    description?: string
+    variables?: KeyValue[]
+    restricted?: boolean
+    members?: Array<{ user_id: number; role: 'member' | 'viewer' | 'none' }>
+  }) => request<Project>('/api/v1/projects', { method: 'POST', jsonBody: payload }),
   getProject: (pid: string) => request<Project>(`/api/v1/projects/${encodeURIComponent(pid)}`),
   patchProject: (
     pid: string,
@@ -542,22 +548,35 @@ export const api = {
 
   // Governance: Users, Project Permissions, Security Policy, Metrics Sink & Audit Logs
   listUsers: async () => (await request<User[] | null>('/api/v1/users')) || [],
-  createUser: (body: { username: string; password: string; role: UserRole }) =>
-    request<{ user: User }>('/api/v1/users', { method: 'POST', jsonBody: body }),
+  createUser: (body: {
+    username: string
+    password: string
+    role: UserRole
+    must_change_password?: boolean
+    default_project_access?: DefaultProjectAccess
+    project_overrides?: Record<string, ProjectAccessRole>
+  }) => request<{ user: User }>('/api/v1/users', { method: 'POST', jsonBody: body }),
   patchUser: (id: number, body: { role?: UserRole; disabled?: boolean }) =>
     request<{ user: User }>(`/api/v1/users/${id}`, { method: 'PATCH', jsonBody: body }),
   adminRevokeUserSessions: (id: number) =>
     request<{ revoked: number }>(`/api/v1/users/${id}/sessions`, { method: 'DELETE' }),
   getUserProjects: (id: number) => request<UserProjectsResponse>(`/api/v1/users/${id}/projects`),
-  putUserProjects: (id: number, overrides: Record<string, ProjectAccessRole>) =>
+  putUserProjects: (
+    id: number,
+    overrides: Record<string, ProjectAccessRole>,
+    defaultProjectAccess?: DefaultProjectAccess
+  ) =>
     request<UserProjectsResponse>(`/api/v1/users/${id}/projects`, {
       method: 'PUT',
-      jsonBody: { overrides },
+      jsonBody: defaultProjectAccess ? { default_project_access: defaultProjectAccess, overrides } : { overrides },
     }),
   deleteUser: (id: number) => request<void>(`/api/v1/users/${id}`, { method: 'DELETE' }),
   adminResetUserTOTP: (id: number) => request<void>(`/api/v1/users/${id}/totp`, { method: 'DELETE' }),
-  adminResetUserPassword: (id: number, password: string) =>
-    request<void>(`/api/v1/users/${id}/password`, { method: 'POST', jsonBody: { password } }),
+  adminResetUserPassword: (id: number, password: string, mustChangePassword = false) =>
+    request<void>(`/api/v1/users/${id}/password`, {
+      method: 'POST',
+      jsonBody: { password, must_change_password: mustChangePassword },
+    }),
   getSecurityPolicy: () => request<SecurityPolicy>('/api/v1/settings/security'),
   putSecurityPolicy: (pol: SecurityPolicy) =>
     request<SecurityPolicy>('/api/v1/settings/security', { method: 'PUT', jsonBody: pol }),

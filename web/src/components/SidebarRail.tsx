@@ -14,6 +14,7 @@ import {
 import type { AccountModalTab } from './AccountModal'
 import { LiquidCapsule } from './LiquidCapsule'
 import type { NavTab } from './TopBar'
+import { getGlobalRoleLabel } from '../lib/roles'
 import type { AgentView, User } from '../lib/types'
 
 interface Props {
@@ -28,8 +29,6 @@ interface Props {
   onOpenCommandPalette: () => void
   onOpenAccountModal: (initialTab?: AccountModalTab) => void
 }
-
-const ROLE_LABEL: Record<string, string> = { admin: '管理员', member: '成员', viewer: '只读' }
 
 export function SidebarRail({
   user,
@@ -176,7 +175,7 @@ export function SidebarRail({
         <button
           type="button"
           onClick={() => onOpenAccountModal('sessions')}
-          title={`${user.username} · ${ROLE_LABEL[user.role] || user.role} · ${linkTitle}`}
+          title={`${user.username} · ${getGlobalRoleLabel(user.role, true)} · ${linkTitle}`}
           aria-label="账户"
           className={`w-full flex items-center gap-2.5 rounded-xl text-[13px] hover:bg-surface-hover transition-colors ${
             collapsed ? 'justify-center h-10' : 'px-2 h-11'
@@ -194,7 +193,7 @@ export function SidebarRail({
           {!collapsed && (
             <span className="min-w-0 flex-1 text-left leading-tight">
               <span className="block truncate font-semibold text-fg">{user.username}</span>
-              <span className="block truncate text-[11px] text-fg-subtle">{ROLE_LABEL[user.role] || user.role}</span>
+              <span className="block truncate text-[11px] text-fg-subtle">{getGlobalRoleLabel(user.role)}</span>
             </span>
           )}
         </button>

@@ -37,6 +37,27 @@ const (
 	RoleNone Role = "none"
 )
 
+// DefaultProjectAccess controls whether a non-admin user automatically inherits
+// access to open (unrestricted) projects when no explicit project override exists.
+type DefaultProjectAccess string
+
+const (
+	DefaultAccessInherit DefaultProjectAccess = "inherit"
+	DefaultAccessDeny    DefaultProjectAccess = "deny"
+)
+
+// Valid reports whether d is a recognized default project access policy.
+func (d DefaultProjectAccess) Valid() bool {
+	return d == DefaultAccessInherit || d == DefaultAccessDeny
+}
+
+func normalizeDefaultProjectAccess(d DefaultProjectAccess) DefaultProjectAccess {
+	if d == DefaultAccessDeny {
+		return DefaultAccessDeny
+	}
+	return DefaultAccessInherit
+}
+
 // Valid reports whether r is a recognized role.
 func (r Role) Valid() bool {
 	return r == RoleAdmin || r == RoleMember || r == RoleViewer
@@ -75,17 +96,19 @@ func EffectiveRole(userRole, tokenRole Role) Role {
 
 // User is an account.
 type User struct {
-	ID                int64
-	Username          string
-	Role              Role
-	RawRole           Role // underlying DB role before per-token/per-project narrowing
-	TOTPEnabled       bool
-	Disabled          bool
-	DisabledAt        *time.Time
-	ActiveSessions    int
-	LastSeenAt        *time.Time
-	CreatedAt         time.Time
-	PasswordChangedAt time.Time
+	ID                   int64
+	Username             string
+	Role                 Role
+	RawRole              Role // underlying DB role before per-token/per-project narrowing
+	TOTPEnabled          bool
+	MustChangePassword   bool
+	DefaultProjectAccess DefaultProjectAccess
+	Disabled             bool
+	DisabledAt           *time.Time
+	ActiveSessions       int
+	LastSeenAt           *time.Time
+	CreatedAt            time.Time
+	PasswordChangedAt    time.Time
 }
 
 // Defaults for Options.
@@ -508,7 +531,7 @@ func (s *Service) EnsureAdminAccount(ctx context.Context, req AdminBootstrapRequ
 	}
 
 	changed := false
-	if u.Role != RoleAdmin || u.Disabled || !samePwd {
+	if u.Role != RoleAdmin || u.Disabled || !samePwd || u.MustChangePassword {
 		newHash := storedHash
 		if !samePwd {
 			newHash, err = s.hash(ctx, req.Password)
@@ -525,7 +548,7 @@ func (s *Service) EnsureAdminAccount(ctx context.Context, req AdminBootstrapRequ
 		ms := s.clock().UnixMilli()
 		if !samePwd {
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE auth_users SET password_hash = ?, role = ?, disabled_at = 0, updated_at = ?, password_changed_at = ? WHERE id = ?`,
+				`UPDATE auth_users SET password_hash = ?, role = ?, disabled_at = 0, must_change_password = 0, updated_at = ?, password_changed_at = ? WHERE id = ?`,
 				newHash, string(RoleAdmin), ms, ms, u.ID); err != nil {
 				return "", fmt.Errorf("auth: update admin password: %w", err)
 			}
@@ -534,7 +557,7 @@ func (s *Service) EnsureAdminAccount(ctx context.Context, req AdminBootstrapRequ
 			}
 		} else {
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE auth_users SET role = ?, disabled_at = 0, updated_at = ? WHERE id = ?`,
+				`UPDATE auth_users SET role = ?, disabled_at = 0, must_change_password = 0, updated_at = ? WHERE id = ?`,
 				string(RoleAdmin), ms, u.ID); err != nil {
 				return "", fmt.Errorf("auth: promote admin role: %w", err)
 			}
@@ -627,7 +650,15 @@ func (s *Service) createFirstAdmin(ctx context.Context, username, password strin
 	if err != nil {
 		return nil, fmt.Errorf("auth: create admin: %w", err)
 	}
-	return &User{ID: id, Username: username, Role: RoleAdmin, RawRole: RoleAdmin, CreatedAt: now, PasswordChangedAt: now}, nil
+	return &User{
+		ID:                   id,
+		Username:             username,
+		Role:                 RoleAdmin,
+		RawRole:              RoleAdmin,
+		DefaultProjectAccess: DefaultAccessInherit,
+		CreatedAt:            now,
+		PasswordChangedAt:    now,
+	}, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -814,7 +845,7 @@ func (s *Service) ChangePassword(ctx context.Context, req ChangePasswordRequest)
 	defer func() { _ = tx.Rollback() }()
 	ms := s.clock().UnixMilli()
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE auth_users SET password_hash = ?, updated_at = ?, password_changed_at = ? WHERE id = ?`,
+		`UPDATE auth_users SET password_hash = ?, must_change_password = 0, updated_at = ?, password_changed_at = ? WHERE id = ?`,
 		h, ms, ms, u.ID); err != nil {
 		return fmt.Errorf("auth: change password: %w", err)
 	}
@@ -833,6 +864,12 @@ func (s *Service) ChangePassword(ctx context.Context, req ChangePasswordRequest)
 // ResetPassword forcibly sets a user's password without checking the previous
 // password and revokes every active session of that user (for CLI recovery).
 func (s *Service) ResetPassword(ctx context.Context, username, newPassword string) error {
+	return s.ResetPasswordWithFlag(ctx, username, newPassword, false)
+}
+
+// ResetPasswordWithFlag forcibly sets a user's password, optionally marks
+// must_change_password for the next login, and revokes every active session.
+func (s *Service) ResetPasswordWithFlag(ctx context.Context, username, newPassword string, mustChange bool) error {
 	name, err := normalizeUsername(username)
 	if err != nil {
 		return err
@@ -859,9 +896,13 @@ func (s *Service) ResetPassword(ctx context.Context, username, newPassword strin
 		return fmt.Errorf("auth: load user: %w", err)
 	}
 	ms := s.clock().UnixMilli()
+	mustInt := 0
+	if mustChange {
+		mustInt = 1
+	}
 	if _, err := tx.ExecContext(ctx,
-		`UPDATE auth_users SET password_hash = ?, updated_at = ?, password_changed_at = ? WHERE id = ?`,
-		h, ms, ms, userID); err != nil {
+		`UPDATE auth_users SET password_hash = ?, must_change_password = ?, updated_at = ?, password_changed_at = ? WHERE id = ?`,
+		h, mustInt, ms, ms, userID); err != nil {
 		return fmt.Errorf("auth: reset password: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM auth_sessions WHERE user_id = ?`, userID); err != nil {
@@ -889,22 +930,26 @@ func (s *Service) userCount(ctx context.Context, q queryer) (int, error) {
 	return n, nil
 }
 
-const userColumns = `id, username, role, totp_enabled, disabled_at, created_at, password_changed_at, password_hash`
+const userColumns = `id, username, role, totp_enabled, must_change_password, default_project_access, disabled_at, created_at, password_changed_at, password_hash`
 
 func scanUser(row *sql.Row) (*User, string, error) {
 	var (
 		u                  User
-		role, hash         string
+		role, defAccess    string
+		hash               string
 		totpEnabled        int
+		mustChange         int
 		disabledAt         int64
 		created, pwChanged int64
 	)
-	if err := row.Scan(&u.ID, &u.Username, &role, &totpEnabled, &disabledAt, &created, &pwChanged, &hash); err != nil {
+	if err := row.Scan(&u.ID, &u.Username, &role, &totpEnabled, &mustChange, &defAccess, &disabledAt, &created, &pwChanged, &hash); err != nil {
 		return nil, "", err
 	}
 	u.Role = Role(role)
 	u.RawRole = u.Role
 	u.TOTPEnabled = totpEnabled != 0
+	u.MustChangePassword = mustChange != 0
+	u.DefaultProjectAccess = normalizeDefaultProjectAccess(DefaultProjectAccess(defAccess))
 	if disabledAt > 0 {
 		t := time.UnixMilli(disabledAt)
 		u.Disabled = true
@@ -951,16 +996,19 @@ func (s *Service) User(ctx context.Context, id int64) (*User, error) {
 
 // CreateUserRequest creates an additional user account (admin-only at the API layer).
 type CreateUserRequest struct {
-	Username string
-	Password string
-	Role     Role
+	Username             string
+	Password             string
+	Role                 Role
+	MustChangePassword   bool
+	DefaultProjectAccess DefaultProjectAccess
+	ProjectOverrides     map[string]Role
 }
 
 // ListUsers returns all accounts sorted by creation order, including live session metrics.
 func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
 	now := s.clock()
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT u.id, u.username, u.role, u.totp_enabled, u.disabled_at, u.created_at, u.password_changed_at,
+		`SELECT u.id, u.username, u.role, u.totp_enabled, u.must_change_password, u.default_project_access, u.disabled_at, u.created_at, u.password_changed_at,
 		        (SELECT COUNT(*) FROM auth_sessions s
 		          WHERE s.user_id = u.id AND s.expires_at > ? AND s.created_at > ? AND s.last_seen_at > ?) AS active_sessions,
 		        (SELECT MAX(s.last_seen_at) FROM auth_sessions s
@@ -977,18 +1025,21 @@ func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
 	for rows.Next() {
 		var (
 			u                  User
-			role               string
+			role, defAccess    string
 			totpEnabled        int
+			mustChange         int
 			disabledAt         int64
 			created, pwChanged int64
 			lastSeen           sql.NullInt64
 		)
-		if err := rows.Scan(&u.ID, &u.Username, &role, &totpEnabled, &disabledAt, &created, &pwChanged, &u.ActiveSessions, &lastSeen); err != nil {
+		if err := rows.Scan(&u.ID, &u.Username, &role, &totpEnabled, &mustChange, &defAccess, &disabledAt, &created, &pwChanged, &u.ActiveSessions, &lastSeen); err != nil {
 			return nil, fmt.Errorf("auth: scan user: %w", err)
 		}
 		u.Role = Role(role)
 		u.RawRole = u.Role
 		u.TOTPEnabled = totpEnabled != 0
+		u.MustChangePassword = mustChange != 0
+		u.DefaultProjectAccess = normalizeDefaultProjectAccess(DefaultProjectAccess(defAccess))
 		if disabledAt > 0 {
 			t := time.UnixMilli(disabledAt)
 			u.Disabled = true
@@ -1009,7 +1060,7 @@ func (s *Service) ListUsers(ctx context.Context) ([]User, error) {
 }
 
 // CreateUser creates a new user with the requested role (defaulting empty role
-// to RoleMember).
+// to RoleMember) and optional initial per-project overrides inside a single transaction.
 func (s *Service) CreateUser(ctx context.Context, req CreateUserRequest) (*User, error) {
 	role := req.Role
 	if role == "" {
@@ -1018,6 +1069,29 @@ func (s *Service) CreateUser(ctx context.Context, req CreateUserRequest) (*User,
 	if !role.Valid() {
 		return nil, ErrInvalidRole
 	}
+	defAccess := req.DefaultProjectAccess
+	if defAccess != "" && !defAccess.Valid() {
+		return nil, &Error{Code: CodeInvalidRole, Status: 400, Message: "默认项目访问策略只能是 inherit 或 deny"}
+	}
+	defAccess = normalizeDefaultProjectAccess(defAccess)
+	if role == RoleAdmin {
+		defAccess = DefaultAccessInherit
+	}
+
+	cleanedOverrides := make(map[string]Role)
+	if role != RoleAdmin {
+		for rawPID, r := range req.ProjectOverrides {
+			pid := strings.TrimSpace(rawPID)
+			if pid == "" || r == "" {
+				continue
+			}
+			if r != RoleMember && r != RoleViewer && r != RoleNone {
+				return nil, &Error{Code: CodeInvalidRole, Status: 400, Message: "项目成员权限只能设置为 member、viewer 或 none"}
+			}
+			cleanedOverrides[pid] = r
+		}
+	}
+
 	username, err := normalizeUsername(req.Username)
 	if err != nil {
 		return nil, err
@@ -1036,12 +1110,23 @@ func (s *Service) CreateUser(ctx context.Context, req CreateUserRequest) (*User,
 	if err != nil {
 		return nil, err
 	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("auth: create user: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	now := s.clock()
 	ms := now.UnixMilli()
-	res, err := s.db.ExecContext(ctx,
-		`INSERT INTO auth_users (username, password_hash, role, created_at, updated_at, password_changed_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		username, hash, string(role), ms, ms, ms)
+	mustInt := 0
+	if req.MustChangePassword {
+		mustInt = 1
+	}
+	res, err := tx.ExecContext(ctx,
+		`INSERT INTO auth_users (username, password_hash, role, must_change_password, default_project_access, created_at, updated_at, password_changed_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		username, hash, string(role), mustInt, string(defAccess), ms, ms, ms)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique") {
 			return nil, ErrUserExists
@@ -1052,13 +1137,25 @@ func (s *Service) CreateUser(ctx context.Context, req CreateUserRequest) (*User,
 	if err != nil {
 		return nil, fmt.Errorf("auth: create user: %w", err)
 	}
+	for pid, r := range cleanedOverrides {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO auth_project_members (project_id, user_id, role, updated_at) VALUES (?, ?, ?, ?)`,
+			pid, id, string(r), ms); err != nil {
+			return nil, fmt.Errorf("auth: save initial project override: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("auth: commit user: %w", err)
+	}
 	return &User{
-		ID:                id,
-		Username:          username,
-		Role:              role,
-		RawRole:           role,
-		CreatedAt:         now,
-		PasswordChangedAt: now,
+		ID:                   id,
+		Username:             username,
+		Role:                 role,
+		RawRole:              role,
+		MustChangePassword:   req.MustChangePassword,
+		DefaultProjectAccess: defAccess,
+		CreatedAt:            now,
+		PasswordChangedAt:    now,
 	}, nil
 }
 
@@ -1075,14 +1172,15 @@ func (s *Service) UpdateUserRole(ctx context.Context, userID int64, role Role) (
 
 	var (
 		u                  User
-		curRole            string
+		curRole, defAccess string
 		totpEnabled        int
+		mustChange         int
 		disabledAt         int64
 		created, pwChanged int64
 	)
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, username, role, totp_enabled, disabled_at, created_at, password_changed_at FROM auth_users WHERE id = ?`, userID).
-		Scan(&u.ID, &u.Username, &curRole, &totpEnabled, &disabledAt, &created, &pwChanged)
+		`SELECT id, username, role, totp_enabled, must_change_password, default_project_access, disabled_at, created_at, password_changed_at FROM auth_users WHERE id = ?`, userID).
+		Scan(&u.ID, &u.Username, &curRole, &totpEnabled, &mustChange, &defAccess, &disabledAt, &created, &pwChanged)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
@@ -1109,6 +1207,8 @@ func (s *Service) UpdateUserRole(ctx context.Context, userID int64, role Role) (
 	u.Role = role
 	u.RawRole = role
 	u.TOTPEnabled = totpEnabled != 0
+	u.MustChangePassword = mustChange != 0
+	u.DefaultProjectAccess = normalizeDefaultProjectAccess(DefaultProjectAccess(defAccess))
 	if disabledAt > 0 {
 		t := time.UnixMilli(disabledAt)
 		u.Disabled = true
@@ -1133,14 +1233,15 @@ func (s *Service) SetUserDisabled(ctx context.Context, actorUserID, targetUserID
 
 	var (
 		u                  User
-		role               string
+		role, defAccess    string
 		totpEnabled        int
+		mustChange         int
 		curDisabledAt      int64
 		created, pwChanged int64
 	)
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, username, role, totp_enabled, disabled_at, created_at, password_changed_at FROM auth_users WHERE id = ?`, targetUserID).
-		Scan(&u.ID, &u.Username, &role, &totpEnabled, &curDisabledAt, &created, &pwChanged)
+		`SELECT id, username, role, totp_enabled, must_change_password, default_project_access, disabled_at, created_at, password_changed_at FROM auth_users WHERE id = ?`, targetUserID).
+		Scan(&u.ID, &u.Username, &role, &totpEnabled, &mustChange, &defAccess, &curDisabledAt, &created, &pwChanged)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrUserNotFound
 	}
@@ -1176,6 +1277,8 @@ func (s *Service) SetUserDisabled(ctx context.Context, actorUserID, targetUserID
 	u.Role = Role(role)
 	u.RawRole = u.Role
 	u.TOTPEnabled = totpEnabled != 0
+	u.MustChangePassword = mustChange != 0
+	u.DefaultProjectAccess = normalizeDefaultProjectAccess(DefaultProjectAccess(defAccess))
 	if nextDisabledAt > 0 {
 		t := time.UnixMilli(nextDisabledAt)
 		u.Disabled = true
