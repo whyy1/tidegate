@@ -1,18 +1,20 @@
-FROM node:24-alpine AS web-builder
+FROM --platform=$BUILDPLATFORM node:24-alpine AS web-builder
 WORKDIR /src/web
 COPY web/package.json web/package-lock.json ./
 RUN npm ci
 COPY web/ ./
 RUN mkdir -p /src/internal/webui/dist && npm run build
 
-FROM golang:1.26-alpine AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.26-alpine AS go-builder
 WORKDIR /src
 ARG VERSION=0.1.0
+ARG TARGETOS
+ARG TARGETARCH
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web-builder /src/internal/webui/dist ./internal/webui/dist
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/tidegate ./cmd/tidegate
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/tidegate ./cmd/tidegate
 
 FROM alpine:3.21
 RUN apk add --no-cache ca-certificates tzdata \

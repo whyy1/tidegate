@@ -74,6 +74,23 @@ Remove-Item Env:TIDEGATE_ADMIN_PASSWORD
 - `7443/tcp`：集群双向 mTLS gRPC 通信端口。
 - `/data` 持久化卷：保存 SQLite 数据库（`tidegate.db`）、AES-256-GCM 主密钥（`master.key`）、项目 YAML 及自签名证书。
 
+### Docker Hub 多架构镜像与 CI 自动构建
+
+仓库内置 [release.yml](../.github/workflows/release.yml) 工作流，支持在 GitHub Actions 中使用原生交叉编译构建 `linux/amd64` + `linux/arm64` 双架构镜像并推送到你的 Docker Hub：
+
+1. 在 GitHub 仓库 **Settings → Secrets and variables → Actions** 中添加两项 Repository Secrets：
+   - `DOCKERHUB_USERNAME`：你的 Docker Hub 用户名（小写）。
+   - `DOCKERHUB_TOKEN`：Docker Hub **Access Token**（`Read & Write` 权限）。
+   - 如需自定义目标仓库名（默认 `<DOCKERHUB_USERNAME>/tidegate`），可在 **Variables** 中添加 `DOCKERHUB_IMAGE`。
+2. 推送 `main` 分支、打 `v*` 版本标签（如 `v0.1.0`）或在 Actions 页面手动点击 **Run workflow** 时，会自动构建推送 `:<version>` 与 `:latest` 多架构镜像；打 `v*` 标签或勾选 `publish_release` 时还会附带生成 GitHub Release 的 Windows `.zip` 与 Linux 静态包及 `SHA256SUMS.txt`。
+3. 在服务器直接拉取 Docker Hub 预构建镜像启动，只需覆盖 `TIDEGATE_IMAGE`：
+
+```bash
+export TIDEGATE_IMAGE="<你的DockerHub用户名>/tidegate:0.1.0"
+docker compose -f deploy/docker-compose.yml pull
+docker compose -f deploy/docker-compose.yml up -d
+```
+
 如需挂载正式 TLS 证书、固定主密钥或 Docker Secrets：
 
 ```yaml

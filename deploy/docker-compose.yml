@@ -3,7 +3,8 @@ services:
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-    image: tidegate:latest
+    # 默认使用本地构建的 tidegate:latest；拉取 Docker Hub 预构建多架构镜像时可设 TIDEGATE_IMAGE=<dockerhub-user>/tidegate:0.1.0
+    image: ${TIDEGATE_IMAGE:-tidegate:latest}
     container_name: tidegate-controller
     user: "65532:65532"
     read_only: true
@@ -75,7 +76,7 @@ services:
     restart: unless-stopped
 
   tidegate-agent:
-    image: tidegate:latest
+    image: ${TIDEGATE_IMAGE:-tidegate:latest}
     profiles:
       - cluster
     command: ["agent"]

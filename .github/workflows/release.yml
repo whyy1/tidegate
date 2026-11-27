@@ -1,0 +1,196 @@
+name: Build & Publish Multi-Arch Docker & Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '镜像与产物版本号（如 0.1.0）'
+        required: false
+        default: '0.1.0'
+        type: string
+      publish_release:
+        description: '同时创建或更新 GitHub Release 二进制附件'
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    name: Docker Hub Multi-Arch
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Resolve version & Docker Hub tags
+        id: meta
+        shell: bash
+        env:
+          DOCKERHUB_USERNAME: ${{ secrets.DOCKERHUB_USERNAME }}
+          DOCKERHUB_TOKEN: ${{ secrets.DOCKERHUB_TOKEN }}
+          DOCKERHUB_IMAGE: ${{ vars.DOCKERHUB_IMAGE }}
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DOCKERHUB_USERNAME}" || -z "${DOCKERHUB_TOKEN}" ]]; then
+            echo "::error::请在 GitHub 仓库 Settings -> Secrets and variables -> Actions 中配置 DOCKERHUB_USERNAME 与 DOCKERHUB_TOKEN"
+            exit 1
+          fi
+
+          if [[ -n "${DOCKERHUB_IMAGE}" ]]; then
+            IMAGE="${DOCKERHUB_IMAGE,,}"
+          else
+            IMAGE="${DOCKERHUB_USERNAME,,}/tidegate"
+          fi
+
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          elif [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && -n "${INPUT_VERSION}" ]]; then
+            VERSION="${INPUT_VERSION#v}"
+          else
+            VERSION="$(sed -n 's/.*var version = "\([^"]*\)".*/\1/p' cmd/tidegate/main.go | head -n 1)"
+            if [[ -z "${VERSION}" ]]; then
+              VERSION="0.1.0"
+            fi
+          fi
+
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "image=${IMAGE}" >> "${GITHUB_OUTPUT}"
+
+          {
+            echo "tags<<EOF"
+            echo "${IMAGE}:${VERSION}"
+            if [[ "${VERSION}" != *-* ]]; then
+              echo "${IMAGE}:latest"
+            fi
+            if [[ "${GITHUB_EVENT_NAME}" == "push" && "${GITHUB_REF}" == "refs/heads/main" ]]; then
+              echo "${IMAGE}:sha-${GITHUB_SHA::7}"
+            fi
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push multi-arch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  release-binaries:
+    name: GitHub Release Portable Binaries
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_release)
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: 'npm'
+          cache-dependency-path: web/package-lock.json
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Resolve release version & tag
+        id: rel
+        shell: bash
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            TAG="${GITHUB_REF_NAME}"
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            RAW="${INPUT_VERSION:-}"
+            if [[ -z "${RAW}" ]]; then
+              RAW="$(sed -n 's/.*var version = "\([^"]*\)".*/\1/p' cmd/tidegate/main.go | head -n 1)"
+            fi
+            RAW="${RAW:-0.1.0}"
+            VERSION="${RAW#v}"
+            TAG="v${VERSION}"
+          fi
+          echo "version=${VERSION}" >> "${GITHUB_OUTPUT}"
+          echo "tag=${TAG}" >> "${GITHUB_OUTPUT}"
+
+      - name: Build embedded Web UI
+        run: |
+          npm --prefix web ci
+          npm --prefix web run build
+
+      - name: Cross-compile portable binaries & checksums
+        shell: bash
+        env:
+          VERSION: ${{ steps.rel.outputs.version }}
+        run: |
+          set -euo pipefail
+          rm -rf dist
+          WIN_DIR="dist/tidegate-windows-amd64"
+          mkdir -p "${WIN_DIR}"
+          LDFLAGS="-s -w -X main.version=${VERSION}"
+
+          CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o "${WIN_DIR}/tidegate.exe" ./cmd/tidegate
+          touch "${WIN_DIR}/.portable"
+          printf '@echo off\r\nsetlocal\r\ncd /d "%%~dp0"\r\n"%%~dp0tidegate.exe" serve --tls-self-signed --data "%%~dp0data" %%*\r\n' > "${WIN_DIR}/start-portable.bat"
+
+          (cd dist && zip -r tidegate-windows-amd64.zip tidegate-windows-amd64)
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/tidegate-linux-amd64 ./cmd/tidegate
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="${LDFLAGS}" -o dist/tidegate-linux-arm64 ./cmd/tidegate
+
+          (
+            cd dist
+            sha256sum tidegate-windows-amd64.zip tidegate-windows-amd64/tidegate.exe tidegate-linux-amd64 tidegate-linux-arm64 > SHA256SUMS.txt
+          )
+          cat dist/SHA256SUMS.txt
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          if ! gh release view "${TAG}" >/dev/null 2>&1; then
+            gh release create "${TAG}" --title "Tidegate ${TAG}" --generate-notes
+          fi
+          gh release upload "${TAG}" \
+            dist/tidegate-windows-amd64.zip \
+            dist/tidegate-linux-amd64 \
+            dist/tidegate-linux-arm64 \
+            dist/SHA256SUMS.txt \
+            --clobber
